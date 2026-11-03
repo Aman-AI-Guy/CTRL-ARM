@@ -1,0 +1,32 @@
+[project]
+name = "trova"
+version = "0.1.0"
+description = "Find objects on a work table by words or photo with Grok, point at them with a robot arm, and check what changed (line clearance)."
+requires-python = ">=3.10"
+dependencies = [
+  "opencv-python>=4.8",
+  "numpy",
+  "fastapi",
+  "uvicorn[standard]",
+  "python-multipart",
+  "pillow",
+  "requests",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+robots = ["xarm-python-sdk"]   # UR and Elite need nothing: plain sockets
+
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["trova", "trova.arm"]
+
+[tool.setuptools.package-data]
+trova = ["static/*"]

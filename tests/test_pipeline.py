@@ -1,0 +1,430 @@
+"""Offline tests: no API key, no hardware. Run: .venv/bin/pytest -q"""
+
+import json
+import types
+
+import numpy as np
+import pytest
+
+from trova import changes as chg
+from trova.arm import FakeJointBackend, SimArm, TaughtGridArm
+from trova.boxes import Box
+from trova.calibration import Calibration, calibrate_aruco, make_marker_sheet
+from trova.finder import find
+from trova.grok import GrokClient
+from trova.proposals import find_blobs, is_occluded
+from trova.synthetic import SyntheticTable
+
+
+def matched(found, truth, thr=0.5):
+    return sum(any(b.iou(g) > thr for b in found) for g in truth)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_blobs_find_every_object(seed):
+    t = SyntheticTable(seed=seed)
+    f = t.render()
+    assert matched(find_blobs(f, t.empty()), t.truth()) == len(t.objects)
+    assert matched(find_blobs(f, None), t.truth()) >= len(t.objects) - 1   # estimated background
+
+
+def test_shadows_are_not_objects():
+    t = SyntheticTable(seed=3)
+    assert len(find_blobs(t.render(shadows=True), t.empty())) == len(t.objects)
+
+
+def test_hand_is_occlusion():
+    t = SyntheticTable(seed=1)
+    f = t.render(hand=True)
+    assert is_occluded(find_blobs(f, t.empty()), f.shape)
+
+
+@pytest.mark.parametrize("kind", ["add", "remove", "move"])
+def test_change_detection(kind):
+    t = SyntheticTable(seed=5)
+    empty = t.empty()
+    ref = t.render()
+    ref_boxes = find_blobs(ref, empty)
+    did = t.tamper(kind)
+    frames = [t.render() for _ in range(3)]
+    res = chg.check(None, ref, ref_boxes, frames, [find_blobs(f, empty) for f in frames], verify=False)
+    kinds = [c.kind for c in res.changes]
+    assert kinds == [did["kind"]], (kinds, did)
+
+
+def test_no_change_no_alarm_and_baseline_is_worse():
+    t = SyntheticTable(seed=2)
+    empty = t.empty()
+    ref = t.render()
+    frames = [t.render(noise=4) for _ in range(3)]
+    res = chg.check(None, ref, find_blobs(ref, empty), frames, [find_blobs(f, empty) for f in frames], verify=False)
+    assert res.changes == [] and res.line_clear
+    # the room gets 20% brighter and warmer (exposure / white-balance drift):
+    # the naive pixel diff fires, ours must report nothing
+    drift = np.array([1.12, 1.2, 1.25])
+    brighter = [np.clip(f.astype(np.float32) * drift, 0, 255).astype(np.uint8) for f in frames]
+    ours = chg.check(None, ref, find_blobs(ref, empty), brighter,
+                     [find_blobs(f, empty) for f in brighter], verify=False)
+    assert ours.changes == []
+    assert len(chg.naive_pixel_diff(ref, brighter[-1])) >= 1
+
+
+def test_mock_verify_labels_changes():
+    t = SyntheticTable(seed=4)
+    empty = t.empty()
+    ref = t.render()
+    rb = find_blobs(ref, empty)
+    t.tamper("add")
+    cur = t.render()
+    g = GrokClient(mock=True)
+    res = chg.check(g, ref, rb, [cur, cur], [find_blobs(cur, empty)] * 2)
+    assert len(res.changes) == 1 and res.changes[0].verified and not res.line_clear
+
+
+def test_calibration_roundtrip_and_aruco(tmp_path):
+    c = Calibration.default(1280, 800, 600, 400)
+    x, y = c.pixel_to_table(640, 400)
+    assert abs(x - 300) < 1e-6 and abs(y - 200) < 1e-6
+    u, v = c.table_to_pixel(150, 100)
+    assert abs(u - 320) < 1e-6 and abs(v - 200) < 1e-6
+    import cv2
+    paths = make_marker_sheet(tmp_path)
+    img = np.full((900, 1400, 3), 255, np.uint8)
+    spots = {0: (100, 100), 1: (1100, 100), 2: (1100, 600), 3: (100, 600)}
+    for i, (px, py) in spots.items():
+        m = cv2.imread(str(paths[i]))
+        m = cv2.resize(m, (200, 220))
+        img[py:py + 220, px:px + 200] = m
+    cal = calibrate_aruco(img, {0: (0, 0), 1: (500, 0), 2: (500, 250), 3: (0, 250)})
+    assert cal.error_mm() < 1.0
+
+
+def test_sim_arm_moves_and_stops():
+    import threading
+    import time
+    a = SimArm(speed_mm_s=2000)
+    assert a.point_at(100, 100)
+    assert a.status()["tip_mm"] == [100.0, 100.0]
+    slow = SimArm(speed_mm_s=50)
+    th = threading.Thread(target=slow.point_at, args=(0, 0))
+    th.start()
+    time.sleep(0.1)
+    slow.stop()
+    th.join(timeout=1)
+    assert slow.status()["state"] == "stopped"
+
+
+def test_taught_grid_interpolates(tmp_path):
+    be = FakeJointBackend()
+    arm = TaughtGridArm(be, tmp_path / "grid.json")
+    for x, y in [(0, 0), (100, 0), (0, 100), (100, 100)]:
+        be.q = [x * 2.0, y * 3.0]   # pretend joints are linear in table position
+        arm.record(x, y)
+    q = arm.joints_for(50, 50)
+    assert abs(q[0] - 100) < 1e-6 and abs(q[1] - 150) < 1e-6
+    assert arm.point_at(100, 0) and be.q == [200.0, 0.0]
+
+
+def test_mock_find_and_clarify():
+    t = SyntheticTable(seed=0, n_objects=0)
+    t.add_random(color="red", kind=("mug", "circle"))
+    t.add_random(color="blue", kind=("pen", "bar"))
+    t.add_random(color="blue", kind=("box", "rect"))
+    f = t.render()
+    boxes = find_blobs(f, t.empty())
+    g = GrokClient(mock=True)
+    r = find(g, f, boxes, "la tazza rossa")
+    assert r.status == "found" and r.box.iou(t.truth()[0]) > 0.5
+    r = find(g, f, boxes, "the blue one")
+    assert r.status == "clarify" and len(r.candidate_ids) == 2
+    r2 = find(g, f, boxes, "the blue one", history=[(r.clarifying_question, f"numero {r.candidate_ids[1]}")])
+    assert r2.status == "found" and r2.box.id == r.candidate_ids[1]
+    assert find(g, f, boxes, "una banana").status == "not_found"
+
+
+def test_real_api_request_shape(monkeypatch):
+    """The live path: request body format, retry without a rejected field, JSON parsing."""
+    sent = []
+
+    def fake_post(url, json=None, timeout=None, headers=None):
+        sent.append(json)
+        r = types.SimpleNamespace()
+        if len(sent) == 1:
+            r.status_code, r.text = 400, '{"error":"Argument not supported: reasoning"}'
+            return r
+        out = {"box_id": 2, "visible_but_unboxed": False, "candidate_ids": [2], "clarifying_question": None,
+               "label": "penna", "reason": "È una penna.", "confidence": 0.9}
+        r.status_code = 200
+        r.json = lambda: {"output": [{"type": "message", "content": [{"type": "output_text",
+                                                                      "text": __import__("json").dumps(out)}]}]}
+        return r
+
+    g = GrokClient(api_key="k", mock=False)
+    monkeypatch.setattr(g.session, "post", fake_post)
+    t = SyntheticTable(seed=1)
+    f = t.render()
+    boxes = find_blobs(f, t.empty())
+    res = find(g, f, boxes, "qualcosa per scrivere")
+    assert res.status == "found" and res.box.id == 2
+    body = sent[1]
+    assert "reasoning" not in body and body["store"] is False
+    assert body["text"]["format"]["type"] == "json_schema"
+    parts = body["input"][0]["content"]
+    assert [p["type"] for p in parts] == ["input_image", "input_image", "input_text"]
+    assert parts[0]["image_url"].startswith("data:image/jpeg;base64,")
+    assert g.stats()["dropped_fields"] == ["reasoning"]
+
+
+def test_server_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setenv("TROVA_DATA", str(tmp_path))
+    monkeypatch.setenv("TROVA_MOCK", "1")
+    monkeypatch.setenv("TROVA_CAMERA", "demo")
+    from fastapi.testclient import TestClient
+
+    from trova.config import load_settings
+    from trova.server import create_app
+    c = TestClient(create_app(load_settings()))
+    assert c.get("/").status_code == 200
+    assert c.get("/api/frame.jpg").headers["content-type"] == "image/jpeg"
+    assert c.post("/api/background", data={"mode": "capture"}).json()["background"]
+    st = c.get("/api/state").json()
+    assert st["mock"] and st["source"]["kind"] == "demo"
+    colors = [o.split()[0] for o in st["source"]["objects"]]
+    unique = next(col for col in colors if colors.count(col) == 1)
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
+    assert r["result"]["status"] == "found" and r["table_mm"] is not None
+    assert c.post("/api/judge", json={"kind": "find", "correct": True}).json()["find_ok"] == 1
+    assert (tmp_path / "cases" / "finds.jsonl").exists()
+    ref = c.post("/api/reference").json()
+    assert ref["n_objects"] == len(colors)
+    c.post("/api/demo/tamper", data={"kind": "add"})
+    chk = c.post("/api/changes").json()
+    assert not chk["result"]["line_clear"] and chk["result"]["changes"][0]["kind"] == "added"
+    assert c.post("/api/signoff", data={"operator": "Test", "decision": "approve"}).status_code == 200
+    rep = c.get("/api/report").text
+    assert "Line clearance record" in rep and "Signed off by Test" in rep
+    assert c.post("/api/arm/stop").status_code == 200
+    events = [json.loads(line)["kind"] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    for k in ("find", "grok_call", "reference", "change_check", "signoff"):
+        assert k in events
+
+
+def test_black_objects_survive_warm_light():
+    """Regression: hue of near-black pixels flips under a light change; must not become removed+added."""
+    t = SyntheticTable(seed=0, n_objects=0)
+    for col, kind in [("black", ("mug", "circle")), ("black", ("box", "rect")), ("red", ("pen", "bar"))]:
+        t.add_random(color=col, kind=kind)
+    e = t.empty()
+    ref = t.render()
+    frames = [np.clip(t.render().astype(np.float32) * np.array([0.95, 1.0, 1.08]), 0, 255).astype(np.uint8)
+              for _ in range(3)]
+    res = chg.check(None, ref, find_blobs(ref, e), frames, [find_blobs(f, e) for f in frames], verify=False)
+    assert res.changes == []
+
+
+def test_cartesian_arm_limits_stop_and_guarded_server(tmp_path, monkeypatch):
+    import threading
+    import time
+    from trova.arm import CartesianArm, FakeCartesian, Limits
+    arm = CartesianArm(FakeCartesian(), z_hover_mm=120, home_mm=(300, 0, 200),
+                       limits=Limits.parse("100,600,-300,300,50,400"), speed_mm_s=2000)
+    assert arm.point_at(400, 100) and [round(v) for v in arm.tcp_mm()] == [400, 100, 120]
+    assert not arm.point_at(900, 0) and arm.state == "refused" and "outside" in arm.last_error
+    slow = CartesianArm(FakeCartesian(), 120, None, None, speed_mm_s=20)
+    th = threading.Thread(target=slow.point_at, args=(500, 200))
+    th.start()
+    time.sleep(0.2)
+    slow.stop()
+    th.join(timeout=2)
+    assert slow.state == "stopped" and slow.tcp_mm()[0] < 450
+
+    monkeypatch.setenv("TROVA_DATA", str(tmp_path))
+    monkeypatch.setenv("TROVA_MOCK", "1")
+    monkeypatch.setenv("TROVA_CAMERA", "demo")
+    monkeypatch.setenv("TROVA_ARM", "cartesian:fake")
+    monkeypatch.setenv("TROVA_ARM_SPEED_MM_S", "5000")
+    from fastapi.testclient import TestClient
+
+    from trova.config import load_settings
+    from trova.server import create_app
+    app = create_app(load_settings())
+    c = TestClient(app)
+    c.post("/api/background", data={"mode": "capture"})
+    colors = [o.split()[0] for o in c.get("/api/state").json()["source"]["objects"]]
+    unique = next(col for col in colors if colors.count(col) == 1)
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
+    assert r["result"]["status"] == "found" and r["arm_blocked"]          # not calibrated in robot frame yet
+    assert c.post("/api/arm/point", json={"u": 100, "v": 100}).status_code == 409
+    fake = app.state.trova.arm.backend
+    for (u, v), (x, y) in zip([(0, 0), (1280, 0), (1280, 800), (0, 800)],
+                              [(200, -200), (520, -200), (520, 0), (200, 0)]):
+        fake.pos = [x, y, 0.0]
+        fake.target = list(fake.pos)
+        out = c.post("/api/calibration/arm_click", json={"u": u, "v": v}).json()
+    assert out["points"] == 4 and out["error_mm"] < 0.5
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
+    assert not r["arm_blocked"]
+    time.sleep(0.3)
+    tip = app.state.trova.arm.tcp_mm()
+    assert abs(tip[0] - r["table_mm"][0]) < 1 and abs(tip[1] - r["table_mm"][1]) < 1 and abs(tip[2] - 150) < 1
+    assert c.post("/api/calibration/marker_from_arm", data={"marker_id": 0}).json()["markers"]["0"]
+
+
+def _client(tmp_path, monkeypatch, **env):
+    monkeypatch.setenv("TROVA_DATA", str(tmp_path))
+    monkeypatch.setenv("TROVA_CAMERA", "demo")
+    monkeypatch.setenv("TROVA_MOCK", env.pop("mock", "1"))
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    from fastapi.testclient import TestClient
+
+    from trova.config import load_settings
+    from trova.server import create_app
+    app = create_app(load_settings())
+    return app, TestClient(app)
+
+
+def test_voice_config_confirmed_move_and_token(tmp_path, monkeypatch):
+    import time
+    app, c = _client(tmp_path, monkeypatch, XAI_API_KEY="k", mock="1")
+    cfg = c.get("/api/voice/config").json()
+    names = [t["name"] for t in cfg["session"]["tools"]]
+    assert {"find_object", "point_at_found", "check_changes", "stop_arm"} <= set(names)
+    assert "search_other_rooms" not in names                     # no dog configured
+    assert cfg["session"]["reasoning"] == {"effort": "none"} and "fermo" in cfg["stop_words"]
+    assert "English or Italian" in cfg["session"]["instructions"]
+    assert c.post("/api/voice/session").status_code == 400       # mock mode: no voice
+    c.post("/api/background", data={"mode": "capture"})
+    colors = [o.split()[0] for o in c.get("/api/state").json()["source"]["objects"]]
+    unique = next(col for col in colors if colors.count(col) == 1)
+    tip0 = app.state.trova.arm.status()["tip_mm"]
+    r = c.post("/api/find", data={"text": f"the {unique} one", "move": "false"}).json()
+    assert r["result"]["status"] == "found" and not r["moved"]
+    time.sleep(0.1)
+    assert app.state.trova.arm.status()["tip_mm"] == tip0       # waited for the yes
+    assert c.post("/api/arm/point_last").json()["ok"]
+    time.sleep(2.5)
+    assert app.state.trova.arm.status()["tip_mm"] == r["table_mm"]
+
+    import trova.voice as v
+    monkeypatch.setattr(v.requests, "post", lambda *a, **k: types.SimpleNamespace(
+        status_code=200, json=lambda: {"value": "eph-123", "expires_at": 99}))
+    app2, c2 = _client(tmp_path / "live", monkeypatch, XAI_API_KEY="k", mock="0")
+    assert c2.post("/api/voice/session").json()["token"] == "eph-123"
+
+
+def test_english_and_italian_mock_answers():
+    t = SyntheticTable(seed=0, n_objects=0)
+    t.add_random(color="blue", kind=("pen", "bar"))
+    t.add_random(color="blue", kind=("box", "rect"))
+    f = t.render()
+    boxes = find_blobs(f, t.empty())
+    g = GrokClient(mock=True)
+    assert find(g, f, boxes, "the blue one").clarifying_question.startswith("I see 2")
+    assert find(g, f, boxes, "quello blu").clarifying_question.startswith("Ne vedo 2")
+
+
+def test_optional_dog_search_sim(tmp_path, monkeypatch):
+    from trova.dog import load_route
+    route = load_route(tmp_path)
+    room1 = SyntheticTable(seed=route[0].seed, n_objects=6)
+    colours = [o.color for o in room1.objects]
+    app, c = _client(tmp_path, monkeypatch, TROVA_DOG="sim")
+    app.state.trova.dog.t = 0.01
+    st = c.get("/api/state").json()
+    assert st["dog"]["route"][0] == "Room 2, desk"
+    assert "search_other_rooms" in [t["name"] for t in c.get("/api/voice/config").json()["session"]["tools"]]
+    d = c.post("/api/dog/search", data={"description": f"the {colours[0]} thing"}).json()
+    assert d["status"] == "found" and d["spot"] == "Room 2, desk" and d["photo"]
+    d = c.post("/api/dog/search", data={"description": "a white unicorn"}).json()
+    assert d["status"] == "not_found" and len(d["visited"]) == 3
+
+
+@pytest.mark.parametrize("kind", ["ur", "elite"])
+def test_socket_cobot_drivers_against_fake_controller(kind):
+    import threading
+    import time
+    from fake_robot import FakeController
+    from trova.arm import CartesianArm
+    from trova.arm.elite import EliteBackend
+    from trova.arm.ur import URBackend
+    fc = FakeController()
+    Backend = URBackend if kind == "ur" else EliteBackend
+    be = Backend("127.0.0.1", script_port=fc.script, **({"rtde_port": fc.rtde} if kind == "ur" else {"rtsi_port": fc.rtde}))
+    t0 = time.time()
+    while time.time() - t0 < 3:
+        try:
+            be.tcp_mm()
+            break
+        except RuntimeError:
+            time.sleep(0.05)
+    assert [round(v) for v in be.tcp_mm()] == [300, 0, 200]
+    assert fc.protocols[0] == (2 if kind == "ur" else 1)
+    arm = CartesianArm(be, z_hover_mm=150, home_mm=None, limits=None, speed_mm_s=400)
+    assert arm.point_at(400, 100), arm.last_error
+    assert [round(v) for v in arm.tcp_mm()] == [400, 100, 150]
+    s = fc.scripts[-1]
+    if kind == "ur":
+        assert "movel(p[0.40000,0.10000,0.15000,3.14000," in s and s.startswith("def trova_move():\n  ")
+    else:
+        assert "movel([0.40000,0.10000,0.15000,3.14000," in s and "\tmovel" in s and "p[" not in s
+    slow = CartesianArm(be, 150, None, None, speed_mm_s=30)
+    th = threading.Thread(target=slow.point_at, args=(400, 300))
+    th.start()
+    time.sleep(1.0)
+    slow.stop()
+    th.join(timeout=3)
+    assert slow.state == "stopped" and ("stopl(2.0)" if kind == "ur" else "stopj(2.0)") in fc.scripts[-1]
+    y_stop = arm.tcp_mm()[1]
+    time.sleep(0.4)
+    assert abs(arm.tcp_mm()[1] - y_stop) < 1 and y_stop < 290          # it holds where it stopped
+    be.freedrive(True)
+    t0 = time.time()
+    while "freedrive_mode()" not in fc.scripts[-1] and time.time() - t0 < 2:   # server logs it on close
+        time.sleep(0.02)
+    assert "freedrive_mode()" in fc.scripts[-1] and "sync()" in fc.scripts[-1]
+    be.close()
+    fc.close()
+
+
+def test_xarm_driver_against_sdk_stub(monkeypatch):
+    import sys
+    import types as t
+    calls = []
+
+    class FakeXArm:
+        error_code = 0
+
+        def __init__(self, ip, is_radian=False):
+            self.pos, self.moving = [300.0, 0.0, 200.0, 180.0, 0.0, 15.0], False
+            calls.append(("init", ip, is_radian))
+
+        def __getattr__(self, name):
+            return lambda *a, **k: calls.append((name, a, k)) or 0
+
+        def get_position(self):
+            return 0, list(self.pos)
+
+        def get_is_moving(self):
+            return self.moving
+
+        def set_position(self, **k):
+            calls.append(("set_position", k))
+            self.pos[:3] = [k["x"], k["y"], k["z"]]
+            return 0
+
+    mod = t.ModuleType("xarm.wrapper")
+    mod.XArmAPI = FakeXArm
+    monkeypatch.setitem(sys.modules, "xarm", t.ModuleType("xarm"))
+    monkeypatch.setitem(sys.modules, "xarm.wrapper", mod)
+    from trova.arm import CartesianArm
+    from trova.arm.xarm import XArmBackend
+    be = XArmBackend("192.168.1.185")
+    arm = CartesianArm(be, z_hover_mm=150, home_mm=None, limits=None)
+    assert arm.point_at(350, -40)
+    sp = next(c for c in calls if c[0] == "set_position")[1]
+    assert (sp["roll"], sp["pitch"], sp["yaw"], sp["wait"]) == (180, 0, 15.0, False) and sp["z"] == 150
+    arm.stop()
+    names = [c[0] for c in calls]
+    i = len(names) - 1 - names[::-1].index("set_state")
+    assert names[i - 2:i + 1] == ["set_state", "motion_enable", "set_state"]   # stop then re-enable

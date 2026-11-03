@@ -1,0 +1,80 @@
+"""UFactory xArm5 via the official pure-Python SDK:  pip install xarm-python-sdk
+
+No pendant: release the e-stop, power the box, put the Mac on its subnet (often 192.168.1.x).
+xArm5 is 5-axis: Cartesian moves need roll=180, pitch=0; we keep the yaw we read at connect.
+Units: mm and degrees. set_position is non-blocking with wait=False and QUEUES commands, so we stop the
+queue before every new target. Stop = set_state(4) then re-enable (holds position, not a power cut).
+Set the tool tip with set_tcp_offset (or in UFACTORY Studio) before calibrating.
+"""
+
+from __future__ import annotations
+
+import threading
+
+from .cartesian import CartesianBackend
+
+
+class XArmBackend(CartesianBackend):
+    name = "xarm"
+
+    def __init__(self, ip: str, accel_mm_s2: float = 500.0):
+        if not ip:
+            raise ValueError("TROVA_ARM=xarm:<robot ip>")
+        try:
+            from xarm.wrapper import XArmAPI
+        except ImportError as e:
+            raise RuntimeError("pip install xarm-python-sdk") from e
+        self.lock = threading.Lock()
+        self.accel = accel_mm_s2
+        self.arm = XArmAPI(ip, is_radian=False)
+        self.clear_errors()
+        code, pose = self.arm.get_position()
+        self.yaw = pose[5] if code == 0 and pose else 0.0
+
+    def move_linear(self, x, y, z, speed_mm_s):
+        with self.lock:
+            if self.arm.get_is_moving():          # the SDK queues moves: flush before retargeting
+                self._halt()
+            code = self.arm.set_position(x=x, y=y, z=z, roll=180, pitch=0, yaw=self.yaw, speed=speed_mm_s,
+                                         mvacc=self.accel, wait=False)
+        if code != 0:
+            raise RuntimeError(f"xArm set_position returned code {code} (error {self.arm.error_code})")
+
+    def is_moving(self) -> bool:
+        with self.lock:
+            return bool(self.arm.get_is_moving())
+
+    def _halt(self):
+        self.arm.set_state(4)
+        self.arm.motion_enable(True)
+        self.arm.set_state(0)
+
+    def stop(self):
+        with self.lock:
+            self._halt()
+
+    def tcp_mm(self):
+        with self.lock:
+            code, pose = self.arm.get_position()
+        if code != 0:
+            raise RuntimeError(f"xArm get_position code {code}")
+        return tuple(pose[:3])
+
+    def freedrive(self, on: bool):
+        with self.lock:
+            self.arm.set_mode(2 if on else 0)
+            self.arm.set_state(0)
+
+    def clear_errors(self):
+        with self.lock:
+            self.arm.clean_error()
+            self.arm.clean_warn()
+            self.arm.motion_enable(True)
+            self.arm.set_mode(0)
+            self.arm.set_state(0)
+
+    def close(self):
+        try:
+            self.arm.disconnect()
+        except Exception:  # noqa: BLE001
+            pass

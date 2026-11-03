@@ -1,0 +1,102 @@
+# Trova
+
+**Tell it (type, talk, in English or Italian) or show it with a phone photo what you need. Trova finds it on the table and the robot arm points at it. Then it checks the table against a reference and reports what was added, removed or moved: line clearance you can talk to.**
+
+Concept video (101 s, made from this code): [`media/trova_concept.mp4`](media/trova_concept.mp4). Regenerate with `python media/make_concept_video.py`.
+
+Grok Hackathon at the Museum, Pavia, 4–5 November 2026. Track A, CTRL+F: SEA (SEA Vision).
+
+## What Grok does, and what plain code does
+
+| Step | Who | Why |
+|---|---|---|
+| Find every object on the table as a numbered box | Plain code (OpenCV, empty-table difference in LAB) | Exact, fast, no training, no GPL detector |
+| Understand the request ("qualcosa per scrivere", a phone photo, "the one left of the mug") and pick the box | **Grok 4.7 vision**, structured JSON | Language, function, relations and photo matching are the hard part |
+| Ask when two objects fit ("la penna blu o il pennarello nero?") | **Grok** | Never guess |
+| Box missed by the proposals | **Grok** direct box (fallback) | Recall |
+| Pixel → table millimetres → arm points | Plain code (homography, taught poses) | Must be exact and safe |
+| Candidate changes: added / removed / moved, held over 2 of 3 frames | Plain code (matching on position, colour, shape; lighting normalised) | Deterministic |
+| Reject false alarms (shadow, glare, hand), name each change, say why it matters | **Grok** | This is where false alarms die |
+| Line-clearance record with operator sign-off | Plain code + Grok summary | Draft EU GMP Annex 22: AI assists, a person decides |
+| Talk to it: understand, confirm before moving, report | **Grok Voice** (realtime, function calls) | Hands-free at the line, English or Italian |
+| "Stop" | Plain code: the browser halts the arm on the word in the live transcript, plus STOP button and space bar | Never waits for a model turn |
+| Optional: search other rooms with the robot dog | Fixed route (code) + **Grok vision** at each stop | The one case the arm cannot reach |
+
+## Run it
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+cp .env.example .env          # add XAI_API_KEY; without it everything runs in MOCK mode
+.venv/bin/python -m trova     # prints http://localhost:8000 and the phone URL
+.venv/bin/pytest -q           # offline tests, no key or hardware needed
+```
+
+**Mock mode** (no key) simulates Grok with a colour-word matcher so the whole flow, UI and tests work offline. It is plumbing only; never report mock numbers.
+
+The default `TROVA_CAMERA=demo` is a synthetic table with a "tamper" button (add / remove / move), so the change flow can be rehearsed with no camera.
+
+## Using it
+
+1. **Setup** (once per arm slot): pick the camera, press **Capture empty table** with the table empty and the arm parked, then **Calibrate (ArUco)** with the 4 printed markers (or **Calibrate by clicks**).
+2. **Find**: type or say a request, or tap **Photo of the object** on a phone. Grok answers, the arm points.
+3. **What changed**: **Save reference** → someone changes the table → **Check now** → **Sign off** → **Open record**.
+4. **Jury mode**: after each find press ✓ or ✗ (on ✗, click the right object or "not on the table"). Every judged find is saved as an eval case in `data/cases/finds.jsonl`.
+5. **Voice**: on the laptop (http://localhost:8000, the browser needs it for the mic) press **Talk to Trova** and speak. With "ask before the arm moves" on, it confirms first.
+6. **STOP** (top right, or the space bar, or saying "stop" / "fermo") halts the arm and holds position. Staff e-stop stays primary.
+7. **Optional dog**: `TROVA_DOG=sim`. When a find says "not on the table", **Send the dog** walks the route in `data/dog_route/` (photos named `01_Room 2 desk.jpg`, ...) and Grok checks each stop.
+
+## Hardware hookup
+
+- **Camera**: `TROVA_CAMERA=0|1|...` for a webcam or an iPhone via Continuity Camera (turn off Center Stage / Portrait / Studio Light in macOS Control Centre → Video Effects). Mount it rigid and top-down. A video file or a folder of photos also works (`TROVA_CAMERA=station.mp4`).
+- **Arm** (the event has UR3e, UR5e, UFactory xArm5, Elite CS63, CS66): `TROVA_ARM=ur:<ip>` | `xarm:<ip>` | `elite:<ip>`. UR and Elite use plain sockets (URScript / Elite script + RTDE/RTSI pose); xArm uses `pip install xarm-python-sdk`. On UR/Elite enable **Remote Control** on the pendant; on every arm set the **TCP offset** of the printed tool. Set `TROVA_ARM_Z_MM`, `TROVA_ARM_LIMITS` and `TROVA_ARM_HOME_MM` before the first move. Then **Freedrive on**, put the tip on the table at 4–6 spread points and click the tip each time (**Calibrate with arm**). A real arm refuses to move until this calibration exists. Rehearse everything with `TROVA_ARM=cartesian:fake`. Any other arm: `grid:` + taught poses ([`backend_template.py`](trova/arm/backend_template.py)).
+- **Markers**: Setup → **Print markers** (ArUco 4x4, ids 0–3). Put their measured centres in `data/markers.json` as `{"0": [x_mm, y_mm], ...}`; the default is the 4 corners of a `TROVA_TABLE_W_MM` × `TROVA_TABLE_H_MM` area.
+
+## Results
+
+Measured at the event on the station's real objects. Run `python eval/run_eval.py finds` and `python eval/run_eval.py changes --synthetic 60` / `--log`; tables land in `eval/results/`.
+
+`data/` is not committed (it fills up with images). Before the deadline, copy the final test set into the repo so the jury has "the data used": `data/cases/finds.jsonl` plus every image it references → `eval/data/`.
+
+| Metric | Trova | Baseline | Notes |
+|---|---|---|---|
+| Objects found, jury-style requests | _to measure_ | Grok with no candidate boxes; biggest object | `eval/run_eval.py finds` |
+| Correct "not found" on absent objects | _to measure_ | same | |
+| Median time to find (s) | _to measure_ | | |
+| False alarms in "what changed" | _to measure_ | raw pixel difference | lighting drift included |
+
+## Layout
+
+```
+trova/
+  proposals.py   object boxes from the empty-table difference, occlusion check
+  finder.py      Grok set-of-marks selection, clarification, direct-box fallback
+  changes.py     reference vs current matching, persistence, Grok verification, naive baseline
+  grok.py        xAI Responses API client (vision + JSON schema), retries, mock mode
+  calibration.py pixel <-> mm homography, ArUco, click calibration
+  arm/           ArmDriver interface; cartesian.py (limits, stop, reached-target check); ur.py, elite.py (sockets),
+                 xarm.py (SDK), rtde_reader.py; sim.py; taught_grid.py for any other arm
+  voice.py       Grok Voice session: instructions, tools, key terms, ephemeral token;  static/voice.js = browser client
+  dog.py         optional dog search (sim route + Grok at each stop); dog_go2.py = Go2 template
+  camera.py      webcam / Continuity Camera / video / photos / synthetic demo
+  audit.py       append-only event log (data/events.jsonl) + saved images (data/runs/)
+  server.py      FastAPI app;  static/index.html = the whole UI
+eval/run_eval.py measurements vs baselines
+experiments/grok_bbox_test.py   15-minute test: can Grok draw boxes on its own?
+tests/           offline tests
+```
+
+## Known limitations
+
+- Pale objects on a pale table can be missed by the proposals; Grok's direct-box fallback covers some of them. Tune `TROVA_BLOB_THRESH`.
+- Objects stacked or touching can merge into one box.
+- Pointing accuracy depends on the taught poses; it is interpolation, not inverse kinematics.
+- One fixed camera: objects hidden behind others are not seen.
+- Mock mode understands colour words only, and has no voice.
+- UR and Elite drivers are tested against a fake controller that speaks the same protocol, not yet on a real robot or simulator. xArm is tested against a stub of its SDK. Run each once with staff before the demo.
+- The dog driver for the real Go2 is a template; the sim replays photos of the route.
+
+## Prepared before the event, built at the event
+
+To be transparent with the jury: the software skeleton (everything in this repository at the first commit) was written the night before kick-off and runs on a synthetic table and a simulated arm. At the event we connect the real arm and camera, calibrate on the station, tune with real Grok calls on SEA Vision's objects, record the evaluation and add voice. The git history shows which is which.
+
+Licences: OpenCV (Apache-2.0), FastAPI (MIT). We avoided YOLO-World (GPL-3.0) on purpose so a company can reuse this.

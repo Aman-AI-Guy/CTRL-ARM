@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+data/*
+!data/.gitkeep
+experiments/*_grok.jpg
+experiments/webcam*.jpg
+.DS_Store
+*.egg-info/
