@@ -225,12 +225,17 @@ NO_CHANGE = {"en": "No differences from the reference.", "it": "Nessuna differen
 
 
 def verify_changes(grok: GrokClient, ref_frame: np.ndarray, cur_frame: np.ndarray, changes: list[Change],
-                   lang: str = "en") -> tuple[list, list, bool, str, float]:
+                   lang: str = "en", ref_names: dict[int, str] | None = None) -> tuple[list, list, bool, str, float]:
     lang = lang if lang in LANG_LINES else "en"
     language = LANG_LINES[lang]
     if not changes:
         return [], [], True, NO_CHANGE[lang], 0.0
-    listing = "\n".join(f"- C{c.id}: {c.kind}" for c in changes)
+    ref_names = ref_names or {}
+
+    def line(c):
+        was = ref_names.get(c.ref_box.id) if c.ref_box is not None else None
+        return f"- C{c.id}: {c.kind}" + (f" (in the reference this was: {was})" if was else "")
+    listing = "\n".join(line(c) for c in changes)
     pairs = [(f"C{c.id}", crop(ref_frame, c.ref_box) if c.ref_box else crop(ref_frame, c.cur_box),
               crop(cur_frame, c.cur_box) if c.cur_box else crop(cur_frame, c.ref_box)) for c in changes]
     images = [draw_changes(ref_frame, changes, "ref"), draw_changes(cur_frame, changes, "cur"), pair_sheet(pairs)]
@@ -251,7 +256,8 @@ def verify_changes(grok: GrokClient, ref_frame: np.ndarray, cur_frame: np.ndarra
 
 
 def check(grok: GrokClient | None, ref_frame: np.ndarray, ref_boxes: list[Box], frames: list[np.ndarray],
-          boxes_per_frame: list[list[Box]], occluded: bool = False, verify: bool = True, lang: str = "en") -> ChangeCheck:
+          boxes_per_frame: list[list[Box]], occluded: bool = False, verify: bool = True, lang: str = "en",
+          ref_names: dict[int, str] | None = None) -> ChangeCheck:
     t0 = time.perf_counter()
     per_frame = [diff_objects(ref_frame, ref_boxes, f, b) for f, b in zip(frames, boxes_per_frame)]
     cands = persistent_changes(per_frame)
@@ -259,7 +265,7 @@ def check(grok: GrokClient | None, ref_frame: np.ndarray, ref_boxes: list[Box], 
     out = ChangeCheck(occluded=occluded, frames_used=len(frames), current=cur)
     if verify and grok is not None:
         out.changes, out.filtered, out.line_clear, out.summary, out.grok_latency_s = verify_changes(
-            grok, ref_frame, cur, cands, lang)
+            grok, ref_frame, cur, cands, lang, ref_names)
     else:
         out.changes, out.line_clear = cands, not cands
         out.summary = f"{len(cands)} candidate change(s), not verified by Grok."

@@ -62,6 +62,11 @@ const TrovaVoice = (() => {
       return {status: r.status, label: r.label, reason: r.reason, clarifying_question: r.clarifying_question};
     },
     async point_at_found() { const d = await api('/api/arm/point_last'); return d.error ? {error: d.error} : {ok: true, label: d.label}; },
+    async describe_table() {
+      const d = await api('/api/inventory'); if (d.error) return {error: d.error};
+      h.onInventory && h.onInventory(d);
+      return {summary: d.summary, objects: d.objects.map(o => o.name)};
+    },
     async save_reference() { const d = await api('/api/reference'); h.onRefresh && h.onRefresh(); return d.error ? {error: d.error} : {saved: true, objects: d.n_objects}; },
     async check_changes() {
       const d = await api('/api/changes'); if (d.error) return {error: d.error};

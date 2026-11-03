@@ -428,3 +428,36 @@ def test_xarm_driver_against_sdk_stub(monkeypatch):
     names = [c[0] for c in calls]
     i = len(names) - 1 - names[::-1].index("set_state")
     assert names[i - 2:i + 1] == ["set_state", "motion_enable", "set_state"]   # stop then re-enable
+
+
+# ---------------------------------------------------------------- feature 1: inventory map
+def test_inventory_endpoint_and_names_flow_into_changes(tmp_path, monkeypatch):
+    app, c = _client(tmp_path, monkeypatch)
+    c.post("/api/background", data={"mode": "capture"})
+    n = len(c.get("/api/state").json()["source"]["objects"])
+    inv = c.post("/api/inventory").json()
+    assert len(inv["objects"]) == n and inv["summary"] and (tmp_path / inv["map"]).exists()
+    ref = c.post("/api/reference").json()
+    assert len(ref["names"]) == n                              # reference objects are named
+    assert "describe_table" in [t["name"] for t in c.get("/api/voice/config").json()["session"]["tools"]]
+
+
+def test_reference_names_reach_the_verify_prompt():
+    from trova.grok import GrokResult
+    prompts = []
+
+    class Capture:
+        mock = True
+
+        def json(self, *, name, prompt, schema, images=(), mock_context=None, **k):
+            prompts.append(prompt)
+            return GrokResult(data={"changes": [], "line_clear": False, "summary": "x"}, latency_s=0, model="m", mock=True)
+
+    t = SyntheticTable(seed=6)
+    e = t.empty()
+    ref = t.render()
+    rb = find_blobs(ref, e)
+    t.tamper("remove")
+    cur = t.render()
+    chg.check(Capture(), ref, rb, [cur, cur], [find_blobs(cur, e)] * 2, ref_names={b.id: f"thing {b.id}" for b in rb})
+    assert "in the reference this was: thing" in prompts[0]

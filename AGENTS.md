@@ -37,7 +37,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Grok Voice (realtime, confirm-before-move, stop word) | Done; config/token tested | `voice.py`, `static/voice.js` | Not yet heard live |
 | Optional dog room search (sim) | Done, tested | `dog.py` | Go2 driver is a template |
 | Jury mode + eval script | Done, tested | `server.py`, `eval/run_eval.py` | |
-| 1. Table inventory map ("what's on the table?") | Planned | | |
+| 1. Table inventory map ("what's on the table?") | Done, tested (mock) | `inventory.py`, `/api/inventory`, UI button, voice tool `describe_table` | Saving a reference now also names its objects (one extra Grok call; `describe=false` to skip), so changes say which object moved |
 | 2. Line-clearance zones | Planned | | |
 | 3. PDF clearance record | Planned | | |
 | 4. Full-screen jury scoreboard | Planned | | |
@@ -95,6 +95,7 @@ Calibration: `POST /api/calibration/aruco` · `/click` · `/arm_click` · `/mark
 Arm: `POST /api/arm/stop` · `/home` · `/point` · `/freedrive` · `/teach` · `/teach_home` · `/compliant`
 Jury: `POST /api/judge` · `/api/label`
 Voice: `GET /api/voice/config` · `POST /api/voice/session` · `/api/voice/log`
+Inventory: `POST /api/inventory` (names every object, labelled map image) · `POST /api/reference` takes `describe` (default true)
 Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` · `/api/demo/hand`
 
 ## Known gaps
@@ -105,5 +106,6 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 1: table inventory map; reference objects are named and the names reach the change-verification prompt.
 - 2026-11-04 AGENTS.md added as the shared state file; `docs/make_guide.py` added.
 - 2026-11-04 Initial skeleton pushed (commit a95e832): everything in the feature table marked Done.

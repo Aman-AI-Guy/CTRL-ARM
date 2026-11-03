@@ -28,6 +28,7 @@ from .config import Settings, load_settings
 from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
 from .finder import find as grok_find
+from .inventory import describe as describe_table, draw_map
 from .grok import GrokClient, GrokError
 from .marks import HIGHLIGHT, MARK, draw_marks, jpeg
 from .proposals import drop_occluders, find_blobs, is_occluded
@@ -102,6 +103,7 @@ class State:
         self.last_check: dict | None = None
         self.label_wait: dict | None = None
         self.pending_move: dict | None = None
+        self.inventory: dict | None = None
         self.metrics = {"find_ok": 0, "find_wrong": 0, "find_times": [], "checks": 0,
                         "check_ok": 0, "false_alarms": 0, "missed": 0}
         self.lock = threading.RLock()
@@ -213,7 +215,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "last_find": lf or None,
             "last_check": None if not st.last_check else {k: v for k, v in st.last_check.items() if k != "objects"},
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
-            "lang": st.s.lang, "voice_available": not st.grok.mock,
+            "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory,
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
             "metrics": {**{k: v for k, v in m.items() if k != "find_times"}, "find_judged": judged,
@@ -282,15 +284,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ what changed
     @app.post("/api/reference")
-    def api_reference():
+    def api_reference(describe: bool = Form(True)):
         with st.lock:
             st.clear_view()
             f, boxes, occl = st.capture_clean()
+            names, summary = {}, ""
+            if describe and boxes:   # name the objects once, so changes can say WHICH object moved or went missing
+                try:
+                    inv = describe_table(st.grok, f, boxes, st.s.lang)
+                    names, summary = inv.names(), inv.summary
+                except GrokError as e:
+                    st.audit.event("error", where="reference_inventory", error=str(e))
             path = st.audit.save_image("reference", draw_marks(f, boxes))
             st.reference = {"frame": f, "boxes": boxes, "time": time.strftime("%H:%M:%S"), "path": path,
-                            "raw": st.audit.save_image("reference_raw", f), "n_objects": len(boxes)}
-            st.audit.event("reference", n_objects=len(boxes), occluded=occl, path=path, raw=st.reference["raw"])
-            return {"n_objects": len(boxes), "path": path, "occluded": occl}
+                            "raw": st.audit.save_image("reference_raw", f), "n_objects": len(boxes), "names": names}
+            st.audit.event("reference", n_objects=len(boxes), occluded=occl, path=path, raw=st.reference["raw"],
+                           names=names)
+            return {"n_objects": len(boxes), "path": path, "occluded": occl, "names": names, "summary": summary}
 
     @app.post("/api/changes")
     def api_changes(verify: bool = Form(True)):
@@ -315,7 +325,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return JSONResponse({"error": "Hand or arm in view: clear the table view and retry"}, 409)
             try:
                 res = chg.check(st.grok if verify else None, st.reference["frame"], st.reference["boxes"],
-                                frames, per, occluded=occl and len(frames) < 3, lang=st.s.lang)
+                                frames, per, occluded=occl and len(frames) < 3, lang=st.s.lang,
+                                ref_names=st.reference.get("names"))
             except GrokError as e:
                 return fail(e, "changes")
             paths = {"ref_marked": st.audit.save_image("ref_changes", res.ref_marked),
@@ -607,6 +618,22 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     def _save_case(case: dict) -> None:
         with (st.cases_dir / "finds.jsonl").open("a") as f:
             f.write(json.dumps(case, ensure_ascii=False) + "\n")
+
+    # ------------------------------------------------------------------ feature 1: inventory map
+    @app.post("/api/inventory")
+    def api_inventory():
+        with st.lock:
+            st.clear_view()
+            f, boxes, occl = st.capture_clean(attempts=3)
+            try:
+                inv = describe_table(st.grok, f, boxes, st.s.lang)
+            except GrokError as e:
+                return fail(e, "inventory")
+            out = inv.as_dict() | {"map": st.audit.save_image("inventory_map", draw_map(f, boxes, inv)),
+                                   "n_objects": len(boxes), "occluded": occl}
+            st.inventory = out
+            st.audit.event("inventory", **{k: v for k, v in out.items()})
+            return out
 
     # ------------------------------------------------------------------ voice (Grok Voice realtime)
     @app.post("/api/arm/point_last")

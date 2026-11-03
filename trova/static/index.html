@@ -68,7 +68,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <div class="muted">Ask in English or Italian, type, talk, or show a photo.</div>
     <div class="row" style="margin-top:8px"><input type="text" id="q" placeholder="e.g. something to write with · qualcosa per scrivere" onkeydown="if(event.key==='Enter')doFind()"></div>
     <div class="row"><label class="file">📷 Photo of the object<input type="file" accept="image/*" capture="environment" id="photo" onchange="photoChosen()"></label>
-      <button class="primary" id="findbtn" onclick="doFind()">Find</button><span class="muted" id="photoname"></span></div>
+      <button class="primary" id="findbtn" onclick="doFind()">Find</button><button onclick="doInventory()">What's on the table?</button><span class="muted" id="photoname"></span></div>
     <div class="row"><button id="voicebtn" onclick="toggleVoice()">🎤 Talk to Trova</button>
       <label class="muted"><input type="checkbox" id="confirm" checked> ask before the arm moves</label>
       <span class="badge" id="vstatus">voice off</span></div>
@@ -182,6 +182,18 @@ function showCheck(d) {
   }
 }
 
+// ---- feature 1: inventory map
+async function doInventory() {
+  const el = $('findres'); el.className = 'result show'; el.innerHTML = 'Naming every object…';
+  try { showInventory(await call('/api/inventory', {method: 'POST'})); } catch (e) {}
+}
+function showInventory(d) {
+  const el = $('findres'); el.className = 'result show st-found';
+  el.innerHTML = `<div class="big">${esc(d.summary)}</div><ul class="changes">` +
+    d.objects.map(o => `<li><b>${o.box_id}</b> ${esc(o.name)} <span class="muted">· ${esc(o.category)} · ${esc(o.note)}</span></li>`).join('') +
+    `</ul><div class="muted">Grok ${d.latency_s}s</div><div class="thumbs"><a href="/files/${d.map}" target="_blank"><img src="/files/${d.map}"></a></div>`;
+}
+
 // ---- voice (Grok Voice realtime)
 function vline(who, text, final) {
   const box = $('vlog'); box.style.display = 'block';
@@ -195,6 +207,7 @@ async function toggleVoice() {
   $('voicebtn').textContent = '⏹ Stop talking';
   const ok = await TrovaVoice.start({onStatus: s => $('vstatus').textContent = s, onLine: vline,
     onFind: d => { showFind(d); refresh(); }, onCheck: d => { showCheck(d); refresh(); }, onRefresh: refresh,
+    onInventory: d => showInventory(d),
     onTool: () => refresh()}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
   if (!ok) $('voicebtn').textContent = '🎤 Talk to Trova';
 }

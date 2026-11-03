@@ -40,6 +40,7 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
   If the result is "clarify", ask its clarifying_question and pass the answer to answer_clarification.
   If it is "not_found", say so plainly; never guess.
 - {move}
+- describe_table: "what's on the table?", "cosa c'è sul tavolo?". Read the summary, then list names only if asked.
 - save_reference: when they say the table is in its approved / clean state.
 - check_changes: "what changed?", "is the line clear?". Say how many changes, then each one in a few words, highest risk first.
 - stop_arm: whenever they say stop, wait, fermo, basta. The app also stops the arm on its own when it hears these words.
@@ -60,6 +61,9 @@ def tools(dog: bool) -> list[dict]:
          "parameters": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}},
         {"type": "function", "name": "point_at_found",
          "description": "Move the arm tip above the object found by the last find_object.",
+         "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "describe_table",
+         "description": "Name every object on the table and summarise it in one sentence.",
          "parameters": {"type": "object", "properties": {}}},
         {"type": "function", "name": "save_reference",
          "description": "Save the current table as the approved reference state.",
