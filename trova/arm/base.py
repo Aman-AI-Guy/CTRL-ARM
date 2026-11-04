@@ -5,7 +5,7 @@ stop() is called from another thread, so stop() must interrupt a motion in progr
 Stop means HOLD the current position, never torque off (a torque-off arm drops).
 
 STOP LATCHES: after stop(), every motion call refuses (returns False) until ready() is called.
-Only the server calls ready(), once per new user command, under its arm lock; a driver never
+Only an explicit operator software reset calls ready(), under the server arm lock; a driver never
 clears the stop by itself, so a STOP pressed between two moves (a tour, a tray lift) is never lost.
 """
 
@@ -30,10 +30,15 @@ class ArmDriver(ABC):
         """Halt now and hold position. Safe to call at any time, from any thread."""
 
     def ready(self) -> None:
-        """Accept motion again after a STOP. Called by the server at the start of a new command."""
+        """Clear the driver event only, after an explicit operator reset. Does not recover controller stops."""
         ev = getattr(self, "_stop", None)
         if ev is not None:
             ev.clear()
+
+    def latch_stop(self) -> None:
+        """Disarm locally on startup, without enabling/recovering or sending any controller command."""
+        self._stop.set()
+        self.state = "stopped"
 
     @abstractmethod
     def status(self) -> dict:

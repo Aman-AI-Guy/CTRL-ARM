@@ -412,6 +412,9 @@ def test_xarm_driver_against_sdk_stub(monkeypatch):
         def get_is_moving(self):
             return self.moving
 
+        def get_state(self):
+            return 0, 1 if self.moving else 2
+
         def set_position(self, **k):
             calls.append(("set_position", k))
             self.pos[:3] = [k["x"], k["y"], k["z"]]
@@ -431,7 +434,8 @@ def test_xarm_driver_against_sdk_stub(monkeypatch):
     arm.stop()
     names = [c[0] for c in calls]
     i = len(names) - 1 - names[::-1].index("set_state")
-    assert names[i - 2:i + 1] == ["set_state", "motion_enable", "set_state"]   # stop then re-enable
+    assert names[i] == "set_state" and calls[i][1] == (4,)
+    assert "motion_enable" not in names                         # STOP never enables/restarts the controller
 
 
 # ---------------------------------------------------------------- feature 1: inventory map
