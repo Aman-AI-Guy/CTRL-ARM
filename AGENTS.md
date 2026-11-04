@@ -41,7 +41,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | 2. Line-clearance zones | Done, tested (mock) | `zones.py`, `/api/zones*`, UI "Draw a zone" | Rules: `empty` or `allowed` (list). Evaluated in every change check; a violation makes the line NOT clear. Zones are in image pixels: redraw if the camera moves |
 | 3. PDF clearance record | Done, tested | `record_pdf.py`, `GET /api/report.pdf`, UI "Download PDF" | Verdict, images, changes, zones, rejected candidates, sign-off, audit id. Copy saved in `data/records/`. Uses reportlab (now a dependency) |
 | 4. Full-screen jury scoreboard | Done, tested | `static/jury.html`, `GET /jury`, `POST /api/metrics/reset` | Found x/N, median find time, false alarms, checks; latest request + verdict; live camera. Reset before the demo. Link "scoreboard" in the UI header |
-| 5. Failure log (cause of each wrong find) | Planned | | |
+| 5. Failure log (cause of each wrong find) | Done, tested | `failures.py`, `/api/label`, `/api/judge` (cause), `GET /api/failures`, `run_eval.py failures` | Causes: missed_box (P2), wrong_pick / said_not_found / picked_absent_object / asked_unnecessarily / slow (P3), arm_missed (P1). Stored in `data/cases/failures.jsonl`. Clicking outside every box now records missed_box instead of an error |
 | 6. "Point at all the X" | Planned | | |
 | 7. Tray lift with the fork (experimental) | Planned | | |
 
@@ -99,6 +99,7 @@ Inventory: `POST /api/inventory` (names every object, labelled map image) · `PO
 Zones: `GET /api/zones` · `POST /api/zones/point` · `/api/zones/finish` (name, rule, allowed) · `/api/zones/cancel` · `DELETE /api/zones/{name}`
 Record: `GET /api/report.pdf` (PDF of the last check; copy in data/records/)
 Jury: `GET /jury` (scoreboard page) · `POST /api/metrics/reset`
+Failures: `GET /api/failures` (counts by cause, owner, next fix) · `POST /api/judge` takes `cause` (arm_missed)
 Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` · `/api/demo/hand`
 
 ## Known gaps
@@ -109,6 +110,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 5: failure log with automatic cause and owner per wrong find; failures report in run_eval.py; UI 'arm missed' button.
 - 2026-11-04 Feature 4: full-screen jury scoreboard at /jury; median find time in state metrics.
 - 2026-11-04 Feature 3: PDF line-clearance record; reportlab added to dependencies.
 - 2026-11-04 Feature 2: line-clearance zones (empty / allowed items), shown on the live view, in the check result and in the record. Fake-controller test race fixed (wait_for).

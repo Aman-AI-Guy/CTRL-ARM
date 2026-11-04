@@ -75,7 +75,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
       <span class="badge" id="vstatus">voice off</span></div>
     <div id="vlog" class="muted" style="display:none;margin-top:8px;max-height:150px;overflow:auto;font-size:14px"></div>
     <div id="findres" class="result"></div>
-    <div class="row" style="margin-top:10px"><span class="muted">Jury:</span><button onclick="judge(true)">✓ correct</button><button onclick="judge(false)">✗ wrong</button><button id="absentbtn" style="display:none" onclick="label({absent:true})">not on the table</button></div>
+    <div class="row" style="margin-top:10px"><span class="muted">Jury:</span><button onclick="judge(true)">✓ correct</button><button onclick="judge(false)">✗ wrong</button><button onclick="armMissed()">arm missed</button><button id="absentbtn" style="display:none" onclick="label({absent:true})">not on the table</button></div>
   </div>
 
   <div class="panel">
@@ -97,6 +97,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
   <div class="panel"><h2>Score</h2>
     <div class="score"><div><b id="m-found">0/0</b>found</div><div><b id="m-time">–</b>avg find (s)</div><div><b id="m-fa">0</b>false alarms</div></div>
     <p class="muted" id="m-more"></p>
+    <p class="muted" id="m-fail"></p>
   </div>
 </section>
 </main>
@@ -164,6 +165,7 @@ function showFind(d) {
   el.innerHTML = h;
 }
 
+async function armMissed() { try { await json('/api/judge', {kind: 'find', correct: false, cause: 'arm_missed'}); } catch (e) {} }
 async function judge(ok) { try { await json('/api/judge', {kind: 'find', correct: ok}); } catch (e) {} }
 async function label(obj) { try { await json('/api/label', obj); } catch (e) {} }
 async function judgeCheck(ok) { await json('/api/judge', {kind: 'change', correct: ok, false_alarms: +$('fa').value || 0, missed: +$('miss').value || 0}); $('fa').value = 0; $('miss').value = 0; }
@@ -266,9 +268,11 @@ async function refresh() {
   const M = S.metrics; $('m-found').textContent = `${M.find_ok}/${M.find_judged}`; $('m-time').textContent = M.avg_find_s ?? '–'; $('m-fa').textContent = M.false_alarms;
   $('m-more').textContent = `checks ${M.check_ok}/${M.checks} right · missed ${M.missed} · Grok calls ${S.grok.calls}, avg ${S.grok.avg_latency_s ?? '–'}s` + (S.grok.dropped_fields.length ? ' · API rejected: ' + S.grok.dropped_fields.join(', ') : '');
   $('absentbtn').style.display = S.label_wait ? 'inline-block' : 'none';
-  if (S.label_wait) { const el = $('clickmode'); el.className = 'mode on'; el.textContent = 'Wrong find: click the object that should have been found, or press "not on the table".'; }
+  if (S.label_wait) { const el = $('clickmode'); el.className = 'mode on'; el.textContent = 'Wrong find: click the object that should have been found (even if it has no box), or press "not on the table".'; }
   else if (!clickMode) $('clickmode').className = 'mode';
   showDog();
+  try { const fl = await (await fetch('/api/failures')).json();
+    $('m-fail').textContent = fl.total ? 'Failures: ' + fl.by_cause.map(c => `${c.cause.replace(/_/g, ' ')} ${c.count} (${c.owner})`).join(' · ') : ''; } catch (e) {}
   try { const z = await (await fetch('/api/zones')).json(); $('zoneinfo').textContent = z.zones.length ? z.zones.map(x => x.name).join(', ') : (z.draft.length ? z.draft.length + ' corners' : 'no zones'); } catch (e) {}
   const log = await (await fetch('/api/log?n=30')).json();
   $('log').innerHTML = log.map(e => `<div>${esc(e.time.slice(11))} <b>${esc(e.kind)}</b> ${esc(e.kind === 'find' ? (e.request || '[photo]') + ' → ' + e.result.status + ' ' + (e.result.label || '') : e.kind === 'grok_call' ? e.name + ' ' + e.latency_s + 's' : e.kind === 'change_check' ? e.result.changes.length + ' changes' : e.error || '')}</div>`).join('');

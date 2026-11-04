@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
 from .finder import find as grok_find
 from .inventory import describe as describe_table, draw_map
+from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
@@ -36,6 +38,7 @@ from .marks import HIGHLIGHT, MARK, draw_marks, jpeg
 from .proposals import drop_occluders, find_blobs, is_occluded
 
 STATIC = Path(__file__).parent / "static"
+SLOW_S = float(os.getenv("TROVA_SLOW_S", "8"))
 
 
 def decode_upload(data: bytes) -> np.ndarray:
@@ -72,6 +75,7 @@ class Point(BaseModel):
 class Judge(BaseModel):
     kind: str = "find"
     correct: bool = True
+    cause: str = ""          # e.g. "arm_missed": Grok was right but the arm pointed at the wrong spot
     false_alarms: int = 0
     missed: int = 0
     note: str = ""
@@ -643,9 +647,15 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                     "absent": j.correct and not lf["result"]["box"], "note": j.note}
             if j.correct:
                 _save_case(case)
+                if lf.get("total_s", 0) > SLOW_S:
+                    fail_log.record(st.cases_dir / "failures.jsonl", lf, "slow", SLOW_S)
+            elif j.cause == "arm_missed":          # the pick was right; the arm was not: no label needed
+                case["expected"] = lf["result"]["box"]["box"] if lf["result"]["box"] else None
+                _save_case(case)
+                fail_log.record(st.cases_dir / "failures.jsonl", lf, "arm_missed", SLOW_S)
             else:
                 st.label_wait = case   # next: click the right object, or "not on the table"
-            st.audit.event("judge", target=lf["event_id"], correct=j.correct, note=j.note)
+            st.audit.event("judge", target=lf["event_id"], correct=j.correct, note=j.note, cause=j.cause)
         else:
             st.metrics["check_ok"] += int(j.correct)
             st.metrics["false_alarms"] += j.false_alarms
@@ -659,17 +669,30 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if not st.label_wait:
             raise HTTPException(400, "Nothing waiting for a label")
         case = st.label_wait
+        unboxed = False
         if lb.absent:
             case["expected"], case["absent"] = None, True
         else:
             inside = [b for b in (st.last_find or {}).get("boxes", [])
                       if Box.from_list(b["box"]).contains(lb.u, lb.v)]
-            if not inside:
-                raise HTTPException(400, "No candidate box there; click inside a numbered box")
-            case["expected"] = min(inside, key=lambda b: Box.from_list(b["box"]).area)["box"]
-        _save_case(case)
+            if inside:
+                case["expected"] = min(inside, key=lambda b: Box.from_list(b["box"]).area)["box"]
+            else:   # the object the judge meant never got a box: a proposals problem, not a Grok one
+                unboxed = True
+                case["expected"], case["expected_point"] = None, [lb.u, lb.v]
+        cause = fail_log.classify(st.last_find, case.get("expected"), bool(case.get("absent")), unboxed)
+        case["cause"] = cause
+        if not unboxed:
+            _save_case(case)
+        entry = fail_log.record(st.cases_dir / "failures.jsonl", st.last_find, cause, SLOW_S,
+                                {"expected_point": case.get("expected_point")})
+        st.audit.event("failure", **entry)
         st.label_wait = None
-        return case
+        return case | {"failure": entry}
+
+    @app.get("/api/failures")
+    def api_failures():
+        return fail_log.summary(st.cases_dir / "failures.jsonl")
 
     def _save_case(case: dict) -> None:
         with (st.cases_dir / "finds.jsonl").open("a") as f:

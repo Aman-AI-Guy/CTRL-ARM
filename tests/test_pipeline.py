@@ -520,3 +520,37 @@ def test_jury_scoreboard_and_reset(tmp_path, monkeypatch):
     c.post("/api/metrics/reset")
     m = c.get("/api/state").json()["metrics"]
     assert m["find_ok"] == 0 and m["median_find_s"] is None
+
+
+# ---------------------------------------------------------------- feature 5: failure log
+def test_failure_causes_and_summary(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    app, c = _client(tmp_path, monkeypatch)
+    c.post("/api/background", data={"mode": "capture"})
+    st = c.get("/api/state").json()
+    colors = [o.split()[0] for o in st["source"]["objects"]]
+    unique = next(col for col in colors if colors.count(col) == 1)
+    # 1) Grok picks a box, the judge points at a different boxed object -> wrong_pick
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
+    other = next(b for b in r["boxes"] if b["box"] != r["result"]["box"]["box"])
+    c.post("/api/judge", json={"kind": "find", "correct": False})
+    out = c.post("/api/label", json={"u": other["center"][0], "v": other["center"][1]}).json()
+    assert out["cause"] == "wrong_pick" and out["failure"]["owner"].startswith("P3")
+    # 2) the judge points at empty table -> the object had no box -> missed_box (P2)
+    c.post("/api/find", data={"text": f"the {unique} one"})
+    c.post("/api/judge", json={"kind": "find", "correct": False})
+    assert c.post("/api/label", json={"u": 2, "v": 2}).json()["cause"] == "missed_box"
+    # 3) found something, but the object is not on the table -> picked_absent_object
+    c.post("/api/find", data={"text": f"the {unique} one"})
+    c.post("/api/judge", json={"kind": "find", "correct": False})
+    assert c.post("/api/label", json={"absent": True}).json()["cause"] == "picked_absent_object"
+    # 4) right pick, arm off target -> arm_missed (P1), no label needed
+    c.post("/api/find", data={"text": f"the {unique} one"})
+    c.post("/api/judge", json={"kind": "find", "correct": False, "cause": "arm_missed"})
+    sm = c.get("/api/failures").json()
+    assert sm["total"] == 4 and {x["cause"] for x in sm["by_cause"]} >= {"wrong_pick", "missed_box",
+                                                                          "picked_absent_object", "arm_missed"}
+    env = {**__import__("os").environ, "TROVA_DATA": str(tmp_path), "TROVA_MOCK": "1"}
+    rep = subprocess.run([sys.executable, "eval/run_eval.py", "failures"], capture_output=True, text=True, env=env)
+    assert "wrong pick" in rep.stdout and "P1 arm" in rep.stdout

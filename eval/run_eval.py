@@ -14,6 +14,9 @@ What changed (the jury metric: false alarms):
                    matched  = our object matching, no Grok
                    grok     = our matching + Grok verification (live only when XAI_API_KEY is set)
 
+Failures (why finds went wrong, who fixes it):
+    python eval/run_eval.py failures                    # from jury mode: wrong -> show the right object
+
 Without XAI_API_KEY the Grok parts run in mock mode: the numbers then test the plumbing only.
 """
 
@@ -187,7 +190,7 @@ def run_changes_log(data_dir: Path) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("what", choices=["finds", "changes"])
+    ap.add_argument("what", choices=["finds", "changes", "failures"])
     ap.add_argument("--synthetic", type=int, default=0, help="generate N synthetic cases instead of recorded ones")
     ap.add_argument("--log", action="store_true", help="changes: summarise jury-judged checks")
     ap.add_argument("--modes", default="", help="finds: comma list of som,direct,largest")
@@ -195,7 +198,15 @@ def main():
     s = load_settings()
     grok = GrokClient(s.xai_api_key, s.model, s.effort, s.mock)
     label = "MOCK Grok (plumbing only)" if grok.mock else f"live {s.model}, effort {s.effort or 'default'}"
-    if args.what == "finds":
+    if args.what == "failures":
+        from trova.failures import summary
+        sm = summary(s.data_dir / "cases" / "failures.jsonl")
+        rows = "\n".join(f"| {c['cause'].replace('_', ' ')} | {c['count']} | {c['owner']} | {c['fix']} | "
+                         f"{'; '.join(e or '[photo]' for e in c['examples'])} |" for c in sm["by_cause"])
+        title = f"Failure analysis: {sm['total']} wrong or slow finds, by cause"
+        table = ("| Cause | Count | Owner | Next fix | Example requests |\n|---|---|---|---|---|\n" + rows) if rows \
+            else "No failures recorded yet (press wrong in jury mode, then show the right object)."
+    elif args.what == "finds":
         cases = synthetic_find_cases(args.synthetic) if args.synthetic else load_find_cases(s.data_dir)
         modes = [m for m in (args.modes or "som,direct,largest").split(",") if m]
         title = f"Finds: {len(cases)} {'synthetic' if args.synthetic else 'recorded'} requests, {label}"
