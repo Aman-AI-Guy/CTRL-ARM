@@ -42,7 +42,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | 3. PDF clearance record | Done, tested | `record_pdf.py`, `GET /api/report.pdf`, UI "Download PDF" | Verdict, images, changes, zones, rejected candidates, sign-off, audit id. Copy saved in `data/records/`. Uses reportlab (now a dependency) |
 | 4. Full-screen jury scoreboard | Done, tested | `static/jury.html`, `GET /jury`, `POST /api/metrics/reset` | Found x/N, median find time, false alarms, checks; latest request + verdict; live camera. Reset before the demo. Link "scoreboard" in the UI header |
 | 5. Failure log (cause of each wrong find) | Done, tested | `failures.py`, `/api/label`, `/api/judge` (cause), `GET /api/failures`, `run_eval.py failures` | Causes: missed_box (P2), wrong_pick / said_not_found / picked_absent_object / asked_unnecessarily / slow (P3), arm_missed (P1). Stored in `data/cases/failures.jsonl`. Clicking outside every box now records missed_box instead of an error |
-| 6. "Point at all the X" | Planned | | |
+| 6. "Point at all the X" | Done, tested (mock) | `finder.find_all`, `POST /api/find_all`, `State.run_tour`, UI "Find all", voice tool `find_all` | Grok returns every matching box; the arm visits each (1 s pause). STOP ends the tour. With move=false, `/api/arm/point_last` starts the tour after a yes |
 | 7. Tray lift with the fork (experimental) | Planned | | |
 
 ## Architecture (data flow)
@@ -100,6 +100,7 @@ Zones: `GET /api/zones` · `POST /api/zones/point` · `/api/zones/finish` (name,
 Record: `GET /api/report.pdf` (PDF of the last check; copy in data/records/)
 Jury: `GET /jury` (scoreboard page) · `POST /api/metrics/reset`
 Failures: `GET /api/failures` (counts by cause, owner, next fix) · `POST /api/judge` takes `cause` (arm_missed)
+Find all: `POST /api/find_all` (text, move) · `/api/arm/point_last` also starts a pending tour
 Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` · `/api/demo/hand`
 
 ## Known gaps
@@ -110,6 +111,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 6: point at all matching objects (find_all + arm tour), UI button and voice tool.
 - 2026-11-04 Feature 5: failure log with automatic cause and owner per wrong find; failures report in run_eval.py; UI 'arm missed' button.
 - 2026-11-04 Feature 4: full-screen jury scoreboard at /jury; median find time in state metrics.
 - 2026-11-04 Feature 3: PDF line-clearance record; reportlab added to dependencies.

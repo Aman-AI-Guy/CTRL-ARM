@@ -40,6 +40,8 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
   If the result is "clarify", ask its clarifying_question and pass the answer to answer_clarification.
   If it is "not_found", say so plainly; never guess.
 - {move}
+- find_all: "point at all the pens", "show me every red thing". Say how many you found; then, if they want them
+  shown, call point_at_found (it visits each one in turn).
 - describe_table: "what's on the table?", "cosa c'è sul tavolo?". Read the summary, then list names only if asked.
 - save_reference: when they say the table is in its approved / clean state.
 - check_changes: "what changed?", "is the line clear?". Say how many changes, then each one in a few words, highest risk first.
@@ -62,6 +64,9 @@ def tools(dog: bool) -> list[dict]:
         {"type": "function", "name": "point_at_found",
          "description": "Move the arm tip above the object found by the last find_object.",
          "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "find_all",
+         "description": "Find EVERY object matching a description (e.g. 'all the pens'); point_at_found then visits each.",
+         "parameters": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]}},
         {"type": "function", "name": "describe_table",
          "description": "Name every object on the table and summarise it in one sentence.",
          "parameters": {"type": "object", "properties": {}}},

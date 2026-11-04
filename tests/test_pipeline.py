@@ -554,3 +554,26 @@ def test_failure_causes_and_summary(tmp_path, monkeypatch):
     env = {**__import__("os").environ, "TROVA_DATA": str(tmp_path), "TROVA_MOCK": "1"}
     rep = subprocess.run([sys.executable, "eval/run_eval.py", "failures"], capture_output=True, text=True, env=env)
     assert "wrong pick" in rep.stdout and "P1 arm" in rep.stdout
+
+
+# ---------------------------------------------------------------- feature 6: point at all
+def test_find_all_and_tour(tmp_path, monkeypatch):
+    import time
+    app, c = _client(tmp_path, monkeypatch)
+    t = SyntheticTable(seed=0, n_objects=0)
+    for kind in [("pen", "bar"), ("box", "rect"), ("cube", "square")]:
+        t.add_random(color="blue", kind=kind)
+    t.add_random(color="red", kind=("mug", "circle"))
+    app.state.trova.source.table = t
+    app.state.trova.arm.speed = 5000
+    c.post("/api/background", data={"mode": "capture"})
+    r = c.post("/api/find_all", data={"text": "all the blue things"}).json()
+    assert r["result"]["count"] == 3 and len(r["targets"]) == 3 and r["moved"]
+    t0 = time.time()
+    while (app.state.trova.tour or {}).get("status") != "done" and time.time() - t0 < 10:
+        time.sleep(0.1)
+    assert app.state.trova.tour["status"] == "done"
+    assert app.state.trova.arm.status()["tip_mm"] == r["targets"][-1]
+    r = c.post("/api/find_all", data={"text": "all the blue things", "move": "false"}).json()
+    assert not r["moved"] and c.post("/api/arm/point_last").json()["targets"] == r["targets"]
+    assert "find_all" in [x["name"] for x in c.get("/api/voice/config").json()["session"]["tools"]]

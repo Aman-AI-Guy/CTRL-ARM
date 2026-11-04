@@ -28,7 +28,7 @@ from .camera import DemoSource, ImageSource, open_source
 from .config import Settings, load_settings
 from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
-from .finder import find as grok_find
+from .finder import find as grok_find, find_all as grok_find_all
 from .inventory import describe as describe_table, draw_map
 from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
@@ -110,6 +110,7 @@ class State:
         self.label_wait: dict | None = None
         self.pending_move: dict | None = None
         self.inventory: dict | None = None
+        self.tour: dict | None = None
         self.zones_path = s.data_dir / "zones.json"
         self.zones: list[Zone] = load_zones(self.zones_path)
         self.zone_draft: list[list[float]] = []
@@ -153,6 +154,17 @@ class State:
             self.arm_thread.join(timeout=2)
         self.arm_thread = threading.Thread(target=fn, args=args, daemon=True)
         self.arm_thread.start()
+
+    def run_tour(self, targets: list, pause_s: float = 1.0) -> None:
+        """Feature 6: visit each target in turn. A stop ends the whole tour (point_at returns False)."""
+        self.tour = {"targets": targets, "index": 0, "status": "running"}
+        for i, (x, y) in enumerate(targets):
+            self.tour["index"] = i
+            if not self.arm.point_at(x, y):
+                self.tour["status"] = "stopped"
+                return
+            time.sleep(pause_s)
+        self.tour["status"] = "done"
 
     def capture_clean(self, attempts: int = 6) -> tuple[np.ndarray, list[Box], bool]:
         for _ in range(attempts):
@@ -238,7 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "last_find": lf or None,
             "last_check": None if not st.last_check else {k: v for k, v in st.last_check.items() if k != "objects"},
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
-            "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory,
+            "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
             "metrics": {**{k: v for k, v in m.items() if k != "find_times"}, "find_judged": judged,
@@ -294,6 +306,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return do_find(text.strip(), q, [], move)
         except (GrokError, ValueError, RuntimeError) as e:
             return fail(e, "find")
+
+    @app.post("/api/find_all")
+    def api_find_all(text: str = Form(...), move: bool = Form(True)):
+        """Feature 6: "point at all the pens": every match, then the arm visits each in turn."""
+        with st.lock:
+            t0 = time.perf_counter()
+            st.clear_view()
+            frame = st.frame()
+            boxes, occluded = st.proposals(frame)
+            try:
+                res = grok_find_all(st.grok, frame, boxes, text.strip())
+            except GrokError as e:
+                return fail(e, "find_all")
+            marked = draw_marks(frame, boxes)
+            for b in res.boxes:
+                cv2.rectangle(marked, (int(b.x0), int(b.y0)), (int(b.x1), int(b.y1)), HIGHLIGHT, 5)
+            targets = [[round(v, 1) for v in st.calib.pixel_to_table(*b.center)] for b in res.boxes] \
+                if st.calib and st.calib.ok else []
+            blocked = st.arm_blocked() if targets else None
+            moved = bool(targets and move and not blocked)
+            if moved:
+                st.start_arm(st.run_tour, targets)
+            out = {"result": res.as_dict(), "targets": targets, "moved": moved, "arm_blocked": blocked,
+                   "marked": st.audit.save_image("find_all", marked), "request": text.strip(),
+                   "total_s": round(time.perf_counter() - t0, 2), "occluded": occluded}
+            ev = st.audit.event("find_all", **out)
+            st.pending_move = {"result": {"label": res.label}, "targets": targets} if targets else None
+            return out | {"event_id": ev["id"]}
 
     @app.post("/api/clarify")
     def api_clarify(answer: str = Form(...)):
@@ -754,11 +794,15 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     def api_point_last():
         """Move to the object of the last find (used after a spoken 'yes')."""
         lf = getattr(st, "pending_move", None)
-        if not lf or not lf.get("table_mm"):
+        if not lf or not (lf.get("table_mm") or lf.get("targets")):
             raise HTTPException(400, "Nothing found yet to point at")
         blocked = st.arm_blocked()
         if blocked:
             return JSONResponse({"error": blocked, "blocked": True}, 409)
+        if lf.get("targets"):                                   # the last request was "point at all ..."
+            st.start_arm(st.run_tour, lf["targets"])
+            st.audit.event("arm_tour", targets=lf["targets"], after="voice confirmation")
+            return {"ok": True, "label": lf["result"]["label"], "targets": lf["targets"]}
         st.start_arm(st.arm.point_at, *lf["table_mm"])
         st.audit.event("arm_point", x_mm=lf["table_mm"][0], y_mm=lf["table_mm"][1], after="voice confirmation")
         return {"ok": True, "label": lf["result"]["label"], "table_mm": lf["table_mm"]}

@@ -211,3 +211,68 @@ def _mock_direct(prompt: str, images: list, ctx: dict) -> dict:
 
 register_mock("trova_select", _mock_select)
 register_mock("trova_direct", _mock_direct)
+
+
+# ---------------------------------------------------------------- feature 6: every match ("point at all the pens")
+ALL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "box_ids": {"type": "array", "items": {"type": "integer"}},
+        "label": {"type": "string"},
+        "reason": {"type": "string"},
+    },
+    "required": ["box_ids", "label", "reason"],
+    "additionalProperties": False,
+}
+
+ALL_PROMPT = """You are the eyes of Trova, a robot arm at a work table.
+Image 1 is the table from above; every candidate object has a magenta box with a number (1 to {n}).
+Image 2 is a sheet of close-ups, one per number.
+
+Request: "{request}"
+
+Return EVERY box_id whose object matches the request, in reading order (top to bottom, left to right).
+Return an empty list if nothing matches; never add a box just to give an answer.
+label: what the matches are, in a few words (plural if more than one). reason: one sentence.
+Write label and reason in the language of the request."""
+
+
+@dataclass
+class FindAllResult:
+    boxes: list[Box] = field(default_factory=list)
+    candidates: list[Box] = field(default_factory=list)
+    label: str = ""
+    reason: str = ""
+    grok_latency_s: float = 0.0
+
+    def as_dict(self) -> dict:
+        return {"status": "found" if self.boxes else "not_found", "count": len(self.boxes),
+                "boxes": [b.as_dict() for b in self.boxes], "label": self.label, "reason": self.reason,
+                "grok_latency_s": round(self.grok_latency_s, 2), "n_candidates": len(self.candidates)}
+
+
+def find_all(grok: GrokClient, frame: np.ndarray, boxes: list[Box], request: str) -> FindAllResult:
+    res = FindAllResult(candidates=boxes)
+    if not boxes:
+        return res
+    ctx = {"boxes": boxes, "colors": {b.id: color_name(crop(frame, b, pad=0)) for b in boxes}, "request": request}
+    r = grok.json(name="trova_find_all", prompt=ALL_PROMPT.format(n=len(boxes), request=request), schema=ALL_SCHEMA,
+                  images=[draw_marks(frame, boxes), contact_sheet(frame, boxes)], mock_context=ctx)
+    ids = {b.id: b for b in boxes}
+    seen = []
+    for i in r.data.get("box_ids", []):
+        if i in ids and i not in seen:
+            seen.append(i)
+    res.boxes = [ids[i] for i in seen]
+    res.label, res.reason, res.grok_latency_s = r.data.get("label", ""), r.data.get("reason", ""), r.latency_s
+    return res
+
+
+def _mock_find_all(prompt: str, images: list, ctx: dict) -> dict:
+    wanted = _colors_in(ctx["request"])
+    hits = [i for i, c in ctx["colors"].items() if c in wanted]
+    return {"box_ids": hits, "label": f"{len(hits)} {wanted[0] if wanted else ''} objects".replace("  ", " "),
+            "reason": "Mock: every object of that colour."}
+
+
+register_mock("trova_find_all", _mock_find_all)
