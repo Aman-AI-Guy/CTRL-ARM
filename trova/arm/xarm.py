@@ -95,11 +95,17 @@ class XArmBackend(CartesianBackend):
             self._halt()
 
     def tcp_mm(self):
+        return self.tcp_pose()[:3]
+
+    def tcp_pose(self):
+        """Read-only tool pose: x, y, z millimetres and roll, pitch, yaw degrees. Does not enable motion."""
         with self.lock:
             code, pose = self.arm.get_position()
         if code != 0:
             raise RuntimeError(f"xArm get_position code {code}")
-        return tuple(pose[:3])
+        if pose is None or len(pose) < 6:
+            raise RuntimeError("xArm get_position did not return roll, pitch and yaw")
+        return tuple(float(v) for v in pose[:6])
 
     def freedrive(self, on: bool):
         from ..motion import require_ticket

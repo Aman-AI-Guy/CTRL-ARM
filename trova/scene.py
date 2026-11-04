@@ -18,6 +18,9 @@ from .finder import _colors_in, is_italian
 from .marks import color_name, crop
 
 IOU_MIN = 0.35
+POSE_MOVE_MM = 25.0       # past this, image overlap is not an identity: the camera moved with the arm
+APPEAR_MIN = 0.72         # histogram correlation required for a cross-view guess
+WORLD_MATCH_MM = 40.0     # plane points closer than this can confirm a cross-view id
 
 ORDINALS = {
     "first": 1, "1st": 1, "prima": 1, "primo": 1,
@@ -40,11 +43,16 @@ _SKIP = {
 
 @dataclass
 class TrackState:
-    """Ids already handed out. `previous` is the last view: box (with track_id) and its colour histogram."""
+    """Ids already handed out. `previous` is the last view: box (with track_id) and its colour histogram.
+
+    `pose_mm` is the robot pose of that view. A large change means the camera moved, so an
+    image-space overlap is not treated as the same object.
+    """
 
     next_id: int = 1
     previous: list[tuple[Box, np.ndarray]] = field(default_factory=list)
     frame_size: tuple[int, int] | None = None
+    pose_mm: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -76,47 +84,96 @@ def _similar(a: np.ndarray, b: np.ndarray) -> float:
     return max(0.0, score)
 
 
+def _pose_dist(a, b) -> float:
+    return float(sum((float(a[i]) - float(b[i])) ** 2 for i in range(3)) ** 0.5)
+
+
+def remember_world(state: TrackState, track_id: int, world_mm) -> None:
+    """Attach a plane intersection to a track. Later views can confirm the id with it."""
+    point = [round(float(v), 2) for v in world_mm[:3]]
+    for box, _hist_row in state.previous:
+        if int(box.extra.get("track_id", -1)) == int(track_id):
+            box.extra["world_mm"] = point
+
+
 def assign_tracks(state: TrackState, boxes: list[Box], frame: np.ndarray,
-                  reset_reason: str | None = None) -> tuple[list[Box], str | None]:
-    """Copy `boxes` and set `extra['track_id']`. A reset drops the matches and never reuses an id."""
+                  reset_reason: str | None = None, *, pose_mm=None) -> tuple[list[Box], str | None]:
+    """Copy `boxes` and set `extra['track_id']`. A reset drops the matches and never reuses an id.
+
+    When `pose_mm` has moved, image overlap is ignored. A match then needs appearance, and it
+    stays `uncertain` until a plane position agrees as well (`geometric`).
+    """
     height, width = frame.shape[:2]
     reason = reset_reason
     if state.frame_size is not None and state.frame_size != (width, height):
         reason = reason or "frame size changed"
+    camera_moved = False
+    if pose_mm is not None and state.pose_mm is not None and _pose_dist(pose_mm, state.pose_mm) > POSE_MOVE_MM:
+        camera_moved = True
     if reason:
         state.previous = []
     state.frame_size = (width, height)
 
     current_h = [_hist(frame, box) for box in boxes]
-    pairs: list[tuple[float, int, int]] = []
-    for i, box in enumerate(boxes):
-        for j, (prev, prev_h) in enumerate(state.previous):
-            overlap = box.iou(prev)
-            if overlap < IOU_MIN:
-                continue
-            pairs.append((overlap + 0.05 * _similar(current_h[i], prev_h), i, j))
-    pairs.sort(reverse=True)
     match: dict[int, int] = {}
-    used: set[int] = set()
-    for _score, i, j in pairs:
-        if i in match or j in used:
-            continue
-        match[i] = j
-        used.add(j)
+    kind: dict[int, str] = {}
+    if camera_moved and state.previous:
+        pairs: list[tuple[float, int, int, str]] = []
+        for i, box in enumerate(boxes):
+            for j, (prev, prev_h) in enumerate(state.previous):
+                appearance = _similar(current_h[i], prev_h)
+                previous_world, new_world = prev.extra.get("world_mm"), box.extra.get("world_mm")
+                geometric = None
+                if previous_world and new_world:
+                    geometric = _pose_dist(previous_world, new_world)
+                if geometric is not None and geometric <= WORLD_MATCH_MM and appearance >= 0.45:
+                    pairs.append((2.0 + appearance, i, j, "geometric"))
+                elif appearance >= APPEAR_MIN and geometric is None:
+                    pairs.append((appearance, i, j, "uncertain"))
+        pairs.sort(reverse=True)
+        used: set[int] = set()
+        for _score, i, j, how in pairs:
+            if i in match or j in used:
+                continue
+            match[i], kind[i] = j, how
+            used.add(j)
+        reason = reason or "camera moved; image-space ids are not treated as the same object"
+    else:
+        pairs_iou: list[tuple[float, int, int]] = []
+        for i, box in enumerate(boxes):
+            for j, (prev, prev_h) in enumerate(state.previous):
+                overlap = box.iou(prev)
+                if overlap < IOU_MIN:
+                    continue
+                pairs_iou.append((overlap + 0.05 * _similar(current_h[i], prev_h), i, j))
+        pairs_iou.sort(reverse=True)
+        used = set()
+        for _score, i, j in pairs_iou:
+            if i in match or j in used:
+                continue
+            match[i], kind[i] = j, "same_view"
+            used.add(j)
 
     out: list[Box] = []
     stored: list[tuple[Box, np.ndarray]] = []
     for i, box in enumerate(boxes):
         copied = _copy(box)
         if i in match:
-            copied.extra["track_id"] = int(state.previous[match[i]][0].extra["track_id"])
+            previous = state.previous[match[i]][0]
+            copied.extra["track_id"] = int(previous.extra["track_id"])
+            copied.extra["association"] = kind.get(i, "same_view")
+            if previous.extra.get("world_mm") and "world_mm" not in copied.extra:
+                copied.extra["world_mm"] = list(previous.extra["world_mm"])
         else:
             copied.extra["track_id"] = state.next_id
             state.next_id += 1
+            copied.extra["association"] = "new"
         copied.extra["color"] = color_name(crop(frame, box, pad=0))
         out.append(copied)
         stored.append((copied, current_h[i]))
     state.previous = stored
+    if pose_mm is not None:
+        state.pose_mm = (float(pose_mm[0]), float(pose_mm[1]), float(pose_mm[2]))
     return out, reason
 
 
@@ -166,6 +223,8 @@ def build_objects(boxes: list[Box], frame: np.ndarray, names: dict[int, dict]) -
             "confidence": local_confidence(frame, box),
             "ambiguous": False,
             "source": box.source,
+            "association": box.extra.get("association", "same_view"),
+            "identity_uncertain": box.extra.get("association") == "uncertain",
         })
     mark_ambiguous(objects)
     return objects

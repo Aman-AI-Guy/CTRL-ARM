@@ -281,6 +281,14 @@ class CartesianArm(ArmDriver):
     def tcp_mm(self) -> tuple[float, float, float]:
         return self.backend.tcp_mm()
 
+    def tcp_pose(self):
+        """Six numbers when the backend reports orientation. Otherwise xyz only."""
+        backend = self.backend
+        if hasattr(backend, "tcp_pose"):
+            return tuple(float(v) for v in backend.tcp_pose())
+        xyz = self.tcp_mm()
+        return tuple(float(v) for v in xyz)
+
     def freedrive(self, on: bool) -> None:
         from ..motion import motion_ticket
         decision = self.gateway.authorize_freedrive(on)
@@ -373,6 +381,11 @@ class FakeCartesian(CartesianBackend):
         with self._lock:
             self._advance()
             return tuple(self.pos)
+
+    def tcp_pose(self):
+        """xyz from the fake plus the downward tool orientation a straight xArm line holds."""
+        x, y, z = self.tcp_mm()
+        return (float(x), float(y), float(z), 180.0, 0.0, 0.0)
 
     def freedrive(self, on):
         self.free = on
