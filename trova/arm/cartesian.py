@@ -108,8 +108,9 @@ class CartesianArm(ArmDriver):
         """A STOP arrived: stop again (it may have raced a move still being sent, which would replace it)."""
         try:
             self.backend.stop()
-        except Exception:  # noqa: BLE001 - the stop already went out once from stop()
-            pass
+        except Exception as e:  # a raced move needs a successful resend; never hide its failure
+            self.state, self.last_error = "error", f"STOP resend failed: {e}"
+            return False
         self.state = "stopped"
         return False
 
@@ -192,11 +193,14 @@ class CartesianArm(ArmDriver):
         if self._stop.is_set():
             self.state = "stopped"
             return False
+        if self.limits is None:
+            self.state, self.last_error = "refused", "No safety box: cannot validate the joint target"
+            return False
         if self.limits:
             try:
                 err = self.limits.check(*self.backend.fk_mm(q))
             except NotImplementedError:
-                err = None
+                err = "forward kinematics unavailable: cannot validate the joint target against the safety box"
             except Exception as e:  # noqa: BLE001
                 err = f"forward kinematics failed: {e}"
             if err:
