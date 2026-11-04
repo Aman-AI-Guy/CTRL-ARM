@@ -6,7 +6,10 @@ import cv2
 import numpy as np
 
 from trova.boxes import Box
-from trova.geom import VisionStore, detect_checkerboard, project_observations, tool_pose_matrix
+from trova.geom import (
+    VisionStore, camera_pose_matrix, detect_checkerboard, intersect_ray_plane, pixel_ray,
+    project_observations, tool_pose_matrix,
+)
 from trova.scene import TrackState, assign_tracks
 
 
@@ -139,6 +142,7 @@ def test_handeye_solve_uses_only_supplied_observations():
     assert np.allclose(recovered[:3, 3], mount[:3, 3], atol=1.0)
     assert np.allclose(recovered[:3, :3], mount[:3, :3], atol=1e-3)
     assert store.hand_eye["consistency_mm"] < 1.0
+    assert store.hand_eye["holdout_mm"] < 1.0
     assert store.hand_eye["method"] == "park_martin_ax_xb"
     # These poses were projected in the test. They are not robot telemetry, so the model stays invalid.
     assert store.assess([640, 480])["valid"] is False
@@ -154,6 +158,98 @@ def test_handeye_solve_uses_only_supplied_observations():
     missed = refused._solve_handeye()
     assert missed["ok"] is False and refused.hand_eye is None
     assert "one axis" in missed["reason"]
+    short = VisionStore()
+    short.intrinsics = store.intrinsics
+    short.intrinsic_views = store.intrinsic_views
+    short.handeye_views = views[:5]
+    few = short._solve_handeye()
+    assert few["ok"] is False and short.hand_eye is None
+    assert "held-out" in few["reason"]
+
+
+def _handeye_store(views):
+    k = [[800.0, 0, 320.0], [0, 800.0, 240.0], [0, 0, 1]]
+    store = VisionStore()
+    store.intrinsics = {"k": k, "dist": [0, 0, 0, 0, 0], "width": 640, "height": 480,
+                        "reprojection_rms_px": 0.01, "n_images": 3, "square_mm": 20.0}
+    store.intrinsic_views = [{"width": 640, "height": 480}] * 3
+    store.handeye_views = views
+    return store
+
+
+def _known_mount_views():
+    k = np.array([[800.0, 0, 320.0], [0, 800.0, 240.0], [0, 0, 1]], float)
+    mount = tool_pose_matrix((15, -10, 40, 8, -12, 20))
+    board = np.eye(4)
+    board[:3, 3] = (200.0, 0.0, 0.0)
+    poses = [
+        (300, -80, 280, 170, -15, -25), (360, 40, 340, 185, 12, 20), (250, 90, 300, 165, -8, 5),
+        (400, -30, 380, 190, 18, 35), (280, 20, 250, 175, -20, -40), (340, -70, 320, 160, 10, 15),
+        (220, -20, 360, 188, -5, -15), (380, 60, 290, 172, 22, 50),
+    ]
+    views = project_observations(k, np.zeros(5), [(pose, mount, board) for pose in poses], 6, 5, 20.0, (640, 480))
+    return views, mount
+
+
+def test_handeye_rejects_noise_inconsistency_and_a_small_motion():
+    """These views are projected fixtures. They do not make the calibration valid."""
+    views, mount = _known_mount_views()
+    rng = np.random.default_rng(7)
+    noisy = []
+    for view in views:
+        corners = np.array(view["corners"], float) + rng.normal(0.0, 0.25, size=(len(view["corners"]), 2))
+        noisy.append(dict(view) | {"corners": np.round(corners, 3).tolist()})
+    quiet = _handeye_store(noisy)._solve_handeye()
+    solved = _handeye_store(noisy)
+    solved._solve_handeye()
+    assert quiet["ok"] and solved.hand_eye is not None
+    assert np.allclose(np.array(solved.hand_eye["matrix"])[:3, 3], mount[:3, 3], atol=5.0)
+    assert solved.hand_eye["holdout_mm"] <= 10.0
+    assert solved.assess([640, 480])["valid"] is False
+    shifted = [dict(view) for view in views]
+    corners = np.array(shifted[-1]["corners"], float)
+    corners[:, 0] += 40.0
+    shifted[-1] = dict(shifted[-1]) | {"corners": np.round(corners, 3).tolist()}
+    bad = _handeye_store(shifted)
+    refused = bad._solve_handeye()
+    assert refused["ok"] is False and bad.hand_eye is None
+    assert "consistency" in refused["reason"] or "held-out" in refused["reason"]
+    tiny = [
+        (200, 0, 300, 180, 0, 0), (204, 2, 302, 181, 1, 1), (198, -2, 301, 179, -1, -1),
+        (203, 1, 299, 180.5, 0.4, -0.6), (201, -1, 303, 179.4, -0.5, 0.8),
+        (202, 3, 300, 180.2, 0.2, -0.3),
+    ]
+    mount_i = np.eye(4)
+    board = np.eye(4)
+    board[:3, 3] = (80.0, 0.0, 0.0)
+    k = np.array([[800.0, 0, 320.0], [0, 800.0, 240.0], [0, 0, 1]], float)
+    small = project_observations(k, np.zeros(5), [(pose, mount_i, board) for pose in tiny], 6, 5, 20.0, (640, 480))
+    narrow = _handeye_store(small)._solve_handeye()
+    assert narrow["ok"] is False
+    pure = [
+        (180, -40, 280, 180, 0, 0), (240, 30, 320, 180, 0, 0), (200, 80, 300, 180, 0, 0),
+        (280, -20, 360, 180, 0, 0), (150, 10, 260, 180, 0, 0), (220, -60, 340, 180, 0, 0),
+    ]
+    flat = project_observations(k, np.zeros(5), [(pose, mount_i, board) for pose in pure], 6, 5, 20.0, (640, 480))
+    translated = _handeye_store(flat)._solve_handeye()
+    assert translated["ok"] is False
+    assert "rotation" in translated["reason"] or "axis" in translated["reason"]
+
+
+def test_nonidentity_mount_round_trips_a_plane_point():
+    """Frame check only. This does not write a calibration and does not mark one valid."""
+    mount = tool_pose_matrix((15, -10, 40, 8, -12, 20))
+    k = np.array([[800.0, 0, 640.0], [0, 800.0, 400.0], [0, 0, 1]])
+    pose6 = (0, 0, 400, 180, 0, 0)
+    base_camera = camera_pose_matrix(pose6, mount)
+    point = np.array([100.0, 50.0, 0.0, 1.0])
+    camera_point = np.linalg.inv(base_camera) @ point
+    pixel = k @ camera_point[:3]
+    pixel = pixel[:2] / pixel[2]
+    direction = base_camera[:3, :3] @ pixel_ray(pixel[0], pixel[1], k, np.zeros(5))
+    hit = intersect_ray_plane(base_camera[:3, 3], direction, [0, 0, 0], [0, 0, 1])
+    assert hit is not None
+    assert np.allclose(hit, [100, 50, 0], atol=0.5)
 
 
 def test_moving_camera_does_not_trust_image_overlap():

@@ -6,8 +6,9 @@ The fixed-view homography in calibration.py is a different model. It is not reus
 camera leaves the pose it was measured in. Intrinsics come from cv2.calibrateCamera. The
 tool-to-camera mount is solved here by Park and Martin (AX = XB): this OpenCV build exposes
 the CALIB_HAND_EYE_* constants and does not provide cv2.calibrateHandEye. A matrix is stored
-only after that solve. Motions that do not determine the mount are refused. A missing file
-stays unsolved.
+only when that solve also passes a leave-one-out check, the board-origin consistency limit,
+and the pose-diversity limits. Motions that do not determine the mount are refused. A missing
+file stays unsolved.
 
 Tool poses use the xArm convention: translation in millimetres, rotation
 R = Rz(yaw) @ Ry(pitch) @ Rx(roll), degrees. The camera frame is OpenCV (x right, y down,
@@ -40,7 +41,7 @@ PROCEDURE = [
     "Pose the arm yourself (pendant or bring-up). Then capture. Trova only reads the pose.",
     "Print a checkerboard. Measure one square and pass that size as square_mm. It is not assumed.",
     "Intrinsics: hold the board in at least 3 different orientations, capture each, then solve.",
-    "Hand-eye: fix the board in the workspace. Move the arm to at least 5 well separated poses.",
+    "Hand-eye: fix the board. Move the arm yourself to at least 6 well separated poses so one can be held out.",
     "At each pose, capture a hand-eye view. Mark on_table when the board lies flat on the table.",
     "Solve hand-eye, then the table plane. Read the reprojection error and the consistency.",
     "Set TROVA_ARM_LIMITS, TROVA_CAMERA_BODY_MM and TROVA_OBSERVE_CLEARANCE_MM from measurements.",
@@ -172,6 +173,50 @@ def _park_hand_eye(gripper_poses, target_poses):
     tool_camera[:3, :3] = rotation
     tool_camera[:3, 3] = translation
     return tool_camera, ""
+
+
+def _board_origins(gripper_poses, target_poses, tool_camera) -> np.ndarray:
+    origins = []
+    for tool, target in zip(gripper_poses, target_poses, strict=True):
+        point = tool @ tool_camera @ target @ np.array([0.0, 0.0, 0.0, 1.0])
+        origins.append(point[:3])
+    return np.asarray(origins, float)
+
+
+def _pose_diversity(gripper_poses) -> tuple[float, float]:
+    angles, shifts = [], []
+    for i in range(len(gripper_poses)):
+        for j in range(i + 1, len(gripper_poses)):
+            angles.append(_rotation_angle(gripper_poses[i][:3, :3], gripper_poses[j][:3, :3]))
+            shifts.append(float(np.linalg.norm(gripper_poses[i][:3, 3] - gripper_poses[j][:3, 3])))
+    return (max(angles) if angles else 0.0, max(shifts) if shifts else 0.0)
+
+
+def _consistency_mm(gripper_poses, target_poses, tool_camera) -> float:
+    origins = _board_origins(gripper_poses, target_poses, tool_camera)
+    return float(np.max(np.linalg.norm(origins - origins.mean(axis=0), axis=1)))
+
+
+def _holdout_mm(gripper_poses, target_poses) -> tuple[float | None, str]:
+    """Largest leave-one-out error of the board origin, in the robot base frame.
+
+    A fold that cannot be solved is a failure. Fewer than six poses cannot leave one out
+    and still meet the five-pose minimum, so they are not accepted.
+    """
+    count = len(gripper_poses)
+    if count < HANDEYE_MIN + 1:
+        return None, f"held-out check needs at least {HANDEYE_MIN + 1} poses, have {count}"
+    errors = []
+    for index in range(count):
+        train_g = gripper_poses[:index] + gripper_poses[index + 1:]
+        train_t = target_poses[:index] + target_poses[index + 1:]
+        solved, reason = _park_hand_eye(train_g, train_t)
+        if solved is None:
+            return None, f"held-out pose {index + 1} could not be checked: {reason}"
+        trained = _board_origins(train_g, train_t, solved)
+        held = _board_origins([gripper_poses[index]], [target_poses[index]], solved)[0]
+        errors.append(float(np.linalg.norm(held - trained.mean(axis=0))))
+    return float(max(errors)), ""
 
 
 def fit_plane(points) -> tuple[np.ndarray, np.ndarray, float] | None:
@@ -313,26 +358,39 @@ class VisionStore:
         if tool_camera is None:
             self.hand_eye = None
             return {"ok": False, "reason": reason}
-        origins = []
-        for tool, target in zip(gripper_poses, target_poses, strict=True):
-            origin = tool @ tool_camera @ target @ np.array([0.0, 0.0, 0.0, 1.0])
-            origins.append(origin[:3])
-        spread = float(np.max(np.linalg.norm(np.array(origins) - np.mean(origins, axis=0), axis=1)))
-        angles, shifts = [], []
-        for i in range(len(gripper_poses)):
-            for j in range(i + 1, len(gripper_poses)):
-                angles.append(_rotation_angle(gripper_poses[i][:3, :3], gripper_poses[j][:3, :3]))
-                shifts.append(float(np.linalg.norm(gripper_poses[i][:3, 3] - gripper_poses[j][:3, 3])))
+        spread = _consistency_mm(gripper_poses, target_poses, tool_camera)
+        max_rotation, max_shift = _pose_diversity(gripper_poses)
+        holdout, holdout_reason = _holdout_mm(gripper_poses, target_poses)
+        if spread > MAX_HANDEYE_MM:
+            self.hand_eye = None
+            return {"ok": False, "reason": (
+                f"hand-eye consistency {round(spread, 3)} mm is above {MAX_HANDEYE_MM}; "
+                "the observations were rejected")}
+        if max_rotation < MIN_ROTATION_DEG or max_shift < MIN_TRANSLATION_MM:
+            self.hand_eye = None
+            return {"ok": False, "reason": (
+                "the calibration poses do not move the camera enough "
+                f"(rotation {round(max_rotation, 2)} deg, translation {round(max_shift, 2)} mm; "
+                f"need {MIN_ROTATION_DEG} deg and {MIN_TRANSLATION_MM} mm)")}
+        if holdout is None or holdout > MAX_HANDEYE_MM:
+            self.hand_eye = None
+            if holdout is None:
+                return {"ok": False, "reason": holdout_reason}
+            return {"ok": False, "reason": (
+                f"held-out board origin error {round(holdout, 3)} mm is above {MAX_HANDEYE_MM}; "
+                "the observations were rejected")}
         self.hand_eye = {
             "matrix": np.round(tool_camera, 6).tolist(),
             "method": "park_martin_ax_xb",
             "consistency_mm": round(spread, 3),
+            "holdout_mm": round(holdout, 3),
             "n_poses": len(gripper_poses),
-            "max_rotation_deg": round(max(angles) if angles else 0.0, 2),
-            "max_translation_mm": round(max(shifts) if shifts else 0.0, 2),
+            "max_rotation_deg": round(max_rotation, 2),
+            "max_translation_mm": round(max_shift, 2),
             "frame": "T_tool_camera, camera points to tool points",
         }
-        return {"ok": True, "consistency_mm": round(spread, 3), "n_poses": len(gripper_poses)}
+        return {"ok": True, "consistency_mm": round(spread, 3), "holdout_mm": round(holdout, 3),
+                "n_poses": len(gripper_poses)}
 
     def _solve_table(self) -> dict:
         marked = [view for view in self.handeye_views if view.get("on_table")]
@@ -395,6 +453,12 @@ class VisionStore:
                 reasons.append("hand-eye has no captured observations")
             if self.hand_eye["consistency_mm"] > MAX_HANDEYE_MM:
                 reasons.append(f"hand-eye consistency {self.hand_eye['consistency_mm']} mm is above {MAX_HANDEYE_MM}")
+            if self.hand_eye.get("method") == "park_martin_ax_xb":
+                holdout = self.hand_eye.get("holdout_mm")
+                if holdout is None:
+                    reasons.append("held-out poses were not checked")
+                elif holdout > MAX_HANDEYE_MM:
+                    reasons.append(f"held-out board origin error {holdout} mm is above {MAX_HANDEYE_MM}")
             if self.hand_eye["max_rotation_deg"] < MIN_ROTATION_DEG or self.hand_eye["max_translation_mm"] < MIN_TRANSLATION_MM:
                 reasons.append("the calibration poses do not move the camera enough")
             if any(view.get("pose_source") != "telemetry" for view in self.handeye_views):
@@ -409,6 +473,7 @@ class VisionStore:
             "image_size": self._solved_size(), "rpy_convention": self.rpy_convention,
             "reprojection_rms_px": None if not self.intrinsics else self.intrinsics["reprojection_rms_px"],
             "consistency_mm": None if not self.hand_eye else self.hand_eye["consistency_mm"],
+            "holdout_mm": None if not self.hand_eye else self.hand_eye.get("holdout_mm"),
             "plane_residual_mm": None if not self.table else self.table["residual_mm"],
             "n_intrinsics": len(self.intrinsic_views), "n_handeye": len(self.handeye_views),
             "object_height_measured": False,
@@ -451,6 +516,10 @@ class VisionStore:
 
     def observation_target(self, point_mm, clearance_mm: float | None) -> dict:
         """Tool position above the plane point. Clearance must be an operator measurement."""
+        if self.table is None:
+            return {"ok": False, "target_mm": None, "verified_tool_position": False,
+                    "approximate_observation_goal": False,
+                    "reason": "the table plane is not solved"}
         if point_mm is None:
             return {"ok": False, "target_mm": None, "reason": "there is no plane intersection to approach",
                     "verified_tool_position": False, "approximate_observation_goal": False}
