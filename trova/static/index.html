@@ -63,7 +63,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
       <div class="row"><button onclick="post('/api/arm/home')">Arm home</button><button onclick="setClick('point')">Click to point</button><button onclick="setClick('teach')">Teach pose (click)</button><button onclick="post('/api/arm/teach_home')">Teach home</button>
         <button onclick="sendForm('/api/arm/compliant',{on:true})">Compliant on</button><button onclick="sendForm('/api/arm/compliant',{on:false})">off</button></div>
       <div class="row"><span class="muted">object threshold</span><input type="number" id="thresh" step="2" style="max-width:90px" onchange="tune()"><span class="muted">min area</span><input type="number" id="minarea" step="0.0002" style="max-width:110px" onchange="tune()"></div>
-      <div class="row" id="demorow"><span class="muted">demo:</span><button onclick="sendForm('/api/demo/tamper',{kind:'add'})">+ add</button><button onclick="sendForm('/api/demo/tamper',{kind:'remove'})">− remove</button><button onclick="sendForm('/api/demo/tamper',{kind:'move'})">↔ move</button><button onclick="sendForm('/api/demo/hand',{on:true})">hand in</button><button onclick="sendForm('/api/demo/hand',{on:false})">hand out</button></div>
+      <div class="row" id="demorow"><span class="muted">demo:</span><button onclick="sendForm('/api/demo/tamper',{kind:'add'})">+ add</button><button onclick="sendForm('/api/demo/tamper',{kind:'remove'})">− remove</button><button onclick="sendForm('/api/demo/tamper',{kind:'move'})">↔ move</button><button onclick="sendForm('/api/demo/tamper',{kind:'label'})">+ old-lot carton</button><button onclick="sendForm('/api/demo/hand',{on:true})">hand in</button><button onclick="sendForm('/api/demo/hand',{on:false})">hand out</button></div>
     </details>
   </div>
   <div class="panel"><details><summary>Log</summary><div id="log"></div></details></div>
@@ -89,6 +89,8 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <div class="row"><button onclick="saveRef()">Save reference</button><button class="primary" onclick="doCheck()">Check now</button><span class="muted" id="refinfo">no reference</span></div>
     <div class="row"><button onclick="setClick('zone')">Draw a zone (click corners)</button><button onclick="finishZone()">Finish zone</button>
       <button onclick="post('/api/zones/cancel')">Cancel</button><span class="muted" id="zoneinfo"></span></div>
+    <div class="row"><span class="muted">Batch</span><input type="text" id="lot" placeholder="current lot, e.g. A123" style="max-width:150px">
+      <button onclick="setBatch()">Set batch</button><button onclick="readLabels()">Read labels</button><button onclick="labelSheet()">Print labels</button><span class="muted" id="batchinfo"></span></div>
     <div class="row"><button id="watchbtn" onclick="toggleWatch()">👁 Watch the line</button>
       <label class="muted"><input type="checkbox" id="watchpoint"> arm points at problems</label><span class="muted" id="watchinfo"></span></div>
     <div id="checkres" class="result"></div>
@@ -195,11 +197,32 @@ function showCheck(d) {
     let h = `<div class="big" style="color:var(${r.line_clear ? '--ok' : '--bad'})">${r.line_clear ? 'Line clear' : 'NOT clear: ' + r.changes.length + ' change(s)'}</div><div>${esc(r.summary)}</div>`;
     h += '<ul class="changes">' + r.changes.map(c => `<li class="risk-${esc(c.risk)}"><b>C${c.id} ${esc(c.kind)}</b> ${esc(c.label)}: ${esc(c.explanation)}</li>`).join('') + '</ul>';
     if (r.filtered.length) h += `<div class="muted">${r.filtered.length} candidate(s) rejected by Grok as false alarms (see the record).</div>`;
+    if (r.batch) h += labelList(r.batch);
     if (r.zones) h += '<ul class="changes">' + r.zones.map(z => `<li class="${z.ok ? '' : 'risk-high'}"><b>${esc(z.name)}</b> (${z.rule === 'empty' ? 'must be empty' : 'only ' + esc(z.allowed.join(', '))}): ${z.ok ? 'OK' : esc(z.problems.join('; '))}</li>`).join('') + '</ul>';
     h += `<div class="muted">${r.frames_used} frames · Grok ${r.grok_latency_s}s · total ${r.total_s}s</div>`;
     h += `<div class="thumbs"><a href="/files/${d.ref_marked}" target="_blank"><img src="/files/${d.ref_marked}"></a><a href="/files/${d.cur_marked}" target="_blank"><img src="/files/${d.cur_marked}"></a></div>`;
     el.innerHTML = h;
   }
+}
+
+// ---- feature 11: labels and batch
+async function setBatch() { const d = await sendForm('/api/batch', {lot: $('lot').value}); $('lot').value = d.lot; }
+async function labelSheet() { const d = await call('/api/labels/sheet', {method: 'POST'}); window.open(d.file); }
+function labelList(b) {
+  if (b.error) return `<div style="color:var(--bad)">Labels could not be read: ${esc(b.error)}</div>`;
+  return `<div class="muted">Labels vs batch LOT ${esc(b.lot || '–')}:</div><ul class="changes">` +
+    b.items.map(i => `<li>${i.box_id}: LOT ${esc(i.lot || '–')} · EXP ${esc(i.expiry || '–')}${i.code ? ' · code ✓' : ''}</li>`).join('') +
+    b.problems.map(p => `<li class="risk-${esc(p.risk)}"><b>${esc(p.kind.replace(/_/g, ' '))}</b> ${esc(p.text)}</li>`).join('') + '</ul>';
+}
+function showLabels(d) {
+  const el = $('checkres'); el.className = 'result show ' + (d.ok ? 'st-found' : 'st-not_found');
+  el.innerHTML = `<div class="big" style="color:var(${d.ok ? '--ok' : '--bad'})">${d.ok ? 'Labels OK' : d.problems.length + ' label problem(s)'}</div>` +
+    (d.items.length ? '' : '<div class="muted">No labels seen.</div>') + labelList(d) +
+    `<div class="muted">${d.codes.length} code(s) decoded · Grok ${d.latency_s}s${d.offline ? ' · offline' : ''}</div><div class="thumbs"><a href="/files/${d.image}" target="_blank"><img src="/files/${d.image}"></a></div>`;
+}
+async function readLabels() {
+  const el = $('checkres'); el.className = 'result show'; el.innerHTML = 'Reading labels…';
+  try { showLabels(await call('/api/labels', {method: 'POST'})); } catch (e) { el.innerHTML = 'Reading failed: ' + esc(e.error || e.detail || ''); }
 }
 
 // ---- feature 10: watch the line
@@ -290,7 +313,7 @@ async function toggleVoice() {
   const ok = await TrovaVoice.start({onStatus: s => $('vstatus').textContent = s, onLine: vline,
     onFind: d => { showFind(d); refresh(); }, onCheck: d => { showCheck(d); refresh(); }, onRefresh: refresh,
     onInventory: d => showInventory(d), onFindAll: d => { showFindAll(d); refresh(); },
-    onTool: () => refresh(), onClosed: () => { $('voicebtn').textContent = '🎤 Talk to Trova'; }}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
+    onLabels: d => showLabels(d), onTool: () => refresh(), onClosed: () => { $('voicebtn').textContent = '🎤 Talk to Trova'; }}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
   if (!ok) $('voicebtn').textContent = '🎤 Talk to Trova';
 }
 // STOP from the keyboard: Escape always (even while typing), space bar unless the cursor is in a text field
@@ -343,6 +366,7 @@ async function refresh() {
   if (S.label_wait) { const el = $('clickmode'); el.className = 'mode on'; el.textContent = 'Wrong find: click the object that should have been found (even if it has no box), or press "not on the table".'; }
   else if (!clickMode) $('clickmode').className = 'mode';
   showDog(); showWatch();
+  $('batchinfo').textContent = S.batch && S.batch.lot ? 'current: LOT ' + S.batch.lot : 'no batch set';
   try { const fl = await (await fetch('/api/failures')).json();
     $('m-fail').textContent = fl.total ? 'Failures: ' + fl.by_cause.map(c => `${c.cause.replace(/_/g, ' ')} ${c.count} (${c.owner})`).join(' · ') : ''; } catch (e) {}
   try { const z = await (await fetch('/api/zones')).json(); $('zoneinfo').textContent = z.zones.length ? z.zones.map(x => x.name).join(', ') : (z.draft.length ? z.draft.length + ' corners' : 'no zones'); } catch (e) {}

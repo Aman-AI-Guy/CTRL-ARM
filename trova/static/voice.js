@@ -81,6 +81,9 @@ const TrovaVoice = (() => {
       return {line_clear: r.line_clear, summary: r.summary,
               changes: r.changes.map(c => ({kind: c.kind, object: c.label, risk: c.risk, why: c.explanation}))};
     },
+    async read_labels() { const d = await api('/api/labels'); if (d.error) return {error: d.error};
+      h.onLabels && h.onLabels(d);
+      return {batch: d.lot, ok: d.ok, problems: d.problems.map(p => p.text), labels: d.items.map(i => ({object: i.box_id, lot: i.lot, expiry: i.expiry}))}; },
     async watch_line({on}) { const d = await api('/api/watch', {on: !!on, point: false}, true); h.onRefresh && h.onRefresh();
       return d.error ? {error: d.error} : {watching: d.on, status: d.status}; },
     async stop_arm() { await api('/api/arm/stop'); return {stopped: true}; },

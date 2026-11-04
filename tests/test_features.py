@@ -460,3 +460,65 @@ def test_watch_false_alarm_closes_itself_and_thread_runs(tmp_path, monkeypatch):
     import time
     time.sleep(0.8)
     assert st.watch.checks == n                                                 # the thread really stopped
+
+
+# ---------------------------------------------------------------- feature 11: labels and batch
+def test_lot_and_expiry_parsing_and_batch_rules():
+    import datetime as dt
+
+    from trova.labels import check_batch, parse_date, parse_expiry_text, parse_lot
+    assert parse_lot("Paracetamol LOT A123 EXP 2027-06") == "A123" and parse_lot("Lotto: b777") == "B777"
+    assert parse_lot("Batch 9-X1") == "9-X1" and parse_lot("no lot here") == ""
+    assert parse_expiry_text("LOT A1 EXP 2027-06") == "2027-06" and parse_expiry_text("Scad. 30/06/2027") == "30/06/2027"
+    assert parse_date("2027-06") == dt.date(2027, 6, 30) and parse_date("06/27") == dt.date(2027, 6, 30)
+    assert parse_date("30.06.2027") == dt.date(2027, 6, 30) and parse_date("13/2027") is None and parse_date("soon") is None
+    today = dt.date(2026, 11, 4)
+
+    def it(i, lot, exp="", code_lot="", print_lot=None):
+        return {"box_id": i, "lot": lot, "expiry": exp, "code_lot": code_lot, "print_lot": lot if print_lot is None else print_lot}
+    probs = check_batch([it(1, "A123", "2027-06"), it(2, "B777"), it(3, "A123", "2025-01"), it(4, "A1?3"),
+                         it(5, "B777", code_lot="B777", print_lot="A123"), it(6, "")], "A-123", today)
+    kinds = {(p["box_id"], p["kind"]) for p in probs}
+    assert (2, "wrong_batch") in kinds and (3, "expired") in kinds and (4, "unreadable") in kinds
+    assert (5, "code_mismatch") in kinds and (6, "no_lot") in kinds and not any(b == 1 for b, _ in kinds)
+
+
+def test_read_labels_on_the_table_and_the_printable_sheet(tmp_path):
+    import cv2
+
+    from trova.grok import GrokClient
+    from trova.labels import decode_codes, label_sheet, read_labels
+    from trova.proposals import find_blobs
+    from trova.synthetic import SyntheticTable
+    t = SyntheticTable(seed=11, n_objects=5)
+    t.add_labelled("LOT A123 EXP 2028-06")
+    t.add_labelled("LOT B777 EXP 2027-03")
+    f, e = t.render(), t.empty()
+    r = read_labels(GrokClient(mock=True), f, find_blobs(f, e), lot="A123")
+    assert sorted(i["lot"] for i in r.items) == ["A123", "B777"]
+    assert [p["kind"] for p in r.problems] == ["wrong_batch"] and "B777" in r.problems[0]["text"]
+    from trova.boxes import Box
+    sheet = cv2.resize(cv2.imread(str(label_sheet(tmp_path, lot="A123"))), None, fx=0.5, fy=0.5)
+    cells = [Box((70 + (i % 2) * 600), (80 + (i // 2) * 560), (70 + (i % 2) * 600) + 550, (80 + (i // 2) * 560) + 500, id=i + 1)
+             for i in range(6)]
+    texts = [c["text"] for c in decode_codes(sheet, cells)]
+    assert len(texts) == 6 and sum("A123" in x for x in texts) == 4      # 3 good + 1 expired; the mismatch's code says B777
+
+
+def test_batch_check_inside_line_clearance(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/reference", data={"describe": "false"})
+    assert "batch" not in c.post("/api/changes").json()["result"]           # no batch set: no label step
+    assert c.post("/api/batch", data={"lot": "a123"}).json()["lot"] == "A123"
+    assert c.post("/api/demo/tamper", data={"kind": "label"}).json()["label"] == "carton LOT B777"
+    r = c.post("/api/changes").json()["result"]
+    assert not r["line_clear"] and r["batch"]["problems"][0]["kind"] == "wrong_batch" and "B777" in r["summary"]
+    lab = c.post("/api/labels").json()
+    assert lab["items"][0]["lot"] == "B777" and not lab["ok"] and lab["image"]
+    assert "Labels (current batch LOT A123)" in c.get("/api/report").text
+    pdf = c.get("/api/report.pdf")
+    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+    assert c.get("/api/state").json()["batch"]["lot"] == "A123"
+    assert c.post("/api/labels/sheet").json()["file"].endswith(".png")

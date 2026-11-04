@@ -31,6 +31,7 @@ class ObjSpec:
     cy: float
     size: float
     angle: float = 0.0
+    code: str | None = None      # feature 11: a printed label with this QR code text
 
     @property
     def label(self) -> str:
@@ -48,6 +49,19 @@ def _draw(img, o: ObjSpec, color, offset=(0, 0)):
         w, h = {"rect": (s, s * 0.6), "bar": (s * 1.4, s * 0.2), "square": (s * 0.7, s * 0.7)}[o.shape]
         pts = cv2.boxPoints(((cx, cy), (w, h), o.angle)).astype(np.int32)
         cv2.fillPoly(img, [pts], color, cv2.LINE_AA)
+
+
+def _draw_label(img, o: ObjSpec) -> None:
+    """A white sticker with a QR code and the lot printed under it, centred on the object."""
+    q = cv2.QRCodeEncoder.create().encode(o.code)
+    k = max(3, int(o.size * 0.5 / q.shape[0]))
+    q = cv2.resize(q, (q.shape[1] * k, q.shape[0] * k), interpolation=cv2.INTER_NEAREST)
+    q = cv2.copyMakeBorder(q, 2 * k, 2 * k, 2 * k, 2 * k, cv2.BORDER_CONSTANT, value=255)
+    h, w = q.shape
+    x0, y0 = int(o.cx - w / 2), int(o.cy - h / 2)
+    if x0 < 0 or y0 < 0 or y0 + h > img.shape[0] or x0 + w > img.shape[1]:
+        return
+    img[y0:y0 + h, x0:x0 + w] = cv2.cvtColor(q, cv2.COLOR_GRAY2BGR)
 
 
 def object_box(o: ObjSpec) -> Box:
@@ -104,6 +118,8 @@ class SyntheticTable:
         img = img.astype(np.uint8)
         for o in self.objects:
             _draw(img, o, COLORS[o.color])
+            if o.code:
+                _draw_label(img, o)
         if hand:  # a skin-coloured arm entering from the bottom edge
             cv2.ellipse(img, (int(self.w * 0.55), self.h), (90, 260), 10, 0, 360, (120, 160, 215), -1, cv2.LINE_AA)
         if noise:
@@ -120,8 +136,24 @@ class SyntheticTable:
     def truth(self) -> list[Box]:
         return [object_box(o) for o in self.objects]
 
+    def add_labelled(self, code: str, color: str = "blue", size: float = 150) -> ObjSpec | None:
+        """Feature 11: a carton with a QR label (e.g. 'LOT B777 EXP 2027-03')."""
+        spot = self._free_spot(size)
+        if spot is None:
+            return None
+        o = ObjSpec("carton", color, "square", spot[0], spot[1], size, 0.0, code=code)
+        self.objects.append(o)
+        return o
+
     def tamper(self, kind: str | None = None) -> dict:
-        """Add, remove or move one object, like a judge would. Returns what was done."""
+        """Add, remove or move one object, like a judge would. Returns what was done.
+        kind 'label' adds a carton labelled with an old lot (a leftover from the previous batch)."""
+        if kind == "label":
+            o = self.add_labelled("LOT B777 EXP 2027-03")
+            if o is None and self.objects:          # a full table: make room, like a judge would
+                self.objects.remove(self.rng.choice(self.objects))
+                o = self.add_labelled("LOT B777 EXP 2027-03")
+            return {"kind": "added", "label": "carton LOT B777" if o else None}
         kind = kind or self.rng.choice(["add", "remove", "move"])
         if kind == "add" or not self.objects:
             o = self.add_random()

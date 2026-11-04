@@ -36,6 +36,7 @@ from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
 from . import preflight
 from .watch import Watch
+from . import labels as lbl
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
 from .marks import HIGHLIGHT, MARK, draw_marks, jpeg
@@ -174,6 +175,9 @@ class State:
         self.dog_stop = threading.Event()
         self.dog_thread: threading.Thread | None = None
         self.watch = Watch(self)
+        self.batch_path = s.data_dir / "batch.json"          # feature 11: the batch being cleared for
+        self.batch = json.loads(self.batch_path.read_text()) if self.batch_path.exists() else {"lot": os.getenv("TROVA_BATCH", "")}
+        self.labels: dict | None = None
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
@@ -392,7 +396,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "last_check": None if not st.last_check else {k: v for k, v in st.last_check.items() if k != "objects"},
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
             "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
-            "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(),
+            "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(), "batch": st.batch,
+            "labels": None if not st.labels else {k: v for k, v in st.labels.items() if k != "codes"},
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
             "metrics": {**{k: v for k, v in m.items() if k != "find_times"}, "find_judged": judged,
@@ -561,6 +566,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     result["line_clear"] = False
                     result["summary"] = (result["summary"] + " Zones: " + "; ".join(bad) + ".").strip()
                 res.cur_marked = draw_zones(res.cur_marked, st.zones, zres)
+            if st.batch.get("lot"):          # feature 11: every label must belong to the current batch
+                try:
+                    lr = lbl.read_labels(st.grok, frames[-1], per[-1], st.batch["lot"])
+                    result["batch"] = lr.as_dict()
+                    if lr.problems:
+                        result["line_clear"] = False
+                        result["summary"] = (result["summary"] + " Labels: " + "; ".join(p["text"] for p in lr.problems) + ".").strip()
+                except GrokError as e:
+                    result["batch"] = {"lot": st.batch["lot"], "error": str(e), "ok": False, "items": [], "problems": []}
+                    result["line_clear"] = False
+                    result["summary"] = (result["summary"] + " Labels could not be read: check them by hand.").strip()
             paths = {"ref_marked": st.audit.save_image("ref_changes", res.ref_marked),
                      "cur_marked": st.audit.save_image("cur_changes", res.cur_marked),
                      "cur_raw": st.audit.save_image("current_raw", res.current)}
@@ -601,6 +617,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          f"<td>{'OK' if z['ok'] else 'VIOLATION'}</td><td>{html.escape('; '.join(z['problems']) or ', '.join(o['name'] for o in z['objects']) or 'nothing inside')}</td></tr>"
                          for z in r["zones"])
             zones_html = f"<h2>Zones</h2><table><tr><th>Zone</th><th>Rule</th><th>Status</th><th>Details</th></tr>{zr}</table>"
+        if r.get("batch"):
+            b = r["batch"]
+            lr = "".join(f"<tr><td>{it['box_id']}</td><td>{html.escape(it['lot'])}</td><td>{html.escape(it['expiry'])}</td>"
+                         f"<td>{html.escape(it['code'] or '')}</td><td>{html.escape(it['text'])}</td></tr>" for it in b.get("items", []))
+            pr = "".join(f"<li><b>{html.escape(p['kind'].replace('_', ' '))}</b>: {html.escape(p['text'])}</li>"
+                         for p in b.get("problems", [])) or "<li>none</li>"
+            zones_html += (f"<h2>Labels (current batch LOT {html.escape(b['lot'])})</h2>"
+                           + (f"<p><b>{html.escape(b['error'])}</b></p>" if b.get("error") else "")
+                           + f"<table><tr><th>Object</th><th>Lot</th><th>Expiry</th><th>Code</th><th>Print</th></tr>{lr or '<tr><td colspan=5>no labels seen</td></tr>'}</table>"
+                           f"<p>Problems:</p><ul>{pr}</ul>")
         return f"""<!doctype html><html><head><meta charset="utf-8"><title>Line clearance record</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:24px auto;padding:0 16px;color:#111;background:#fff}}
@@ -1061,6 +1087,33 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return st.audit.recent(n, kind)
 
     preflight.register(app, st)      # feature 9: GET /api/preflight
+
+    # ------------------------------------------------------------------ feature 11: labels and batch
+    @app.post("/api/batch")
+    def api_batch(lot: str = Form(""), product: str = Form("")):
+        st.batch = {"lot": lot.strip().upper(), "product": product.strip()}
+        st.batch_path.write_text(json.dumps(st.batch))
+        st.audit.event("batch", **st.batch)
+        return st.batch
+
+    @app.post("/api/labels")
+    def api_labels():
+        with st.lock:
+            st.clear_view()
+            f, boxes, occl = st.capture_clean(attempts=3)
+            try:
+                lr = lbl.read_labels(st.grok, f, boxes, st.batch.get("lot", ""))
+            except GrokError as e:
+                return fail(e, "labels")
+            out = lr.as_dict() | {"image": st.audit.save_image("labels", lbl.draw_labels(f, boxes, lr)), "occluded": occl}
+            st.labels = out
+            st.audit.event("labels", **out)
+            return out
+
+    @app.post("/api/labels/sheet")
+    def api_label_sheet():
+        p = lbl.label_sheet(st.s.data_dir / "labels", lot=st.batch.get("lot") or "A123")
+        return {"file": f"/files/labels/{p.name}"}
 
     # ------------------------------------------------------------------ feature 10: watch the line
     @app.post("/api/watch")

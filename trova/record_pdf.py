@@ -74,6 +74,18 @@ def build(check: dict, data_dir: Path) -> bytes:
              "; ".join(z["problems"]) or ", ".join(o["name"] for o in z["objects"]) or "nothing inside"]
             for z in r["zones"]]
         s.append(_table(zrows, [34, 40, 22, 78]))
+    if r.get("batch"):        # feature 11
+        b = r["batch"]
+        s.append(Paragraph(f"Labels (current batch LOT {b.get('lot', '')})", h2))
+        if b.get("error"):
+            s.append(_p(f"Labels could not be read: {b['error']}. Check them by hand.", base))
+        lrows = [["Object", "Lot", "Expiry", "Code", "Print"]] + [
+            [str(it["box_id"]), it["lot"], it["expiry"], it.get("code") or "", it.get("text") or ""] for it in b.get("items", [])]
+        s.append(_table(lrows, [16, 26, 24, 50, 58]) if len(lrows) > 1 else _p("No labels seen.", base))
+        if b.get("problems"):
+            prows = [["Object", "Problem", "Risk", "Details"]] + [
+                [str(p["box_id"]), p["kind"].replace("_", " "), p["risk"], p["text"]] for p in b["problems"]]
+            s.append(_table(prows, [16, 30, 16, 112]))
     if r.get("filtered"):
         s.append(Paragraph("Candidates rejected as false alarms", h2))
         s += [_p(f"C{c['id']} {c['kind']}: {c.get('explanation', '')}", base) for c in r["filtered"]]
