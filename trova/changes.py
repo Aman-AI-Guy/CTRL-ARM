@@ -220,6 +220,13 @@ line_clear is true only if there are no real changes. summary: one sentence for 
 LANG_LINES = {"en": "Write label, explanation and summary in English.",
               "it": "Write label, explanation and summary in Italian.",
               "both": "Write label in English; explanation and summary in English, then the same in Italian after ' / '."}
+MAX_VERIFY = 12
+TOO_MANY = {"en": "{n} differences: too many to verify one by one. Did the camera or the light move? If the table is as "
+                  "approved, save a new reference.",
+            "it": "{n} differenze: troppe da verificare una per una. Si è spostata la camera o la luce? Se il tavolo è "
+                  "approvato, salva un nuovo riferimento.",
+            "both": "{n} differences: too many to verify one by one. Did the camera or the light move? / {n} differenze: "
+                    "troppe. Si è spostata la camera o la luce?"}
 NO_CHANGE = {"en": "No differences from the reference.", "it": "Nessuna differenza rispetto al riferimento.",
              "both": "No differences from the reference. / Nessuna differenza rispetto al riferimento."}
 
@@ -230,6 +237,10 @@ def verify_changes(grok: GrokClient, ref_frame: np.ndarray, cur_frame: np.ndarra
     language = LANG_LINES[lang]
     if not changes:
         return [], [], True, NO_CHANGE[lang], 0.0
+    if len(changes) > MAX_VERIFY:      # close-ups would be too small to judge; this many usually means the camera moved
+        for c in changes:
+            c.risk = c.risk or ("high" if c.kind == "added" else "medium")
+        return list(changes), [], False, TOO_MANY[lang].format(n=len(changes)), 0.0
     ref_names = ref_names or {}
 
     def line(c):
@@ -243,15 +254,18 @@ def verify_changes(grok: GrokClient, ref_frame: np.ndarray, cur_frame: np.ndarra
                                                                   c.cur_box or c.ref_box, pad=0)) for c in changes}}
     r = grok.json(name="trova_verify", prompt=VERIFY_PROMPT.format(n=len(changes), listing=listing, language=language),
                   schema=VERIFY_SCHEMA, images=images, mock_context=ctx)
-    verdicts = {v["change_id"]: v for v in r.data.get("changes", [])}
+    verdicts = {v.get("change_id"): v for v in r.data.get("changes", []) if isinstance(v, dict)}
     real, filtered = [], []
     for c in changes:
         v = verdicts.get(c.id)
         if v is None:          # Grok skipped it: keep it, unverified, so nothing is silently dropped
             real.append(c)
             continue
-        c.verified, c.label, c.explanation, c.risk = v["is_real"], v["label"], v["explanation"], v["risk"]
-        (real if v["is_real"] else filtered).append(c)
+        is_real = v.get("is_real") is not False          # anything but an explicit "false alarm" stays a change
+        c.verified = is_real
+        c.label, c.explanation = v.get("label") or c.label, v.get("explanation") or c.explanation
+        c.risk = v.get("risk") if v.get("risk") in ("low", "medium", "high") else c.risk
+        (real if is_real else filtered).append(c)
     return real, filtered, (not real) and bool(r.data.get("line_clear", True)), r.data.get("summary", ""), r.latency_s
 
 

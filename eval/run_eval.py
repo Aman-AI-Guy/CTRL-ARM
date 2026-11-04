@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -42,7 +43,7 @@ from trova.grok import GrokClient  # noqa: E402
 from trova.proposals import drop_occluders, find_blobs  # noqa: E402
 from trova.synthetic import COLORS, SyntheticTable  # noqa: E402
 
-RESULTS = Path(__file__).resolve().parent / "results"
+RESULTS = Path(os.getenv("TROVA_EVAL_RESULTS") or Path(__file__).resolve().parent / "results")
 
 
 def pct(a, b):

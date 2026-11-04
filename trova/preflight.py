@@ -184,7 +184,7 @@ def main() -> None:
     """python -m trova.preflight [http://localhost:8000] : print the checklist of a running Trova; exit 1 on failure."""
     import requests
     base = (sys.argv[1] if len(sys.argv) > 1 else f"http://localhost:{os.getenv('TROVA_PORT', '8000')}").rstrip("/")
-    d = requests.get(base + "/api/preflight", timeout=120).json()
+    d = requests.get(base + "/api/preflight", timeout=120, headers={"x-trova-token": os.getenv("TROVA_TOKEN", "")}).json()
     mark = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
     for i in d["items"]:
         print(f"{mark[i['status']]}  {i['name']:<12} {i['detail']}" + (f"\n{'':18}-> {i['fix']}" if i["fix"] and i["status"] != "ok" else ""))

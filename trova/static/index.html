@@ -246,7 +246,7 @@ async function toggleVoice() {
   const ok = await TrovaVoice.start({onStatus: s => $('vstatus').textContent = s, onLine: vline,
     onFind: d => { showFind(d); refresh(); }, onCheck: d => { showCheck(d); refresh(); }, onRefresh: refresh,
     onInventory: d => showInventory(d), onFindAll: d => { showFindAll(d); refresh(); },
-    onTool: () => refresh()}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
+    onTool: () => refresh(), onClosed: () => { $('voicebtn').textContent = '🎤 Talk to Trova'; }}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
   if (!ok) $('voicebtn').textContent = '🎤 Talk to Trova';
 }
 // STOP from the keyboard: Escape always (even while typing), space bar unless the cursor is in a text field
@@ -286,6 +286,7 @@ async function refresh() {
   $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (S.arm_blocked ? ' · will not move' : '');
   $('armst').title = S.arm_blocked || ''; $('armst').style.color = S.arm_blocked ? 'var(--warn)' : '';
   $('srcinfo').textContent = 'source: ' + S.source.kind + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
+  if (S.camera_error) { $('srcinfo').textContent = 'CAMERA: ' + S.camera_error; $('srcinfo').style.color = 'var(--bad)'; } else $('srcinfo').style.color = '';
   $('bginfo').textContent = S.background ? 'set' : 'not set';
   $('calinfo').textContent = (S.calibration ? `${S.calibration.source}, err ${S.calibration.error_mm ?? '–'} mm` : '') + (S.click_points.length ? `, ${S.click_points.length} clicks` : '') + (S.arm_points ? `, ${S.arm_points} arm points` : '') + (S.arm_blocked ? ' · arm: ' + S.arm_blocked : '');
   $('demorow').style.display = S.source.kind === 'demo' ? 'flex' : 'none';

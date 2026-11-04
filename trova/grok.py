@@ -31,6 +31,9 @@ import requests
 API_URL = "https://api.x.ai/v1/responses"
 MAX_SIDE = 1600
 OFFLINE_HOLD_S = 30.0
+DROP_HINTS = (("reasoning", ("reasoning", "reasoning_effort")), ("store", ('"store"', "'store'", "store parameter",
+              "field store", "unknown parameter: store")), ("text.format", ("text.format", "json_schema", "response_format",
+              "structured output")))
 
 MockHandler = Callable[[str, list, dict], dict]
 _MOCK_HANDLERS: dict[str, MockHandler] = {}
@@ -95,7 +98,10 @@ def _parse_json(text: str) -> dict:
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1:
         raise GrokError(f"Grok did not return JSON: {text[:300]}")
-    return json.loads(text[start:end + 1])
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError as e:
+        raise GrokError(f"Grok returned broken JSON: {e}") from e
 
 
 class GrokClient:
@@ -195,7 +201,11 @@ class GrokClient:
             if r.status_code == 200:
                 resp = r.json()
                 text = _output_text(resp)
-                return GrokResult(data=_parse_json(text), latency_s=latency, model=model, mock=False,
+                data = _parse_json(text)
+                missing = [k for k in schema.get("required", []) if k not in data]
+                if missing:                    # only possible once text.format was dropped: fail cleanly, no KeyError
+                    raise GrokError(f"Grok answer is missing {missing}: {text[:200]}")
+                return GrokResult(data=data, latency_s=latency, model=model, mock=False,
                                   usage=resp.get("usage"), dropped=dropped, raw_text=text)
             err = r.text.lower()
             if r.status_code in (429, 500, 502, 503, 504):
@@ -205,8 +215,9 @@ class GrokClient:
                 backoff *= 2
                 continue
             if r.status_code in (400, 422):
-                for f, hint in (("reasoning", "reason"), ("store", "store"), ("text.format", "format")):
-                    if f not in self._dropped and hint in err:
+                # drop a field only when the error names that request parameter ("image format" is not text.format)
+                for f, hints in DROP_HINTS:
+                    if f not in self._dropped and any(h in err for h in hints):
                         self._dropped.add(f)
                         dropped.append(f)
                         self._drop(body, f, schema)

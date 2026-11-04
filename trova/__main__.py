@@ -1,5 +1,6 @@
 """python -m trova  ->  starts the web app and prints the URLs for this laptop and for phones."""
 
+import os
 import socket
 
 import uvicorn
@@ -23,8 +24,11 @@ def main() -> None:
     s = load_settings()
     app = create_app(s)
     mode = "MOCK (no XAI_API_KEY: Grok answers are simulated)" if s.mock else f"LIVE Grok: {s.model}, effort {s.effort or 'default'}"
+    token = os.getenv("TROVA_TOKEN", "").strip()
+    q = f"/?token={token}" if token else ""
     print(f"\n  Trova  |  {mode}\n  camera={s.camera}  arm={s.arm}\n"
-          f"  this laptop: http://localhost:{s.port}\n  phones (same Wi-Fi): http://{lan_ip()}:{s.port}\n")
+          f"  this laptop: http://localhost:{s.port}{q}\n  phones (same Wi-Fi): http://{lan_ip()}:{s.port}{q}\n"
+          + ("" if token else "  (anyone on this Wi-Fi can use it: set TROVA_TOKEN=<secret> to lock it)\n"))
     uvicorn.run(app, host=s.host, port=s.port, log_level="warning")
 
 

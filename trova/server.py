@@ -5,6 +5,7 @@ Run:  python -m trova      then open http://localhost:8000 (phones: http://<lapt
 
 from __future__ import annotations
 
+import hmac
 import html
 import json
 import os
@@ -46,8 +47,17 @@ class ArmBusy(RuntimeError):
     """The arm is doing something that must not be interrupted by a new command (HTTP 409)."""
 
 
+class CameraError(RuntimeError):
+    """No usable picture right now (camera unplugged or frozen): HTTP 503, the UI keeps polling."""
+
+
 def decode_upload(data: bytes) -> np.ndarray:
-    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if not data:
+        raise HTTPException(400, "The photo is empty")
+    try:
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    except cv2.error:
+        img = None
     if img is None:
         raise HTTPException(400, "Could not read the image")
     h, w = img.shape[:2]
@@ -126,6 +136,7 @@ class State:
         self.click_points: list[list[float]] = []     # manual calibration: [u, v, table x_mm, table y_mm]
         self.arm_points: list[list[float]] = []       # arm calibration: [u, v, robot x_mm, robot y_mm]
         self.frame_size: list[int] | None = None      # live camera frame size (not an uploaded photo)
+        self.camera_error: str | None = None
         self.arm = make_arm(s.arm, s.data_dir, s.table_w_mm, s.table_h_mm)
         self.arm_thread: threading.Thread | None = None
         self.arm_lock = threading.Lock()        # one motion command at a time
@@ -158,7 +169,12 @@ class State:
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
-        f = self.override.copy() if self.override is not None else self.source.read()
+        try:
+            f = self.override.copy() if self.override is not None else self.source.read()
+            self.camera_error = None
+        except Exception as e:  # noqa: BLE001 - any source failure: report it, never run on a stale picture
+            self.camera_error = str(e)
+            raise CameraError(str(e)) from e
         h, w = f.shape[:2]
         if self.override is None:
             self.frame_size = [w, h]
@@ -273,9 +289,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/files", StaticFiles(directory=str(st.s.data_dir)), name="files")
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
+    token = os.getenv("TROVA_TOKEN", "").strip()
+    if token:   # the venue Wi-Fi is shared: without the token nobody else can move the arm or spend the key
+        @app.middleware("http")
+        async def _require_token(request, call_next):
+            path = request.url.path
+            given = (request.query_params.get("token") or request.headers.get("x-trova-token")
+                     or request.cookies.get("trova_token") or "")
+            if path.startswith(("/api/", "/files/")) and not hmac.compare_digest(given, token):
+                return JSONResponse({"error": "Open Trova with the link that ends in ?token=... (TROVA_TOKEN)"}, 401)
+            resp = await call_next(request)
+            if request.query_params.get("token") == token:
+                resp.set_cookie("trova_token", token, httponly=True, samesite="lax", max_age=7 * 24 * 3600)
+            return resp
+
     @app.exception_handler(ArmBusy)
     def _arm_busy(request, e: ArmBusy):
         return JSONResponse({"error": str(e), "busy": True}, status_code=409)
+
+    @app.exception_handler(CameraError)
+    def _camera_error(request, e: CameraError):
+        return JSONResponse({"error": str(e), "camera": True}, status_code=503)
 
     def fail(e: Exception, where: str):
         st.audit.event("error", where=where, error=str(e))
@@ -328,13 +362,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/state")
     def state():
-        f = st.frame()
+        try:
+            f = st.frame()
+            size = [f.shape[1], f.shape[0]]
+        except CameraError:
+            size = st.frame_size or [1280, 800]
         m = st.metrics
         judged = m["find_ok"] + m["find_wrong"]
         lf = {k: v for k, v in (st.last_find or {}).items() if k not in ("box",)}
         return {
             "mock": st.grok.mock, "grok": st.grok.stats(), "source": st.source.info(),
-            "override": st.override is not None, "frame_size": [f.shape[1], f.shape[0]],
+            "override": st.override is not None, "frame_size": size, "camera_error": st.camera_error,
             "background": st.background is not None, "calibration": st.calib.as_dict() if st.calib else None,
             "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
             "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
@@ -404,7 +442,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, "Say what to find, or send a photo")
         try:
             return do_find(text.strip(), q, [], move)
-        except ArmBusy:
+        except (ArmBusy, CameraError):
             raise
         except (GrokError, ValueError, RuntimeError) as e:
             return fail(e, "find")
@@ -446,7 +484,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 return do_find(p["request"], p["query_image"], p["history"] + [(p["question"], answer)],
                                p.get("move", True), reuse=p.get("reuse"))
-            except ArmBusy:
+            except (ArmBusy, CameraError):
                 raise
             except (GrokError, ValueError, RuntimeError) as e:
                 return fail(e, "clarify")
@@ -822,6 +860,9 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             lf = st.last_find
             if not lf:
                 raise HTTPException(400, "No find to judge")
+            if lf.get("judged"):
+                raise HTTPException(409, "This find is already judged: ask for the next object")
+            lf["judged"] = True
             st.metrics["find_ok" if j.correct else "find_wrong"] += 1
             case = {"frame": lf["frame"], "request": lf["request"], "query": lf["query"],
                     "background": st.background_path,
@@ -839,6 +880,11 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 st.label_wait = case   # next: click the right object, or "not on the table"
             st.audit.event("judge", target=lf["event_id"], correct=j.correct, note=j.note, cause=j.cause)
         else:
+            if not st.last_check:
+                raise HTTPException(400, "Run a check first")
+            if st.last_check.get("judged"):
+                raise HTTPException(409, "This check is already judged")
+            st.last_check["judged"] = True
             st.metrics["check_ok"] += int(j.correct)
             st.metrics["false_alarms"] += j.false_alarms
             st.metrics["missed"] += j.missed

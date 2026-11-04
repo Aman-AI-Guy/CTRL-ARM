@@ -556,7 +556,7 @@ def test_failure_causes_and_summary(tmp_path, monkeypatch):
     sm = c.get("/api/failures").json()
     assert sm["total"] == 4 and {x["cause"] for x in sm["by_cause"]} >= {"wrong_pick", "missed_box",
                                                                           "picked_absent_object", "arm_missed"}
-    env = {**__import__("os").environ, "TROVA_DATA": str(tmp_path), "TROVA_MOCK": "1"}
+    env = {**__import__("os").environ, "TROVA_DATA": str(tmp_path), "TROVA_MOCK": "1", "TROVA_EVAL_RESULTS": str(tmp_path / "results")}
     rep = subprocess.run([sys.executable, "eval/run_eval.py", "failures"], capture_output=True, text=True, env=env)
     assert "wrong pick" in rep.stdout and "P1 arm" in rep.stdout
 

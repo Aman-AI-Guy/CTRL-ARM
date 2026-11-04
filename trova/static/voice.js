@@ -150,18 +150,22 @@ const TrovaVoice = (() => {
     if (!c.available) { status('voice needs XAI_API_KEY (mock mode)'); return false; }
     const tok = await api('/api/voice/session');
     if (tok.error || !tok.token) { status('token error: ' + (tok.error || 'none')); return false; }
-    ctx = new AudioContext({sampleRate: RATE});
-    mic = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, channelCount: 1}});
-    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], {type: 'application/javascript'})));
-    const src = ctx.createMediaStreamSource(mic);
-    node = new AudioWorkletNode(ctx, 'trova-cap');
-    sink = ctx.createGain(); sink.gain.value = 0;
-    src.connect(node); node.connect(sink); sink.connect(ctx.destination);
-    ws = new WebSocket('wss://api.x.ai/v1/realtime?model=' + encodeURIComponent(c.model), ['xai-client-secret.' + tok.token]);
-    ws.onopen = () => { send({type: 'session.update', session: c.session}); status('connected'); };
-    ws.onmessage = (m) => { if (typeof m.data === 'string') onEvent(JSON.parse(m.data)); };
-    ws.onclose = () => { status('voice off'); };
-    ws.onerror = () => status('connection error');
+    try {
+      ctx = new AudioContext({sampleRate: RATE});
+      await ctx.resume();                    // Safari starts contexts suspended
+      mic = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, channelCount: 1}});
+      await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], {type: 'application/javascript'})));
+      const src = ctx.createMediaStreamSource(mic);
+      node = new AudioWorkletNode(ctx, 'trova-cap');
+      sink = ctx.createGain(); sink.gain.value = 0;
+      src.connect(node); node.connect(sink); sink.connect(ctx.destination);
+    } catch (err) { stop(); throw err; }    // no mic (denied, or plain http on a phone): release what we opened
+    const sock = new WebSocket('wss://api.x.ai/v1/realtime?model=' + encodeURIComponent(c.model), ['xai-client-secret.' + tok.token]);
+    ws = sock;
+    sock.onopen = () => { send({type: 'session.update', session: c.session}); status('connected'); };
+    sock.onmessage = (m) => { if (typeof m.data === 'string') onEvent(JSON.parse(m.data)); };
+    sock.onclose = () => { if (ws === sock) { stop(); h.onClosed && h.onClosed(); } };   // dropped: free the mic too
+    sock.onerror = () => status('connection error');
     node.port.onmessage = (ev) => {          // ~100 ms chunks of PCM16
       buf.push(resample(ev.data, ctx.sampleRate)); bufLen += buf[buf.length - 1].length;
       if (bufLen >= RATE / 10) {

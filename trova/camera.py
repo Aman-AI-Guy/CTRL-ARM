@@ -52,6 +52,9 @@ class DemoSource(FrameSource):
         return {"kind": self.kind, "objects": [o.label for o in self.table.objects]}
 
 
+STALE_S = 2.0   # a webcam frame older than this is refused
+
+
 class WebcamSource(FrameSource):
     kind = "webcam"
 
@@ -63,9 +66,11 @@ class WebcamSource(FrameSource):
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open camera {index}")
         self._frame: np.ndarray | None = None
+        self._ts = 0.0                    # when the newest frame arrived
         self._lock = threading.Lock()
         self._run = True
-        threading.Thread(target=self._loop, daemon=True).start()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
         t0 = time.time()
         while self._frame is None and time.time() - t0 < 5:
             time.sleep(0.05)
@@ -73,24 +78,37 @@ class WebcamSource(FrameSource):
             raise RuntimeError(f"Camera {index} opened but sent no frames")
 
     def _loop(self):
+        fails = 0
         while self._run:   # always keep only the newest frame, so finds never use a stale one
             ok, f = self.cap.read()
             if ok:
+                fails = 0
                 with self._lock:
-                    self._frame = f
-            else:
-                time.sleep(0.02)
+                    self._frame, self._ts = f, time.time()
+                continue
+            fails += 1
+            time.sleep(0.02)
+            if fails >= 100 and self._run:      # ~2 s without a frame (Continuity Camera dropped): reopen
+                fails = 0
+                self.cap.release()
+                time.sleep(0.5)
+                self.cap = cv2.VideoCapture(self.index)
 
     def read(self) -> np.ndarray:
         with self._lock:
+            age = time.time() - self._ts
+            if age > STALE_S:      # never run a find or a line-clearance check on an old picture
+                raise RuntimeError(f"Camera {self.index} sent no new frame for {age:.0f} s: check the cable or phone")
             return self._frame.copy()
 
     def info(self) -> dict:
         f = self._frame
-        return {"kind": self.kind, "index": self.index, "size": None if f is None else [f.shape[1], f.shape[0]]}
+        return {"kind": self.kind, "index": self.index, "size": None if f is None else [f.shape[1], f.shape[0]],
+                "frame_age_s": round(time.time() - self._ts, 1)}
 
     def close(self) -> None:
         self._run = False
+        self._thread.join(timeout=2)      # release only after the reader left cap.read() (macOS crashes otherwise)
         self.cap.release()
 
 
@@ -105,18 +123,20 @@ class VideoSource(FrameSource):
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 15
         self.t0 = time.time()
         self.last: np.ndarray | None = None
+        self._lock = threading.Lock()     # several request threads read at once; seek + read must not interleave
 
     def read(self) -> np.ndarray:
         # play in real time and loop
-        n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-        idx = int((time.time() - self.t0) * self.fps) % n
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ok, f = self.cap.read()
-        if ok:
-            self.last = f
-        if self.last is None:
-            raise RuntimeError("Video gave no frames")
-        return self.last.copy()
+        with self._lock:
+            n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+            idx = int((time.time() - self.t0) * self.fps) % n
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, f = self.cap.read()
+            if ok:
+                self.last = f
+            if self.last is None:
+                raise RuntimeError("Video gave no frames")
+            return self.last.copy()
 
     def info(self) -> dict:
         return {"kind": self.kind, "path": self.path}

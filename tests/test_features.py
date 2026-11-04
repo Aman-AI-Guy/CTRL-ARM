@@ -261,3 +261,98 @@ def test_clarify_answer_uses_the_same_frame_and_numbers(tmp_path, monkeypatch):
     r2 = c.post("/api/clarify", data={"answer": f"number {pick}"}).json()
     assert r2["result"]["status"] == "found" and r2["result"]["box"]["box"] == asked[pick]
     assert c.post("/api/clarify", data={"answer": "1"}).status_code == 400   # a second click: nothing pending
+
+
+# ---------------------------------------------------------------- robustness (review fixes)
+def test_grok_field_dropping_is_exact_and_answers_are_validated(monkeypatch):
+    from trova import grok as grok_mod
+    from trova.grok import GrokClient, GrokError
+    monkeypatch.setattr(grok_mod.time, "sleep", lambda s: None)
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}
+    sent = []
+
+    def reply(status, text):
+        return types.SimpleNamespace(status_code=status, text=text, json=lambda: {"output_text": text})
+
+    def image_format_error(url, json=None, **k):
+        sent.append(json)
+        return reply(400, "Unsupported image format: image/heic")
+    g = GrokClient("xai-test")
+    monkeypatch.setattr(g.session, "post", image_format_error)
+    with pytest.raises(GrokError, match="image format"):
+        g.json(name="x", prompt="p", schema=schema)
+    assert g.stats()["dropped_fields"] == [] and len(sent) == 1         # text.format was NOT dropped
+
+    answers = iter([reply(400, "Argument not supported: reasoning_effort"), reply(200, '{"other": 1}')])
+    g2 = GrokClient("xai-test")
+    monkeypatch.setattr(g2.session, "post", lambda *a, **k: next(answers))
+    with pytest.raises(GrokError, match="missing"):                    # never a KeyError deeper in the app
+        g2.json(name="x", prompt="p", schema=schema)
+    assert g2.stats()["dropped_fields"] == ["reasoning"]
+
+
+def test_too_many_changes_skip_grok_and_stay_not_clear():
+    import numpy as np
+
+    from trova.boxes import Box
+    from trova.changes import Change, verify_changes
+    f = np.zeros((400, 600, 3), np.uint8)
+    many = [Change(id=i + 1, kind="added", cur_box=Box(10 + 30 * i, 10, 30 + 30 * i, 40, id=i + 1)) for i in range(15)]
+
+    class NoGrok:
+        def json(self, **k):
+            raise AssertionError("must not call Grok")
+    real, filtered, clear, summary, _ = verify_changes(NoGrok(), f, f, many)
+    assert len(real) == 15 and not clear and "camera" in summary and real[0].risk == "high"
+
+
+def test_frozen_webcam_is_refused():
+    import threading
+    import time
+
+    import numpy as np
+
+    from trova.camera import WebcamSource
+    cam = object.__new__(WebcamSource)
+    cam.index, cam._lock = 0, threading.Lock()
+    cam._frame, cam._ts = np.zeros((10, 10, 3), np.uint8), time.time()
+    assert cam.read().shape == (10, 10, 3)
+    cam._ts -= 5
+    with pytest.raises(RuntimeError, match="no new frame"):
+        cam.read()
+
+
+def test_bad_requests_get_clean_answers(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    assert c.post("/api/find", data={"text": "x"}, files={"photo": ("e.jpg", b"", "image/jpeg")}).status_code == 400
+    assert c.post("/api/upload_scene", files={"photo": ("e.jpg", b"not an image", "image/jpeg")}).status_code == 400
+    assert c.post("/api/zones/point", json={"v": 3}).status_code == 422
+    assert c.post("/api/judge", json={"kind": "change", "correct": True}).status_code == 400
+    c.post("/api/calibration/reset")
+    assert c.post("/api/arm/point", json={"u": 100, "v": 100}).status_code == 200   # default calibration rebuilt
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/find", data={"text": "the red one", "move": "false"})
+    assert c.post("/api/judge", json={"kind": "find", "correct": True}).status_code == 200
+    assert c.post("/api/judge", json={"kind": "find", "correct": True}).status_code == 409   # double click
+    assert c.get("/api/state").json()["metrics"]["find_judged"] == 1
+
+    def broken():
+        raise RuntimeError("Camera 0 sent no new frame for 3 s")
+    monkeypatch.setattr(st.source, "read", broken)
+    s = c.get("/api/state")
+    assert s.status_code == 200 and "no new frame" in s.json()["camera_error"]
+    r = c.post("/api/find", data={"text": "the red one"})
+    assert r.status_code == 503 and r.json()["camera"]
+
+
+def test_access_token(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch, TROVA_TOKEN="s3cret")
+    assert c.get("/").status_code == 200                        # the page loads, the API does not
+    assert c.get("/api/state").status_code == 401
+    assert c.post("/api/arm/point", json={"x_mm": 10, "y_mm": 10}).status_code == 401
+    assert c.get("/api/state", headers={"x-trova-token": "s3cret"}).status_code == 200
+    assert c.get("/?token=s3cret").status_code == 200             # sets the cookie for this device
+    assert c.get("/api/state").status_code == 200
