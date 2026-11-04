@@ -131,7 +131,7 @@ def diff_objects(ref_frame: np.ndarray, ref_boxes: list[Box], cur_frame: np.ndar
             pairs.append((cost, i, j, dist))
     pairs.sort()
     used_r, used_c, changes = set(), set(), []
-    for cost, i, j, dist in pairs:
+    for _cost, i, j, dist in pairs:
         if i in used_r or j in used_c:
             continue
         used_r.add(i)

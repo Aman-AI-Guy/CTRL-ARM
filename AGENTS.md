@@ -18,10 +18,11 @@ operator-signed record. Nothing is trained: plain code finds objects, Grok decid
 ## Run and test
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev,robots]"
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev,robots,ui]"
 cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 .venv/bin/python -m trova       # http://localhost:8000 ; phones: the printed LAN URL
 .venv/bin/pytest -q             # must pass before every commit
+.venv/bin/python tests/browser_smoke.py   # after UI changes: clicks through every feature in Chrome (needs .[ui])
 ```
 
 ## Feature status
@@ -126,6 +127,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Polish: approving a NOT clear line needs a written reason (and decision must be approve/reject); a spoken answer right after Trova's question is treated as the answer (UI race fixed); spoken results opt-in (on with the first push-to-talk) and deferred, because headless Chrome stalled ~15 s while speaking; `tests/browser_smoke.py` (new `ui` extra) clicks through every feature and fails on JS errors, 5xx, unexpected 4xx or sideways scroll on phones; lint clean (ruff E,F,W,B).
 - 2026-11-04 Feature 13: audit trail page with filters, search and CSV; tamper-evident hash chain in events.jsonl with a verify endpoint.
 - 2026-11-04 Feature 12: browser speech fallback (push to talk, EN/IT command parser, stop on interim transcript) and spoken results.
 - 2026-11-04 Feature 11: label, lot and expiry reading with a wrong-batch check inside line clearance; printable demo label sheet.

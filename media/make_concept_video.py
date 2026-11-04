@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
-from scene import (PARK, SCISSORS_NEW, TH, TW, USB, draw_arm, draw_hand, initial_objects,  # noqa: E402
+from scene import (PARK, SCISSORS_NEW, TW, USB, draw_arm, draw_hand, initial_objects,  # noqa: E402
                    make_table, render)
 from trova import changes as chg  # noqa: E402
 from trova.proposals import find_blobs, is_occluded  # noqa: E402

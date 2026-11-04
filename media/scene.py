@@ -150,7 +150,7 @@ def draw_hand(img: np.ndarray, x: float, y: float) -> None:
     img[:] = (img.astype(np.float32) * (1 - 0.3 * sh)[..., None]).astype(np.uint8)
     cv2.line(img, (int(x + 60), -80), (int(x + 4), int(y - 6)), (110, 140, 190), 112, cv2.LINE_AA)
     cv2.ellipse(img, (int(x), int(y)), (62, 74), 10, 0, 360, SKIN, -1, cv2.LINE_AA)
-    for i, dx in enumerate((-36, -12, 12, 34)):
+    for dx in (-36, -12, 12, 34):
         cv2.ellipse(img, (int(x + dx), int(y + 78 - abs(dx) * 0.4)), (12, 30), 8, 0, 360, SKIN, -1, cv2.LINE_AA)
     cv2.ellipse(img, (int(x + 64), int(y + 10)), (14, 34), -40, 0, 360, SKIN, -1, cv2.LINE_AA)
 

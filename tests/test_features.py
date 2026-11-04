@@ -593,3 +593,17 @@ def test_history_rows_csv_and_tamper_evidence(tmp_path, monkeypatch):
     log.write_text("\n".join(lines[:i] + lines[i + 1:]) + "\n")   # or deletes the line
     v = c.get("/api/history/verify").json()
     assert not v["ok"] and v["broken_at"] == i + 1
+
+
+def test_approving_a_not_clear_line_needs_a_reason(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/reference", data={"describe": "false"})
+    app.state.trova.source.table.tamper("add")
+    assert not c.post("/api/changes").json()["result"]["line_clear"]
+    assert c.post("/api/signoff", data={"operator": "Ana", "decision": "approve"}).status_code == 400
+    assert c.post("/api/signoff", data={"operator": "Ana", "decision": "maybe"}).status_code == 400
+    assert c.post("/api/signoff", data={"operator": "Ana", "decision": "reject"}).status_code == 200
+    so = c.post("/api/signoff", data={"operator": "Ana", "decision": "approve", "note": "spare pen, QA informed"}).json()
+    assert so["note"] == "spare pen, QA informed" and "spare pen" in c.get("/api/report").text

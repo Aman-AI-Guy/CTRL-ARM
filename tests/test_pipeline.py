@@ -200,7 +200,7 @@ def test_server_end_to_end(tmp_path, monkeypatch):
     c.post("/api/demo/tamper", data={"kind": "add"})
     chk = c.post("/api/changes").json()
     assert not chk["result"]["line_clear"] and chk["result"]["changes"][0]["kind"] == "added"
-    assert c.post("/api/signoff", data={"operator": "Test", "decision": "approve"}).status_code == 200
+    assert c.post("/api/signoff", data={"operator": "Test", "decision": "approve", "note": "known extra item"}).status_code == 200
     rep = c.get("/api/report").text
     assert "Line clearance record" in rep and "Signed off by Test" in rep
     assert c.post("/api/arm/stop").status_code == 200

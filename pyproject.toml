@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
 robots = ["xarm-python-sdk"]   # UR and Elite need nothing: plain sockets
+ui = ["playwright"]            # tests/browser_smoke.py (uses the installed Google Chrome)
 
 [tool.pytest.ini_options]
 pythonpath = [".", "tests"]

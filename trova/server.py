@@ -591,7 +591,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_signoff(operator: str = Form(...), decision: str = Form("approve"), note: str = Form("")):
         if not st.last_check:
             raise HTTPException(400, "Run a check first")
-        so = {"operator": operator, "decision": decision, "note": note, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+        if decision not in ("approve", "reject"):
+            raise HTTPException(400, "decision must be approve or reject")
+        if not operator.strip():
+            raise HTTPException(400, "Operator name first")
+        if decision == "approve" and not st.last_check["result"]["line_clear"] and not note.strip():
+            raise HTTPException(400, "The line is NOT clear: approving it anyway needs a written reason")
+        so = {"operator": operator.strip(), "decision": decision, "note": note.strip(), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
         st.last_check["signoff"] = so
         st.audit.event("signoff", check=st.last_check["event_id"], **so)
         return so

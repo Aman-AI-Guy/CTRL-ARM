@@ -30,9 +30,11 @@ const TrovaSpeech = (() => {
 
   function say(text, lang) {
     if (typeof speechSynthesis === 'undefined' || !text) return;
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text); u.lang = lang || 'en-US'; u.rate = 1.05;
-    speechSynthesis.speak(u);
+    setTimeout(() => {                       // after the result is drawn: speech must never hold up the page
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text); u.lang = lang || 'en-US'; u.rate = 1.05;
+      speechSynthesis.speak(u);
+    }, 50);
   }
 
   // short sentences for the operator, in the language of the request
