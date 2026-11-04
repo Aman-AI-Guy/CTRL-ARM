@@ -13,6 +13,7 @@ UNTESTED on a real CS tonight: run it once on the Elite simulator or with staff 
 from __future__ import annotations
 
 import socket
+import threading
 import time
 
 from .cartesian import CartesianBackend
@@ -29,9 +30,10 @@ class EliteBackend(CartesianBackend):
         self.ip, self.script_port, self.dash_port, self.accel = ip, script_port, dash_port, accel_m_s2
         self.reader = RtdeReader(ip, rtsi_port, protocol=1, hz=50.0)
         self.sent_at = 0.0
+        self._send_lock = threading.Lock()   # a stop is never overtaken by a move half-sent
 
     def _send(self, script: str) -> None:
-        with socket.create_connection((self.ip, self.script_port), timeout=2) as s:
+        with self._send_lock, socket.create_connection((self.ip, self.script_port), timeout=2) as s:
             s.sendall((script + "\n").encode())
 
     def _dash(self, cmd: str) -> str:

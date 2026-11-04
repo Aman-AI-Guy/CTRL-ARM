@@ -68,3 +68,196 @@ def test_offline_fallback_and_circuit_breaker(monkeypatch):
     monkeypatch.setattr(g3.session, "post", down)
     with pytest.raises(GrokUnavailable):
         find(g3, frame, boxes, "the pen")
+
+
+# ---------------------------------------------------------------- arm safety (review fixes)
+def _wait(cond, timeout=5.0):
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _unique_color(c):
+    colors = [o.split()[0] for o in c.get("/api/state").json()["source"]["objects"]]
+    return next(col for col in colors if colors.count(col) == 1)
+
+
+def test_stop_latches_in_every_driver():
+    from trova.arm import CartesianArm, FakeCartesian, FakeJointBackend, SimArm, TaughtGridArm
+    sim = SimArm(speed_mm_s=5000)
+    sim.stop()
+    assert not sim.point_at(100, 100) and sim.status()["state"] == "stopped"   # refused until ready()
+    sim.ready()
+    assert sim.point_at(100, 100)
+    cart = CartesianArm(FakeCartesian(), 150, None, None, speed_mm_s=5000)
+    cart.stop()
+    assert not cart.point_at(300, 0) and cart.backend.history == []
+    cart.ready()
+    assert cart.point_at(300, 0)
+    grid = TaughtGridArm(FakeJointBackend(), Path("/nonexistent/grid.json"))
+    grid.stop()
+    assert not grid._go([0.0, 0.0], None)
+
+
+def test_stop_racing_a_send_is_sent_again_and_late_start_is_waited_for():
+    import time
+
+    from trova.arm import CartesianArm, FakeCartesian
+
+    class RacingStop(FakeCartesian):           # STOP arrives while the move is still being sent (UR/Elite)
+        def __init__(self):
+            super().__init__()
+            self.stops = 0
+            self.arm = None
+
+        def move_linear(self, x, y, z, speed_mm_s):
+            super().move_linear(x, y, z, speed_mm_s)
+            self.arm._stop.set()               # what stop() does from the other thread, mid-send
+
+        def stop(self):
+            self.stops += 1
+            super().stop()
+    be = RacingStop()
+    arm = CartesianArm(be, 150, None, None, speed_mm_s=50)
+    be.arm = arm
+    assert not arm.point_at(400, 100) and arm.state == "stopped" and be.stops >= 1
+
+    class LateStart(FakeCartesian):            # xArm: reports "not moving" for a moment after accepting a move
+        def move_linear(self, x, y, z, speed_mm_s):
+            self.t_go, self.go = time.time() + 0.25, (x, y, z, speed_mm_s)
+
+        def is_moving(self):
+            if getattr(self, "go", None) and time.time() >= self.t_go:
+                super().move_linear(*self.go)
+                self.go = None
+            return False if getattr(self, "go", None) else super().is_moving()
+    late = CartesianArm(LateStart(), 150, None, None, speed_mm_s=2000)
+    assert late.point_at(400, 100), late.last_error
+
+
+def test_stop_during_tour_pause_and_during_a_find(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from test_pipeline import _client
+    from trova import finder
+    from trova.grok import register_mock
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    st.arm.speed = 5000
+    c.post("/api/background", data={"mode": "capture"})
+    r = c.post("/api/find_all", data={"text": "all the black things"}).json()
+    assert r["moved"] and len(r["targets"]) >= 2
+    assert _wait(lambda: st.tour and st.tour["index"] == 0 and st.arm.status()["state"] == "idle")
+    time.sleep(0.2)                                       # inside the 1 s pause after the first target
+    c.post("/api/arm/stop")
+    st.arm_thread.join(timeout=3)
+    assert st.tour["status"] == "stopped" and st.tour["index"] == 0
+
+    unique = _unique_color(c)
+    slow = lambda prompt, images, ctx: (time.sleep(0.8), finder._mock_select(prompt, images, ctx))[1]  # noqa: E731
+    register_mock("trova_select", slow)
+    try:
+        out = {}
+        th = threading.Thread(target=lambda: out.update(c.post("/api/find", data={"text": f"the {unique} one"}).json()))
+        th.start()
+        time.sleep(0.3)
+        st.stop_arm()                                     # STOP while Grok is thinking
+        th.join(timeout=5)
+    finally:
+        register_mock("trova_select", finder._mock_select)
+    assert out["result"]["status"] == "found" and not out["moved"] and "STOP" in out["arm_blocked"]
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()   # a new request moves again
+    assert r["moved"]
+
+
+def test_one_motion_at_a_time_and_interrupted_lift(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch, TROVA_ALLOW_LIFT="1")
+    st = app.state.trova
+    c.post("/api/background", data={"mode": "capture"})
+    unique = _unique_color(c)
+    c.post("/api/find", data={"text": f"the {unique} one", "move": "false"})
+    st.arm.speed = 60
+    assert c.post("/api/arm/lift_tray", json={"place_u": 900, "place_v": 500}).json()["ok"]
+    assert _wait(lambda: st.arm.status()["state"] == "moving")
+    r = c.post("/api/arm/point", json={"x_mm": 100, "y_mm": 100})
+    assert r.status_code == 409 and "lifting" in str(r.json())          # a lift is never cut by a new move
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()       # finding works, moving does not
+    assert not r["moved"] and "lifting" in r["arm_blocked"]
+    c.post("/api/arm/stop")
+    st.arm_thread.join(timeout=3)
+    assert st.lift_interrupted and "lift was interrupted" in c.get("/api/state").json()["arm_blocked"]
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
+    assert not r["moved"] and "interrupted" in r["arm_blocked"]
+    st.arm.speed = 5000
+    c.post("/api/arm/home")                              # the operator's explicit way out
+    assert not st.lift_interrupted and c.post("/api/find", data={"text": f"the {unique} one"}).json()["moved"]
+    first = st.arm_thread
+    c.post("/api/arm/point", json={"x_mm": 100, "y_mm": 100})
+    assert not first.is_alive()                          # the previous move ended before the new one began
+
+
+def test_calibration_safety(tmp_path, monkeypatch):
+    import cv2
+    import numpy as np
+
+    from test_pipeline import _client
+    from trova.calibration import Calibration
+    good = [[0, 0, 0, 0], [1000, 0, 500, 0], [1000, 800, 500, 400], [0, 800, 0, 400]]
+    assert Calibration(points=[list(map(float, p)) for p in good]).fit() < 0.01
+    for bad, why in (([[0, 0, 0, 0], [5, 3, 0, 1], [1000, 800, 500, 400], [0, 800, 0, 400]], "same spot"),
+                     ([[0, 0, 0, 0], [500, 400, 250, 200], [1000, 800, 500, 400], [0, 800, 0, 400]], "line"),
+                     (good + [[500, 400, 400, 50]], "wrong")):
+        with pytest.raises(ValueError, match=why):
+            Calibration(points=[list(map(float, p)) for p in bad]).fit()
+    (tmp_path / "bad.json").write_text('{"points": [[0,0,0,0],[1,1,1,1]]}')
+    assert Calibration.load(tmp_path / "bad.json") is None              # a bad file never blocks start-up
+
+    app, c = _client(tmp_path, monkeypatch, TROVA_ARM="cartesian:fake", TROVA_ARM_LIMITS="100,700,-300,300,0,400",
+                     TROVA_ARM_HOME_MM="300,250,250", TROVA_ARM_SPEED_MM_S="5000")
+    st = app.state.trova
+    fake = st.arm.backend
+    for u, v, x, y in [(0, 0, 0, 0), (1280, 0, 600, 0), (1280, 800, 600, 400), (0, 800, 0, 400)]:
+        c.post("/api/calibration/click", json={"u": u, "v": v, "x_mm": x, "y_mm": y})   # table-mm clicks
+    fake.pos = [300.0, 0.0, 0.0]
+    fake.target = list(fake.pos)
+    out = c.post("/api/calibration/arm_click", json={"u": 640, "v": 400}).json()
+    assert out["points"] == 1 and st.calib.source == "clicks" and st.arm_blocked()   # never mixed
+    for (u, v), (x, y) in zip([(0, 0), (1280, 0), (1280, 800)], [(200, -200), (520, -200), (520, 0)]):
+        fake.pos = [x, y, 0.0]
+        fake.target = list(fake.pos)
+        out = c.post("/api/calibration/arm_click", json={"u": u, "v": v})
+    assert out.status_code == 400 and "not kept" in out.json()["error"]  # the first arm click was the wrong one
+    c.post("/api/calibration/reset")
+    for (u, v), (x, y) in zip([(0, 0), (1280, 0), (1280, 800), (0, 800)], [(200, -200), (520, -200), (520, 0), (200, 0)]):
+        fake.pos = [x, y, 0.0]
+        fake.target = list(fake.pos)
+        out = c.post("/api/calibration/arm_click", json={"u": u, "v": v}).json()
+    assert st.calib.source == "arm" and st.calib.size == st.frame_size and st.arm_blocked() is None
+    ok, buf = cv2.imencode(".jpg", np.full((1500, 2000, 3), 128, np.uint8))
+    c.post("/api/upload_scene", files={"photo": ("p.jpg", buf.tobytes(), "image/jpeg")})
+    assert "uploaded photo" in st.arm_blocked()
+    assert c.post("/api/arm/point", json={"u": 1900, "v": 1400}).status_code == 409
+    c.post("/api/upload_scene/clear")
+    st.frame_size = [1920, 1080]                          # the camera came back at another resolution
+    assert "calibrate again" in st.arm_blocked()
+
+
+def test_clarify_answer_uses_the_same_frame_and_numbers(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    c.post("/api/background", data={"mode": "capture"})
+    r = c.post("/api/find", data={"text": "the black one", "move": "false"}).json()
+    assert r["result"]["status"] == "clarify"
+    asked = {b["id"]: b["box"] for b in r["boxes"]}
+    pick = r["result"]["candidate_ids"][0]
+    st.source.table.tamper("move")                        # the scene changes before the answer
+    r2 = c.post("/api/clarify", data={"answer": f"number {pick}"}).json()
+    assert r2["result"]["status"] == "found" and r2["result"]["box"]["box"] == asked[pick]
+    assert c.post("/api/clarify", data={"answer": "1"}).status_code == 400   # a second click: nothing pending

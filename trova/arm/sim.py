@@ -24,7 +24,10 @@ class SimArm(ArmDriver):
         self._lock = threading.Lock()
 
     def _move(self, x: float, y: float) -> bool:
-        self._stop.clear()
+        if self._stop.is_set():          # STOP latched: refuse until the server calls ready()
+            with self._lock:
+                self.state = "stopped"
+            return False
         with self._lock:
             self.state, self.target = "moving", (x, y)
         while True:
@@ -51,7 +54,7 @@ class SimArm(ArmDriver):
 
     def run_waypoints(self, wps: list[tuple], speed_factor: float = 0.5) -> bool:
         """Feature 7 in the simulator: the tip follows the XY path (height is not drawn)."""
-        for label, x, y, z in wps:
+        for label, x, y, _z in wps:
             self.step = label
             if not self._move(x, y):
                 self.step = None

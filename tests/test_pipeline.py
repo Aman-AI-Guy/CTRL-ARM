@@ -247,6 +247,11 @@ def test_cartesian_arm_limits_stop_and_guarded_server(tmp_path, monkeypatch):
 
     from trova.config import load_settings
     from trova.server import create_app
+    bare = create_app(load_settings())                     # no safety box, no home pose: never moves
+    assert "TROVA_ARM_LIMITS" in bare.state.trova.arm_blocked()
+    assert TestClient(bare).post("/api/arm/point", json={"x_mm": 5000, "y_mm": -4000}).status_code == 409
+    monkeypatch.setenv("TROVA_ARM_LIMITS", "100,700,-300,300,0,400")
+    monkeypatch.setenv("TROVA_ARM_HOME_MM", "300,250,250")
     app = create_app(load_settings())
     c = TestClient(app)
     c.post("/api/background", data={"mode": "capture"})

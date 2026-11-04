@@ -14,6 +14,7 @@ A new program sent to 30002 replaces the running one, so stop = send a program t
 from __future__ import annotations
 
 import socket
+import threading
 import time
 
 from .cartesian import CartesianBackend
@@ -31,9 +32,10 @@ class URBackend(CartesianBackend):
         self.reader = RtdeReader(ip, rtde_port, protocol=2)
         self.target: tuple | None = None
         self.sent_at = 0.0
+        self._send_lock = threading.Lock()   # a stop is never overtaken by a move half-sent
 
     def _send(self, script: str) -> None:
-        with socket.create_connection((self.ip, self.script_port), timeout=2) as s:
+        with self._send_lock, socket.create_connection((self.ip, self.script_port), timeout=2) as s:
             s.sendall(script.encode())
 
     def _dash(self, cmd: str) -> str:

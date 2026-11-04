@@ -84,7 +84,9 @@ class TaughtGridArm(ArmDriver):
         return [sum(wi * s["q"][j] for wi, s in zip(w, near)) / sum(w) for j in range(n)]
 
     def _go(self, q: list[float], tip) -> bool:
-        self._stop.clear()
+        if self._stop.is_set():          # STOP latched until the server calls ready()
+            self.state = "stopped"
+            return False
         self.state = "moving"
         ok = self.backend.move_joints(q, self.duration_s, self._stop)
         self.state = "idle" if ok else "stopped"

@@ -32,8 +32,8 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Find by words / photo, clarifying question, direct-box fallback | Done, tested (mock + request format) | `finder.py` | Needs live key to verify accuracy |
 | What changed (match + 2-of-3 persistence + Grok verify + naive baseline) | Done, tested | `changes.py` | |
 | Line-clearance record + sign-off (HTML) | Done | `server.py` `/api/report` | |
-| Cobot drivers UR / Elite (sockets), xArm (SDK), safety box, stop-and-hold | Done, tested vs fakes | `arm/` | Not yet run on real hardware |
-| Calibration (ArUco, clicks, arm-tip clicks) | Done, tested | `calibration.py`, `server.py` | Real arm refuses to move until calibrated with the arm |
+| Cobot drivers UR / Elite (sockets), xArm (SDK), safety box, stop-and-hold | Done, tested vs fakes | `arm/` | Not yet run on real hardware. STOP latches (drivers refuse until the server calls `ready()` for a new command); one motion at a time (`State.start_arm` under `arm_lock`); STOP during a find cancels its move; a real arm needs `TROVA_ARM_LIMITS` and `TROVA_ARM_HOME_MM` or it refuses to move |
+| Calibration (ArUco, clicks, arm-tip clicks) | Done, tested | `calibration.py`, `server.py` | Real arm refuses to move until calibrated with the arm. Arm points (`st.arm_points`) are never mixed with table clicks; duplicate / collinear points and fits worse than 15 mm are rejected (the bad point is dropped); the image size is stored and an uploaded photo or another resolution blocks the arm |
 | Grok Voice (realtime, confirm-before-move, stop word) | Done; config/token tested | `voice.py`, `static/voice.js` | Not yet heard live |
 | Optional dog room search (sim) | Done, tested | `dog.py` | Go2 driver is a template |
 | Jury mode + eval script | Done, tested | `server.py`, `eval/run_eval.py` | |
@@ -60,8 +60,10 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 ### Rules that keep it safe and testable
 1. **Grok never moves the arm.** Grok returns structured JSON; plain code validates it, converts pixels to mm and
    calls the ArmDriver. Every move passes the safety box (`TROVA_ARM_LIMITS`).
-2. **STOP never waits for a model**: UI button, space bar, and the stop word in the live voice transcript all call
-   `/api/arm/stop` directly. Stop = hold position, never torque off.
+2. **STOP never waits for a model**: UI button, space bar, Escape, and the stop word in the live voice transcript all
+   call `/api/arm/stop` directly. Stop = hold position, never torque off. STOP latches: drivers never clear it
+   themselves; only `State.start_arm` / `clear_view` call `arm.ready()` for a new command. Every motion goes through
+   `State.start_arm` (one at a time; a running tray lift is never cut, 409 `ArmBusy`).
 3. **Every Grok call has a mock handler** (`register_mock(name, fn)` next to the call) so the app and tests run
    without a key. New Grok call = new schema + prompt + mock + test.
 4. **English and Italian**: prompts answer in the language of the request; reports follow `TROVA_LANG`.
@@ -115,6 +117,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Review fixes, arm safety: STOP latches in every driver (was lost between tour targets, lift waypoints and during a find); one motion at a time with 409 when busy; a running lift is never interrupted by a new command, an interrupted lift blocks automatic moves until Arm home; UR/Elite sends serialised and STOP re-sent if it raced a move; xArm late start tolerated; real arms need a safety box and home pose. Calibration: arm points separate from table clicks, degenerate and >15 mm fits rejected, image size stored, uploaded photo blocks the arm, bad saved file no longer blocks start-up. Clarify answers reuse the question's frame and box numbers. Keyboard: Escape = STOP always; space no longer swallowed by the search box.
 - 2026-11-04 Feature 8: offline fallback when Wi-Fi or xAI is down (local colour match, OFFLINE badge, 30 s circuit breaker); eval never falls back.
 - 2026-11-04 Fix: UI buttons calling `form()` from inline onclick did nothing (the name resolves to `button.form`): helper renamed `sendForm`; test forbids shadowed names in inline handlers. Header wraps on phones; favicon 404 gone; already-shown errors no longer reported as uncaught.
 - 2026-11-04 README and morning guide list the extra features; guide mentions /jury and AGENTS.md.

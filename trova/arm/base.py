@@ -3,6 +3,10 @@
 Drivers may block inside point_at()/home(): the server runs them in a worker thread, and
 stop() is called from another thread, so stop() must interrupt a motion in progress.
 Stop means HOLD the current position, never torque off (a torque-off arm drops).
+
+STOP LATCHES: after stop(), every motion call refuses (returns False) until ready() is called.
+Only the server calls ready(), once per new user command, under its arm lock; a driver never
+clears the stop by itself, so a STOP pressed between two moves (a tour, a tray lift) is never lost.
 """
 
 from __future__ import annotations
@@ -24,6 +28,12 @@ class ArmDriver(ABC):
     @abstractmethod
     def stop(self) -> None:
         """Halt now and hold position. Safe to call at any time, from any thread."""
+
+    def ready(self) -> None:
+        """Accept motion again after a STOP. Called by the server at the start of a new command."""
+        ev = getattr(self, "_stop", None)
+        if ev is not None:
+            ev.clear()
 
     @abstractmethod
     def status(self) -> dict:

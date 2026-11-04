@@ -39,7 +39,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
 <header>
   <h1>Trova</h1><span id="mode" class="badge">…</span><span id="armst" class="badge">arm …</span>
   <a href="/jury" target="_blank" class="badge" style="text-decoration:none">scoreboard</a>
-  <button id="stop" onclick="post('/api/arm/stop')">STOP</button>
+  <button id="stop" onclick="post('/api/arm/stop')" title="Space bar or Escape">STOP</button>
 </header>
 <main>
 <section id="viewcol">
@@ -149,6 +149,7 @@ function photoChosen() { photoFile = $('photo').files[0] || null; $('photoname')
 
 async function doFind() {
   const f = new FormData(); f.append('text', $('q').value); if (photoFile) f.append('photo', photoFile);
+  $('q').blur();   // so the space bar is STOP again while the arm moves
   $('findbtn').disabled = true; $('findbtn').textContent = 'Looking…';
   try { showFind(await call('/api/find', {method: 'POST', body: f})); } catch (e) {} finally {
     $('findbtn').disabled = false; $('findbtn').textContent = 'Find'; photoFile = null; $('photo').value = ''; $('photoname').textContent = ''; refresh(); }
@@ -206,6 +207,7 @@ async function finishZone() {
 // ---- feature 6: point at all
 async function doFindAll() {
   const q = $('q').value.trim(); if (!q) return alert('Type what to find, e.g. all the pens');
+  $('q').blur();
   const el = $('findres'); el.className = 'result show'; el.innerHTML = 'Looking for every match…';
   try { showFindAll(await call('/api/find_all', (() => { const f = new FormData(); f.append('text', q); return {method: 'POST', body: f}; })())); } catch (e) {}
   refresh();
@@ -247,8 +249,10 @@ async function toggleVoice() {
     onTool: () => refresh()}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
   if (!ok) $('voicebtn').textContent = '🎤 Talk to Trova';
 }
-document.addEventListener('keydown', e => {   // space bar = STOP, unless typing
-  if (e.code === 'Space' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) { e.preventDefault(); post('/api/arm/stop'); }
+// STOP from the keyboard: Escape always (even while typing), space bar unless the cursor is in a text field
+const typing = () => { const a = document.activeElement; return a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && ['text', 'number', 'search'].includes(a.type))); };
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' || (e.code === 'Space' && !typing())) { e.preventDefault(); post('/api/arm/stop'); }
 });
 
 // ---- optional dog
@@ -279,10 +283,11 @@ async function refresh() {
   frameSize = S.frame_size;
   const m = $('mode'); m.textContent = S.mock ? 'MOCK Grok' : S.grok.offline ? 'OFFLINE: Grok unreachable' : 'LIVE ' + S.grok.model;
   m.className = 'badge ' + (S.mock || S.grok.offline ? 'mock' : 'live'); m.title = S.grok.last_error || '';
-  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '');
+  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (S.arm_blocked ? ' · will not move' : '');
+  $('armst').title = S.arm_blocked || ''; $('armst').style.color = S.arm_blocked ? 'var(--warn)' : '';
   $('srcinfo').textContent = 'source: ' + S.source.kind + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
   $('bginfo').textContent = S.background ? 'set' : 'not set';
-  $('calinfo').textContent = S.calibration ? `${S.calibration.source}, err ${S.calibration.error_mm ?? '–'} mm` + (S.click_points.length ? `, ${S.click_points.length} clicks` : '') : '';
+  $('calinfo').textContent = (S.calibration ? `${S.calibration.source}, err ${S.calibration.error_mm ?? '–'} mm` : '') + (S.click_points.length ? `, ${S.click_points.length} clicks` : '') + (S.arm_points ? `, ${S.arm_points} arm points` : '') + (S.arm_blocked ? ' · arm: ' + S.arm_blocked : '');
   $('demorow').style.display = S.source.kind === 'demo' ? 'flex' : 'none';
   if (document.activeElement !== $('thresh')) $('thresh').value = S.tuning.thresh;
   if (document.activeElement !== $('minarea')) $('minarea').value = S.tuning.min_area_frac;

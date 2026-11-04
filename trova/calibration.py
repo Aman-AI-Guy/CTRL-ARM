@@ -13,19 +13,31 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from itertools import combinations
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 ARUCO_DICT = cv2.aruco.DICT_4X4_50
+MAX_ERROR_MM = 15.0      # a fit worse than this has a wrong point in it
+
+
+def _flat(pts: np.ndarray) -> bool:
+    """True if the points are (nearly) on one line: no usable homography."""
+    diag2 = max(float(np.sum((a - b) ** 2)) for a, b in combinations(pts, 2))
+    if len(pts) == 4:     # an exact fit: every triple must span a real triangle
+        return any(abs((b - a)[0] * (c - a)[1] - (b - a)[1] * (c - a)[0]) / 2 < 0.01 * diag2
+                   for a, b, c in combinations(pts, 3))
+    return cv2.contourArea(cv2.convexHull(pts.astype(np.float32))) < 0.05 * diag2
 
 
 @dataclass
 class Calibration:
     H: np.ndarray | None = None                       # 3x3, pixel -> mm
     points: list[list[float]] = field(default_factory=list)   # [u, v, x_mm, y_mm]
-    source: str = "none"                              # none | default | aruco | clicks
+    source: str = "none"                              # none | default | aruco | aruco_robot | clicks | arm
+    size: list[int] | None = None                     # [w, h] of the camera image it was made on
 
     @property
     def ok(self) -> bool:
@@ -44,11 +56,20 @@ class Calibration:
             raise ValueError("Need at least 4 points to calibrate")
         src = np.array([[p[0], p[1]] for p in self.points], np.float64)
         dst = np.array([[p[2], p[3]] for p in self.points], np.float64)
+        for a, b in combinations(range(len(src)), 2):
+            if np.hypot(*(src[a] - src[b])) < 10 or np.hypot(*(dst[a] - dst[b])) < 3:
+                raise ValueError("Two calibration points are on the same spot: reset, then use spread-out points")
+        if _flat(src) or _flat(dst):
+            raise ValueError("Calibration points are nearly in a line: reset, then use points near the table corners")
         H, _ = cv2.findHomography(src, dst, cv2.RANSAC if len(self.points) > 4 else 0, 5.0)
         if H is None:
             raise ValueError("Points are degenerate (collinear?)")
         self.H = H
-        return self.error_mm()
+        err = self.error_mm()
+        if err > MAX_ERROR_MM:
+            self.H = None
+            raise ValueError(f"Calibration error {err:.0f} mm: one of the points is wrong. Reset and redo")
+        return err
 
     def pixel_to_table(self, u: float, v: float) -> tuple[float, float]:
         p = cv2.perspectiveTransform(np.array([[[u, v]]], np.float64), self.H)[0, 0]
@@ -65,19 +86,22 @@ class Calibration:
         return float(np.mean(errs))
 
     def as_dict(self) -> dict:
-        return {"source": self.source, "points": self.points, "ok": self.ok,
+        return {"source": self.source, "points": self.points, "ok": self.ok, "size": self.size,
                 "error_mm": None if not self.ok else round(self.error_mm(), 2)}
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps({"source": self.source, "points": self.points}, indent=2))
+        path.write_text(json.dumps({"source": self.source, "points": self.points, "size": self.size}, indent=2))
 
     @classmethod
     def load(cls, path: Path) -> "Calibration | None":
         if not path.exists():
             return None
-        d = json.loads(path.read_text())
-        c = cls(points=d["points"], source=d.get("source", "clicks"))
-        c.fit()
+        try:
+            d = json.loads(path.read_text())
+            c = cls(points=d["points"], source=d.get("source", "clicks"), size=d.get("size"))
+            c.fit()
+        except (ValueError, KeyError, TypeError):   # a bad saved file must not stop the app from starting
+            return None
         return c
 
 
@@ -102,7 +126,7 @@ def calibrate_aruco(frame: np.ndarray, positions_mm: dict[int, tuple[float, floa
     pts = [[*found[i], *positions_mm[i]] for i in sorted(found) if i in positions_mm]
     if len(pts) < 4:
         raise ValueError(f"Saw markers {sorted(found)}; need 4 of {sorted(positions_mm)}")
-    c = Calibration(points=[list(map(float, p)) for p in pts], source="aruco")
+    c = Calibration(points=[list(map(float, p)) for p in pts], source="aruco", size=[frame.shape[1], frame.shape[0]])
     c.fit()
     return c
 

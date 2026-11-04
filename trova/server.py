@@ -42,6 +42,10 @@ STATIC = Path(__file__).parent / "static"
 SLOW_S = float(os.getenv("TROVA_SLOW_S", "8"))
 
 
+class ArmBusy(RuntimeError):
+    """The arm is doing something that must not be interrupted by a new command (HTTP 409)."""
+
+
 def decode_upload(data: bytes) -> np.ndarray:
     img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
@@ -57,6 +61,11 @@ def decode_upload(data: bytes) -> np.ndarray:
 class Tune(BaseModel):
     thresh: float | None = None
     min_area_frac: float | None = None
+
+
+class UV(BaseModel):
+    u: float
+    v: float
 
 
 class ClickPoint(BaseModel):
@@ -114,9 +123,16 @@ class State:
         self.background_path: str | None = None   # saved copy, so eval cases can be replayed
         self.calib_path = s.data_dir / "calibration.json"
         self.calib = Calibration.load(self.calib_path)
-        self.click_points: list[list[float]] = []
+        self.click_points: list[list[float]] = []     # manual calibration: [u, v, table x_mm, table y_mm]
+        self.arm_points: list[list[float]] = []       # arm calibration: [u, v, robot x_mm, robot y_mm]
+        self.frame_size: list[int] | None = None      # live camera frame size (not an uploaded photo)
         self.arm = make_arm(s.arm, s.data_dir, s.table_w_mm, s.table_h_mm)
         self.arm_thread: threading.Thread | None = None
+        self.arm_lock = threading.Lock()        # one motion command at a time
+        self.cancel = threading.Event()         # set by STOP; a fresh one per command
+        self.stop_ts = 0.0                      # wall time of the last STOP
+        self.arm_job = ""                       # point | tour | lift | home
+        self.lift_interrupted = False           # the fork may still be in a slot: no automatic moves
         self.thresh, self.min_area = s.blob_thresh, s.min_area_frac
         self.last_find: dict | None = None
         self.pending: dict | None = None
@@ -144,6 +160,8 @@ class State:
     def frame(self) -> np.ndarray:
         f = self.override.copy() if self.override is not None else self.source.read()
         h, w = f.shape[:2]
+        if self.override is None:
+            self.frame_size = [w, h]
         if self.calib is None or (self.calib.source == "default" and self.calib.points[2][:2] != [float(w), float(h)]):
             self.calib = Calibration.default(w, h, self.s.table_w_mm, self.s.table_h_mm)
         return f
@@ -152,34 +170,91 @@ class State:
         raw = find_blobs(frame, self.background, self.thresh, self.min_area)
         return drop_occluders(raw, frame.shape), is_occluded(raw, frame.shape)
 
-    def arm_blocked(self) -> str | None:
-        """A real Cartesian arm only moves once pixels are calibrated in ITS coordinates."""
-        if isinstance(self.arm, CartesianArm) and (not self.calib or self.calib.source not in ("arm", "aruco_robot")):
-            return "Calibrate with the arm first (Setup: Calibrate with arm, or ArUco with markers recorded by the arm)"
+    def arm_blocked(self, pixels: bool = True) -> str | None:
+        """Why the arm must not move right now (None = it may). pixels=False: the target is given in robot mm,
+        so only the safety rules apply, not the camera calibration."""
+        if self.arm_job == "lift" and self.arm_thread and self.arm_thread.is_alive():
+            return "The arm is lifting a tray: wait for it to finish, or press STOP"
+        if self.lift_interrupted:
+            return ("A tray lift was interrupted, the fork may still be in the slot: free the arm by hand "
+                    "(Freedrive) or with the pendant, then press Arm home")
+        if isinstance(self.arm, CartesianArm):
+            if not self.arm.limits:
+                return "No safety box: set TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax (robot mm) with staff, restart"
+            if not self.arm.home_mm:
+                return "No home pose: set TROVA_ARM_HOME_MM=x,y,z outside the camera view, restart"
+            if not pixels:
+                return None
+            if not self.calib or self.calib.source not in ("arm", "aruco_robot"):
+                return "Calibrate with the arm first (Setup: Calibrate with arm, or ArUco with markers recorded by the arm)"
+            if self.override is not None:
+                return "An uploaded photo is shown: the arm only follows the live camera (Back to live)"
+            if self.calib.size and self.frame_size and list(self.calib.size) != list(self.frame_size):
+                return (f"Calibrated at {self.calib.size[0]}x{self.calib.size[1]} but the camera now gives "
+                        f"{self.frame_size[0]}x{self.frame_size[1]}: calibrate again")
         return None
+
+    # ---------- arm motion: one command at a time, STOP always wins
+    def stop_arm(self) -> None:
+        """Never waits for anything: mark the time, cancel the running command, stop the driver."""
+        self.stop_ts = time.time()
+        self.cancel.set()
+        self.arm.stop()
+
+    def _take_arm(self, job: str) -> threading.Event:
+        """Caller holds arm_lock. End the running command (unless it must not be cut), then arm a fresh cancel."""
+        if self.arm_thread and self.arm_thread.is_alive():
+            if self.arm_job == "lift":
+                raise ArmBusy("The arm is lifting a tray: wait for it to finish, or press STOP")
+            self.cancel.set()
+            self.arm.stop()
+            self.arm_thread.join(timeout=3)
+            if self.arm_thread.is_alive():
+                raise ArmBusy("The arm is still finishing the last move: wait a moment and retry")
+        self.cancel = threading.Event()
+        self.arm.ready()
+        self.arm_job = job
+        return self.cancel
+
+    def start_arm(self, fn, *args, since: float | None = None, job: str = "point") -> bool:
+        """Run a motion in the arm thread. `since`: when the user asked; a STOP after that cancels it.
+        Returns False when it was cancelled before starting."""
+        since = time.time() if since is None else since
+        with self.arm_lock:
+            cancel = self._take_arm(job)
+            if self.stop_ts >= since:          # STOP pressed while Trova was still thinking
+                cancel.set()
+                self.arm.stop()
+                return False
+            self.arm_thread = threading.Thread(target=fn, args=args, daemon=True)
+            self.arm_thread.start()
+            return True
 
     def clear_view(self) -> None:
         """A real arm parks before every capture so it is not mistaken for an object."""
-        if not isinstance(self.arm, SimArm):
+        if isinstance(self.arm, SimArm):
+            return
+        if self.lift_interrupted:
+            raise ArmBusy(self.arm_blocked())
+        with self.arm_lock:
+            self._take_arm("home")
             self.arm.home()
 
-    def start_arm(self, fn, *args) -> None:
-        if self.arm_thread and self.arm_thread.is_alive():
-            self.arm.stop()
-            self.arm_thread.join(timeout=2)
-        self.arm_thread = threading.Thread(target=fn, args=args, daemon=True)
-        self.arm_thread.start()
-
     def run_tour(self, targets: list, pause_s: float = 1.0) -> None:
-        """Feature 6: visit each target in turn. A stop ends the whole tour (point_at returns False)."""
+        """Feature 6: visit each target in turn. STOP ends the whole tour, even during a pause."""
+        cancel = self.cancel
         self.tour = {"targets": targets, "index": 0, "status": "running"}
         for i, (x, y) in enumerate(targets):
             self.tour["index"] = i
-            if not self.arm.point_at(x, y):
+            if cancel.is_set() or not self.arm.point_at(x, y) or cancel.wait(pause_s):
                 self.tour["status"] = "stopped"
                 return
-            time.sleep(pause_s)
         self.tour["status"] = "done"
+
+    def run_lift(self, wps: list) -> None:
+        """Feature 7: if the lift does not finish, block automatic moves until the operator frees the arm."""
+        self.lift_interrupted = True
+        self.lift_interrupted = not self.arm.run_waypoints(wps)
 
     def capture_clean(self, attempts: int = 6) -> tuple[np.ndarray, list[Box], bool]:
         for _ in range(attempts):
@@ -197,6 +272,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.trova = st
     app.mount("/files", StaticFiles(directory=str(st.s.data_dir)), name="files")
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+    @app.exception_handler(ArmBusy)
+    def _arm_busy(request, e: ArmBusy):
+        return JSONResponse({"error": str(e), "busy": True}, status_code=409)
 
     def fail(e: Exception, where: str):
         st.audit.event("error", where=where, error=str(e))
@@ -240,7 +319,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 cv2.line(img, (int(u), int(v) - 2 * r), (int(u), int(v) + 2 * r), (255, 255, 0), 2)
         if st.zones or st.zone_draft:
             img = draw_zones(img, st.zones, (st.last_check or {}).get("result", {}).get("zones"), st.zone_draft)
-        for p in st.click_points:
+        for p in st.click_points + st.arm_points:
             cv2.drawMarker(img, (int(p[0]), int(p[1])), MARK, cv2.MARKER_TILTED_CROSS, 30, 3)
         if img.shape[1] > max_w:
             s = max_w / img.shape[1]
@@ -257,7 +336,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "mock": st.grok.mock, "grok": st.grok.stats(), "source": st.source.info(),
             "override": st.override is not None, "frame_size": [f.shape[1], f.shape[0]],
             "background": st.background is not None, "calibration": st.calib.as_dict() if st.calib else None,
-            "click_points": st.click_points, "arm": st.arm.status(),
+            "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
+            "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
             "reference": None if not st.reference else {k: st.reference[k] for k in ("time", "path", "n_objects")},
             "pending_question": st.pending["question"] if st.pending else None,
             "pending_candidates": st.pending.get("candidates", []) if st.pending else [],
@@ -275,12 +355,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     # ------------------------------------------------------------------ find
-    def do_find(request: str, query_img, history, move: bool = True):
+    def do_find(request: str, query_img, history, move: bool = True, reuse: dict | None = None):
         with st.lock:
-            t0 = time.perf_counter()
-            st.clear_view()
-            frame = st.frame()
-            boxes, occluded = st.proposals(frame)
+            t0, asked = time.perf_counter(), time.time()
+            if reuse:                       # a clarify answer: same frame and box numbers as the question
+                frame, boxes, occluded = reuse["frame"], reuse["boxes"], reuse["occluded"]
+            else:
+                st.clear_view()
+                frame = st.frame()
+                boxes, occluded = st.proposals(frame)
             res = grok_find(st.grok, frame, boxes, request, query_img, history)
             hi = res.box.id if res.box and res.box.source != "grok" else None
             marked = draw_marks(frame, boxes, highlight=hi)
@@ -293,8 +376,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if res.status == "found" and st.calib and st.calib.ok:
                 table_mm = [round(v, 1) for v in st.calib.pixel_to_table(*res.box.center)]
                 arm_blocked = st.arm_blocked()
-                if not arm_blocked and move:
-                    st.start_arm(st.arm.point_at, *table_mm)
+                if not arm_blocked and move and not st.start_arm(st.arm.point_at, *table_mm, since=asked):
+                    arm_blocked = "STOP was pressed while Trova was looking: the arm stays put"
             total = time.perf_counter() - t0
             if res.status == "found":
                 st.metrics["find_times"].append(total)
@@ -309,7 +392,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             st.pending = None
             if res.status == "clarify":
                 st.pending = {"request": request, "query_image": query_img, "history": history, "move": move,
-                              "question": res.clarifying_question, "candidates": res.candidate_ids}
+                              "question": res.clarifying_question, "candidates": res.candidate_ids,
+                              "reuse": {"frame": frame, "boxes": boxes, "occluded": occluded}}
             st.label_wait = None
             return {k: v for k, v in st.last_find.items() if k != "box"}
 
@@ -320,6 +404,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, "Say what to find, or send a photo")
         try:
             return do_find(text.strip(), q, [], move)
+        except ArmBusy:
+            raise
         except (GrokError, ValueError, RuntimeError) as e:
             return fail(e, "find")
 
@@ -327,7 +413,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_find_all(text: str = Form(...), move: bool = Form(True)):
         """Feature 6: "point at all the pens": every match, then the arm visits each in turn."""
         with st.lock:
-            t0 = time.perf_counter()
+            t0, asked = time.perf_counter(), time.time()
             st.clear_view()
             frame = st.frame()
             boxes, occluded = st.proposals(frame)
@@ -342,8 +428,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if st.calib and st.calib.ok else []
             blocked = st.arm_blocked() if targets else None
             moved = bool(targets and move and not blocked)
-            if moved:
-                st.start_arm(st.run_tour, targets)
+            if moved and not st.start_arm(st.run_tour, targets, since=asked, job="tour"):
+                moved, blocked = False, "STOP was pressed while Trova was looking: the arm stays put"
             out = {"result": res.as_dict(), "targets": targets, "moved": moved, "arm_blocked": blocked,
                    "marked": st.audit.save_image("find_all", marked), "request": text.strip(),
                    "total_s": round(time.perf_counter() - t0, 2), "occluded": occluded}
@@ -353,14 +439,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/clarify")
     def api_clarify(answer: str = Form(...)):
-        if not st.pending:
-            raise HTTPException(400, "No question pending")
-        p = st.pending
-        try:
-            return do_find(p["request"], p["query_image"], p["history"] + [(p["question"], answer)],
-                           p.get("move", True))
-        except (GrokError, ValueError, RuntimeError) as e:
-            return fail(e, "clarify")
+        with st.lock:                      # one answer per question, even if the button is double-clicked
+            p, st.pending = st.pending, None
+            if not p:
+                raise HTTPException(400, "No question pending")
+            try:
+                return do_find(p["request"], p["query_image"], p["history"] + [(p["question"], answer)],
+                               p.get("move", True), reuse=p.get("reuse"))
+            except ArmBusy:
+                raise
+            except (GrokError, ValueError, RuntimeError) as e:
+                return fail(e, "clarify")
 
     # ------------------------------------------------------------------ what changed
     @app.post("/api/reference")
@@ -568,11 +657,13 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         st.click_points.append([p.u, p.v, p.x_mm, p.y_mm])
         out = {"points": len(st.click_points)}
         if len(st.click_points) >= 4:
-            c = Calibration(points=[list(x) for x in st.click_points], source="clicks")
+            f = st.frame()
+            c = Calibration(points=[list(x) for x in st.click_points], source="clicks", size=[f.shape[1], f.shape[0]])
             try:
                 out["error_mm"] = round(c.fit(), 2)
             except ValueError as e:
-                return fail(e, "calibration")
+                st.click_points.pop()          # drop the point that broke the fit; the user clicks again
+                return fail(ValueError(f"{e} (that point was not kept)"), "calibration")
             st.calib = c
             c.save(st.calib_path)
             st.audit.event("calibration", **c.as_dict())
@@ -580,7 +671,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/calibration/reset")
     def api_cal_reset():
-        st.click_points, st.calib = [], None
+        st.click_points, st.arm_points, st.calib = [], [], None
         if st.calib_path.exists():
             st.calib_path.unlink()
         return {"ok": True}
@@ -596,20 +687,23 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return st.arm
 
     @app.post("/api/calibration/arm_click")
-    def api_cal_arm_click(p: dict):
-        """Put the arm tip on the table (freedrive or pendant), then click the tip in the live view."""
+    def api_cal_arm_click(p: UV):
+        """Put the arm tip on the table (freedrive or pendant), then click the tip in the live view.
+        Robot-frame points live in their own list: they are never mixed with table-mm clicks."""
         arm = _need_cartesian()
+        if st.override is not None:
+            raise HTTPException(409, "An uploaded photo is shown: calibrate on the live camera (Back to live)")
         x, y, _ = arm.tcp_mm()
-        pts = [q for q in st.click_points if len(q) == 4]
-        pts.append([float(p["u"]), float(p["v"]), x, y])
-        st.click_points = pts
+        st.arm_points.append([p.u, p.v, x, y])
+        pts = st.arm_points
         out = {"points": len(pts), "tcp_mm": [round(x, 1), round(y, 1)]}
         if len(pts) >= 4:
-            c = Calibration(points=[list(q) for q in pts], source="arm")
+            c = Calibration(points=[list(q) for q in pts], source="arm", size=st.frame_size)
             try:
                 out["error_mm"] = round(c.fit(), 2)
             except ValueError as e:
-                return fail(e, "calibration")
+                st.arm_points.pop()
+                return fail(ValueError(f"{e} (that point was not kept)"), "calibration")
             st.calib = c
             c.save(st.calib_path)
             st.audit.event("calibration", **c.as_dict())
@@ -643,6 +737,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     # ------------------------------------------------------------------ arm
     def _to_mm(p: Point) -> tuple[float, float]:
         if p.u is not None and p.v is not None:
+            if st.calib is None:
+                st.frame()                 # right after a reset: rebuilds the default calibration
             return st.calib.pixel_to_table(p.u, p.v)
         if p.x_mm is None or p.y_mm is None:
             raise HTTPException(400, "Give x_mm,y_mm or u,v")
@@ -650,19 +746,23 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/arm/stop")
     def api_arm_stop():
-        st.arm.stop()
+        st.stop_arm()
         st.audit.event("arm_stop")
         return st.arm.status()
 
     @app.post("/api/arm/home")
     def api_arm_home():
-        st.start_arm(st.arm.home)
+        """Explicit operator command: also the way out after an interrupted tray lift."""
+        st.lift_interrupted = False
+        st.start_arm(st.arm.home, job="home")
+        st.audit.event("arm_home")
         return st.arm.status()
 
     @app.post("/api/arm/point")
     def api_arm_point(p: Point):
-        if p.u is not None and st.arm_blocked():
-            raise HTTPException(409, st.arm_blocked())
+        blocked = st.arm_blocked(pixels=p.u is not None)
+        if blocked:
+            raise HTTPException(409, blocked)
         x, y = _to_mm(p)
         st.start_arm(st.arm.point_at, x, y)
         st.audit.event("arm_point", x_mm=x, y_mm=y)
@@ -688,7 +788,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         place = st.calib.pixel_to_table(r.place_u, r.place_v)
         z_hover = getattr(st.arm, "z", 150.0)
         wps = tray_waypoints(pick, place, z_hover, TrayParams.from_env())
-        st.start_arm(st.arm.run_waypoints, wps)
+        st.start_arm(st.run_lift, wps, job="lift")
         st.audit.event("arm_lift_tray", pick=[round(v, 1) for v in pick], place=[round(v, 1) for v in place],
                        waypoints=[[w[0]] + [round(v, 1) for v in w[1:]] for w in wps])
         return {"ok": True, "pick_mm": [round(v, 1) for v in pick], "place_mm": [round(v, 1) for v in place],
@@ -802,8 +902,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return {"zones": [z.__dict__ for z in st.zones], "draft": st.zone_draft}
 
     @app.post("/api/zones/point")
-    def api_zone_point(p: dict):
-        st.zone_draft.append([float(p["u"]), float(p["v"])])
+    def api_zone_point(p: UV):
+        st.zone_draft.append([p.u, p.v])
         return {"draft": st.zone_draft}
 
     @app.post("/api/zones/finish")
@@ -842,7 +942,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if blocked:
             return JSONResponse({"error": blocked, "blocked": True}, 409)
         if lf.get("targets"):                                   # the last request was "point at all ..."
-            st.start_arm(st.run_tour, lf["targets"])
+            st.start_arm(st.run_tour, lf["targets"], job="tour")
             st.audit.event("arm_tour", targets=lf["targets"], after="voice confirmation")
             return {"ok": True, "label": lf["result"]["label"], "targets": lf["targets"]}
         st.start_arm(st.arm.point_at, *lf["table_mm"])

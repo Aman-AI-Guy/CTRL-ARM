@@ -21,6 +21,8 @@ from dataclasses import dataclass
 
 from .base import ArmDriver
 
+START_GRACE_S = 0.5   # a controller may report 'not moving' for a moment after accepting a move
+
 
 class CartesianBackend(ABC):
     name = "cartesian"
@@ -88,22 +90,38 @@ class CartesianArm(ArmDriver):
         self.step: str | None = None
         self._stop = threading.Event()
 
+    def _halted(self) -> bool:
+        """A STOP arrived: stop again (it may have raced a move still being sent, which would replace it)."""
+        try:
+            self.backend.stop()
+        except Exception:  # noqa: BLE001 - the stop already went out once from stop()
+            pass
+        self.state = "stopped"
+        return False
+
     def _go(self, x: float, y: float, z: float) -> bool:
+        if self._stop.is_set():          # STOP latched: refuse until the server calls ready()
+            self.state = "stopped"
+            return False
         if self.limits:
             err = self.limits.check(x, y, z)
             if err:
                 self.state, self.last_error = "refused", err
                 return False
-        self._stop.clear()
         self.state, self.last_error = "moving", None
         try:
             self.backend.move_linear(x, y, z, self.speed)
+            if self._stop.is_set():
+                return self._halted()
             t0 = time.time()
-            time.sleep(0.05)
-            while self.backend.is_moving():
+            seen = False
+            while True:
                 if self._stop.is_set():
-                    self.state = "stopped"
-                    return False
+                    return self._halted()
+                moving = self.backend.is_moving()
+                seen = seen or moving
+                if not moving and (seen or time.time() - t0 > START_GRACE_S):   # some arms start late
+                    break
                 if time.time() - t0 > self.timeout:
                     self.backend.stop()
                     self.state, self.last_error = "error", "move timed out"
@@ -113,8 +131,7 @@ class CartesianArm(ArmDriver):
             self.state, self.last_error = "error", f"{type(e).__name__}: {e}"
             return False
         if self._stop.is_set():
-            self.state = "stopped"
-            return False
+            return self._halted()
         try:   # a robot in local mode or in a protective stop ignores the move silently: say so
             tx, ty, tz = self.backend.tcp_mm()
             off = ((tx - x) ** 2 + (ty - y) ** 2 + (tz - z) ** 2) ** 0.5
@@ -139,7 +156,7 @@ class CartesianArm(ArmDriver):
                 if err:
                     self.state, self.last_error = "refused", f"{label}: {err}"
                     return False
-        speed, self.speed = self.speed, self.speed * speed_factor
+        speed, self.speed = self.speed, self.speed * speed_factor   # STOP stays latched across waypoints
         try:
             for label, x, y, z in wps:
                 self.step = label
