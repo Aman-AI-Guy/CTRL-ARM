@@ -11,17 +11,19 @@ import json
 import os
 import threading
 import time
+import uuid
+from contextvars import ContextVar
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import changes as chg
-from .arm import CartesianArm, SimArm, TaughtGridArm, load_poses, make_arm, save_pose
+from .arm import CartesianArm, FakeCartesian, FakeJointBackend, SimArm, TaughtGridArm, load_poses, make_arm, save_pose
 from .arm.skills import TrayParams, lift_allowed, waypoints as tray_waypoints
 from .audit import AuditLog
 from .boxes import Box
@@ -38,6 +40,7 @@ from . import history, preflight
 from .watch import Watch
 from . import room as room_mod
 from .light import make_light
+from .safety import LiftStore
 from . import labels as lbl
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
@@ -46,6 +49,8 @@ from .proposals import drop_occluders, find_blobs, is_occluded
 
 STATIC = Path(__file__).parent / "static"
 SLOW_S = float(os.getenv("TROVA_SLOW_S", "8"))
+# Captured before route locks/model calls; remains cancelled even after an operator reset.
+MOTION_TICKET: ContextVar[threading.Event | None] = ContextVar("motion_ticket", default=None)
 
 
 class ArmBusy(RuntimeError):
@@ -129,6 +134,18 @@ class VoiceLog(BaseModel):
     text: str
 
 
+class StopReset(BaseModel):
+    operator: str
+    stop_nonce: str
+    area_clear: bool = False
+    controller_ready: bool = False
+
+
+class LiftRecovery(StopReset):
+    fork_freed: bool = False
+    note: str = ""
+
+
 class State:
     def __init__(self, s: Settings):
         self.s = s
@@ -148,6 +165,17 @@ class State:
         self.frame_size: list[int] | None = None      # live camera frame size (not an uploaded photo)
         self.camera_error: str | None = None
         self.arm = make_arm(s.arm, s.data_dir, s.table_w_mm, s.table_h_mm)
+        # Simulator exemptions require BOTH an explicit simulator spec and a known simulator implementation.
+        self.physical = not (
+            (s.arm == "sim" and type(self.arm) is SimArm)
+            or (s.arm == "cartesian:fake" and isinstance(self.arm, CartesianArm)
+                and type(self.arm.backend) is FakeCartesian)
+            or (s.arm == "grid:fake" and isinstance(self.arm, TaughtGridArm)
+                and type(self.arm.backend) is FakeJointBackend))
+        self.lift_store = LiftStore(s.data_dir) if self.physical else None
+        self.persistence_error: str | None = None
+        self.operator_name = os.getenv("TROVA_OPERATOR_NAME", "").strip()
+        self.operator_token = os.getenv("TROVA_OPERATOR_TOKEN", "").strip()
         # the camera is on the arm (the event's xArm 5): every picture is taken from the taught survey pose
         self.camera_on_arm = os.getenv("TROVA_CAMERA_ON_ARM", "0").lower() in ("1", "true", "yes")
         self.settle_s = float(os.getenv("TROVA_CAMERA_SETTLE_S", "0.6"))
@@ -155,10 +183,24 @@ class State:
             self.source.attach(self.arm, s.data_dir)   # simulated arm camera: renders what the arm would see
         self.arm_thread: threading.Thread | None = None
         self.arm_lock = threading.Lock()        # one motion command at a time
+        self.safety_lock = threading.Lock()     # local state only: never held over I/O, joins or model calls
+        self.stop_latched = threading.Event()   # independent of command cancellation; only reset clears it
+        self.stop_epoch = threading.Event()     # invalidates ALL requests admitted before/during STOP
+        self.stops_pending = 0                 # reset cannot overtake a driver.stop() still in flight
+        self.stop_sequence = 0
+        self.stop_nonce = uuid.uuid4().hex      # fresh across boots AND every STOP; never a reusable reset permission
+        self.stop_error: str | None = None
+        self.manual_mode = False
         self.cancel = threading.Event()         # set by STOP; a fresh one per command
         self.stop_ts = 0.0                      # wall time of the last STOP
         self.arm_job = ""                       # point | tour | lift | home
-        self.lift_interrupted = False           # the fork may still be in a slot: no automatic moves
+        self.lift_interrupted = bool(self.lift_store and self.lift_store.read() != "clear")
+        if self.physical:
+            # Every boot is a new disarmed session, even if the last lift record is clean.
+            self.stop_latched.set()
+            self.stop_epoch.set()
+            self.cancel.set()
+            self.arm.latch_stop()              # local event only: controller recovery is NEVER automatic
         self.thresh, self.min_area = s.blob_thresh, s.min_area_frac
         self.last_find: dict | None = None
         self.pending: dict | None = None
@@ -212,14 +254,21 @@ class State:
         raw = find_blobs(frame, self.background, self.thresh, self.min_area)
         return drop_occluders(raw, frame.shape), is_occluded(raw, frame.shape)
 
-    def arm_blocked(self, pixels: bool = True) -> str | None:
+    def arm_blocked(self, pixels: bool = True, *, interlocks: bool = True) -> str | None:
         """Why the arm must not move right now (None = it may). pixels=False: the target is given in robot mm,
         so only the safety rules apply, not the camera calibration."""
-        if self.arm_job == "lift" and self.arm_thread and self.arm_thread.is_alive():
+        if interlocks and self.stop_latched.is_set():
+            return "Software STOP is latched: operator safety checks and /api/arm/reset required" + (
+                "; a tray lift was interrupted: recover the fork separately" if self.lift_interrupted else "")
+        if interlocks and self.manual_mode:
+            return "The arm is in manual teaching mode: leave Freedrive / compliant mode before automatic motion"
+        if interlocks and self.arm_job == "lift" and self.arm_thread and self.arm_thread.is_alive():
             return "The arm is lifting a tray: wait for it to finish, or press STOP"
-        if self.lift_interrupted:
+        if interlocks and self.lift_interrupted:
             return ("A tray lift was interrupted, the fork may still be in the slot: free the arm by hand "
-                    "(Freedrive) or with the pendant, then press Arm home")
+                    "with staff, then confirm /api/arm/recover_lift while STOP remains latched")
+        if interlocks and self.persistence_error:
+            return "Safety persistence failed: " + self.persistence_error
         if isinstance(self.arm, CartesianArm):
             if not self.arm.limits:
                 return "No safety box: set TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax (robot mm) with staff, restart"
@@ -239,42 +288,176 @@ class State:
                         f"{self.frame_size[0]}x{self.frame_size[1]}: calibrate again")
         return None
 
+    def motion_ticket(self, ticket=None) -> threading.Event:
+        request_ticket = MOTION_TICKET.get()
+        # A stored result/alarm may add restrictions, never override a cancelled HTTP request's authority.
+        if request_ticket is not None and request_ticket.is_set():
+            return request_ticket
+        return ticket if ticket is not None else (request_ticket or self.stop_epoch)
+
+    def authorize_motion(self, *, pixels: bool = False, ticket=None, since=None) -> None:
+        """The single admission check, used for pointing AND all preparatory/home/room moves."""
+        if (ticket is not None and ticket.is_set()) or (since is not None and self.stop_ts >= since):
+            raise ArmBusy("STOP cancelled this pending command: submit a new command after operator reset")
+        blocked = self.arm_blocked(pixels=pixels)
+        if blocked:
+            raise ArmBusy(blocked)
+
     # ---------- arm motion: one command at a time, STOP always wins
     def stop_arm(self) -> None:
-        """Never waits for anything: mark the time, cancel the running command, stop the driver."""
-        self.stop_ts = time.time()
-        self.cancel.set()
-        self.arm.stop()
-        self.light.show("stop")
+        """No arm/model lock: publish cancellation before calling the driver's immediate stop path."""
+        with self.safety_lock:
+            self.stop_ts = time.time()
+            self.stop_sequence += 1
+            self.stop_nonce = uuid.uuid4().hex
+            self.stop_latched.set()
+            self.stop_epoch.set()
+            self.cancel.set()
+            self.stops_pending += 1
+        try:
+            self.arm.stop()
+        except Exception as e:
+            with self.safety_lock:
+                self.stop_error = str(e) or type(e).__name__
+            raise
+        else:
+            with self.safety_lock:
+                self.stop_error = None
+        finally:
+            with self.safety_lock:
+                self.stops_pending -= 1
+            self.light.show("stop")
 
-    def _take_arm(self, job: str) -> threading.Event:
-        """Caller holds arm_lock. End the running command (unless it must not be cut), then arm a fresh cancel."""
+    def _take_arm(self, job: str, *, pixels: bool, ticket, since) -> threading.Event:
+        """Caller holds arm_lock. Never clear a driver's STOP as a side effect of a command."""
+        self.authorize_motion(pixels=pixels, ticket=ticket, since=since)
         if self.arm_thread and self.arm_thread.is_alive():
             if self.arm_job == "lift":
                 raise ArmBusy("The arm is lifting a tray: wait for it to finish, or press STOP")
-            self.cancel.set()
-            self.arm.stop()
             self.arm_thread.join(timeout=3)
             if self.arm_thread.is_alive():
                 raise ArmBusy("The arm is still finishing the last move: wait a moment and retry")
-        self.cancel = threading.Event()
-        self.arm.ready()
-        self.arm_job = job
-        return self.cancel
+        self.authorize_motion(pixels=pixels, ticket=ticket, since=since)
+        with self.safety_lock:
+            # STOP can run during the checks/join. Publishing the command is atomic with STOP.
+            if self.stop_latched.is_set() or ticket.is_set():
+                raise ArmBusy("Software STOP cancelled this command: operator reset required")
+            self.cancel = threading.Event()
+            self.arm_job = job
+            return self.cancel
 
-    def start_arm(self, fn, *args, since: float | None = None, job: str = "point") -> bool:
-        """Run a motion in the arm thread. `since`: when the user asked; a STOP after that cancels it.
-        Returns False when it was cancelled before starting."""
-        since = time.time() if since is None else since
+    def start_arm(self, fn, *args, since: float | None = None, job: str = "point",
+                  pixels: bool = True, ticket=None, wait: bool = False, guard=None) -> bool:
+        """Admit one guarded motion; blocked/cancelled commands raise ArmBusy (HTTP 409)."""
+        ticket = self.motion_ticket(ticket)
         with self.arm_lock:
-            cancel = self._take_arm(job)
-            if self.stop_ts >= since:          # STOP pressed while Trova was still thinking
-                cancel.set()
-                self.arm.stop()
-                return False
-            self.arm_thread = threading.Thread(target=fn, args=args, daemon=True)
-            self.arm_thread.start()
-            return True
+            if guard is not None and not guard():
+                raise ArmBusy("The watch worker/generation is no longer authorized")
+            cancel = self._take_arm(job, pixels=pixels, ticket=ticket, since=since)
+            if guard is not None and not guard():
+                raise ArmBusy("The watch worker/generation is no longer authorized")
+
+            def run():
+                if (not cancel.is_set() and not ticket.is_set() and not self.stop_latched.is_set()
+                        and (guard is None or guard())):
+                    fn(*args)
+
+            worker = threading.Thread(target=run, daemon=True)
+            self.arm_thread = worker
+            worker.start()
+        if wait:
+            worker.join()                  # STOP never needs arm_lock; reset requires this worker to finish
+            self.authorize_motion(pixels=pixels, ticket=ticket, since=since)
+        return True
+
+    def authenticate_operator(self, supplied: str, claimed: str = "") -> str:
+        if not self.physical:
+            return claimed.strip()
+        if not self.operator_name or not self.operator_token:
+            raise HTTPException(403, "Hardware recovery requires configured TROVA_OPERATOR_NAME and TROVA_OPERATOR_TOKEN")
+        if not hmac.compare_digest(supplied.encode(), self.operator_token.encode()):
+            raise HTTPException(401, "Operator authentication required (x-trova-operator-token)")
+        return self.operator_name
+
+    def operator_reset(self, r: StopReset, *, recover_lift: bool = False, credential: str = "") -> str:
+        """Software reset only. Controller/e-stop recovery must already have been performed by staff."""
+        identity = self.authenticate_operator(credential, r.operator)
+        if not identity or not r.area_clear or not r.controller_ready:
+            raise ArmBusy("An operator must confirm area_clear and controller_ready; reset performs no controller recovery")
+        stop_sequence = self.stop_sequence
+        if not self.arm_lock.acquire(blocking=False):
+            raise ArmBusy("A motion is still being admitted: wait for it to finish")
+        try:
+            with self.safety_lock:
+                if r.stop_nonce != self.stop_nonce:
+                    raise ArmBusy("Stale STOP confirmation: read /api/state.stop_nonce and confirm the current STOP")
+            if self.arm_thread and self.arm_thread.is_alive():
+                raise ArmBusy("The cancelled motion/scan must finish before reset or lift recovery")
+            if self.manual_mode:
+                raise ArmBusy("Leave manual teaching mode before reset or lift recovery")
+            if isinstance(self.arm, CartesianArm):
+                try:
+                    moving = self.arm.backend.is_moving()
+                except Exception as e:
+                    raise ArmBusy("Cannot verify controller idle: " + str(e)) from e
+                if moving:
+                    raise ArmBusy("The controller still reports motion: reset refused")
+            blocked = self.arm_blocked(pixels=False, interlocks=False)
+            if blocked:
+                raise ArmBusy(blocked)
+            if self.arm.state in ("error", "moving", "refused") or getattr(self.arm, "last_error", None):
+                raise ArmBusy("Resolve the controller/driver error separately before software reset")
+            if recover_lift:
+                if not self.lift_interrupted or not r.fork_freed or not r.note.strip():
+                    raise ArmBusy("Confirm fork_freed and document staff's manual lift recovery decision")
+                with self.safety_lock:
+                    if (self.stops_pending or not self.stop_latched.is_set() or self.stop_sequence != stop_sequence
+                            or r.stop_nonce != self.stop_nonce):
+                        raise ArmBusy("STOP must remain latched throughout lift recovery")
+                if self.lift_store:
+                    try:
+                        self.lift_store.write("clear")
+                    except OSError as e:
+                        self.persistence_error = str(e)
+                        raise ArmBusy("Cannot persist lift recovery: " + str(e)) from e
+            with self.safety_lock:
+                if (self.stops_pending or not self.stop_latched.is_set() or self.stop_sequence != stop_sequence
+                        or r.stop_nonce != self.stop_nonce):
+                    raise ArmBusy("STOP must be latched and its driver stop completed before reset or recovery")
+                if self.stop_error:
+                    raise ArmBusy("Driver STOP failed: resolve controller communication and retry STOP before reset: "
+                                  + self.stop_error)
+                if recover_lift:
+                    self.lift_interrupted = False    # explicit recovery only; STOP remains latched
+                    self.persistence_error = None
+                    self.stop_nonce = uuid.uuid4().hex  # recovery confirmation cannot also be replayed as rearming
+                else:
+                    if self.persistence_error:
+                        raise ArmBusy("Resolve safety persistence failure and confirm lift recovery before reset")
+                    self.arm.ready()                # event clear only; never a controller recovery or move
+                    self.stop_epoch = threading.Event()
+                    self.stop_latched.clear()
+                    self.arm.state = "idle"
+                    self.stop_nonce = uuid.uuid4().hex
+            return identity
+        finally:
+            if recover_lift and self.lift_interrupted and self.lift_store:
+                # A concurrent STOP invalidated the recovery decision during disk I/O. Restore dirty evidence.
+                try:
+                    self.lift_store.write("in_progress")
+                except OSError as e:
+                    self.persistence_error = str(e)
+            self.arm_lock.release()
+
+    def set_manual_mode(self, on: bool, change_mode) -> None:
+        """Manual recovery/teaching is explicit, serialized with motion admission, and never resets STOP."""
+        with self.arm_lock:
+            if self.arm_thread and self.arm_thread.is_alive():
+                raise ArmBusy("Wait for the motion thread to finish before changing manual mode")
+            if on:
+                self.manual_mode = True     # fail closed if the controller mode change fails
+            change_mode(on)
+            self.manual_mode = on
 
     def at_survey(self) -> bool:
         """Camera on the arm: is the arm at the survey pose, i.e. does the picture match the calibration?"""
@@ -282,17 +465,21 @@ class State:
             return True
         return self.arm.at_home()
 
-    def clear_view(self) -> None:
+    def clear_view(self, *, move: bool = True, ticket=None) -> None:
         """A real arm parks before every capture so it is not mistaken for an object. With the camera on the arm,
         home is the survey pose: the picture is only valid there, after the image settles."""
         if isinstance(self.arm, SimArm):
             return
-        if self.lift_interrupted:
-            raise ArmBusy(self.arm_blocked())
-        with self.arm_lock:
-            was_there = self.at_survey() if self.camera_on_arm else False
-            self._take_arm("home")
-            self.arm.home()
+        ticket = self.motion_ticket(ticket)
+        was_there = isinstance(self.arm, CartesianArm) and self.arm.at_home()
+        busy = self.arm_thread and self.arm_thread.is_alive()
+        if not busy and was_there and not self.manual_mode:
+            return                         # already parked: reading a frame requires no motion/reset
+        if not move:
+            raise ArmBusy("move=false: no safe parked camera view is available; explicitly home the arm first")
+        self.start_arm(self.arm.home, job="home", pixels=False, ticket=ticket, wait=True)
+        if self.arm.state != "idle":
+            raise ArmBusy("The arm did not reach home: " + (getattr(self.arm, "last_error", None) or self.arm.state))
         if self.camera_on_arm:
             if not self.at_survey():
                 raise ArmBusy("The arm did not reach the survey pose: " + (self.arm.last_error or self.arm.state))
@@ -356,7 +543,25 @@ class State:
     def run_lift(self, wps: list) -> None:
         """Feature 7: if the lift does not finish, block automatic moves until the operator frees the arm."""
         self.lift_interrupted = True
-        self.lift_interrupted = not self.arm.run_waypoints(wps)
+        cancel = self.cancel
+        try:
+            if self.lift_store:
+                self.lift_store.write("in_progress")  # MUST reach durable storage before the FIRST waypoint
+            if cancel.is_set() or self.stop_latched.is_set():
+                return
+            completed = self.arm.run_waypoints(wps)
+            if completed and not cancel.is_set() and not self.stop_latched.is_set():
+                if self.lift_store:
+                    self.lift_store.write("clear")
+                with self.safety_lock:
+                    interrupted = cancel.is_set() or self.stop_latched.is_set()
+                    if not interrupted:
+                        self.lift_interrupted = False
+                if interrupted and self.lift_store:
+                    self.lift_store.write("in_progress")
+        except Exception as e:  # retain the dirty marker and interlock on persistence/driver failure
+            self.persistence_error = str(e)
+            self.stop_arm()
 
     def capture_clean(self, attempts: int = 6) -> tuple[np.ndarray, list[Box], bool]:
         for _ in range(attempts):
@@ -374,6 +579,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.trova = st
     app.mount("/files", StaticFiles(directory=str(st.s.data_dir)), name="files")
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+    @app.middleware("http")
+    async def _motion_request_ticket(request, call_next):
+        token = MOTION_TICKET.set(st.stop_epoch)
+        try:
+            return await call_next(request)
+        finally:
+            MOTION_TICKET.reset(token)
 
     token = os.getenv("TROVA_TOKEN", "").strip()
     if token:   # the venue Wi-Fi is shared: without the token nobody else can move the arm or spend the key
@@ -470,6 +683,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "background": st.background is not None, "calibration": st.calib.as_dict() if st.calib else None,
             "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
             "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
+            "stop_latched": st.stop_latched.is_set(),
+            "stop_error": st.stop_error,
+            "stop_nonce": st.stop_nonce,
+            "physical_arm": st.physical, "safety_persistence_error": st.persistence_error,
             "camera_on_arm": st.camera_on_arm, "at_survey": st.at_survey(), "poses": load_poses(st.s.data_dir),
             "reference": None if not st.reference else {k: st.reference[k] for k in ("time", "path", "n_objects")},
             "pending_question": st.pending["question"] if st.pending else None,
@@ -490,13 +707,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     # ------------------------------------------------------------------ find
-    def do_find(request: str, query_img, history, move: bool = True, reuse: dict | None = None):
+    def do_find(request: str, query_img, history, move: bool = True, reuse: dict | None = None, ticket=None):
+        ticket = st.motion_ticket(ticket)
         with st.lock:
             t0, asked = time.perf_counter(), time.time()
             if reuse:                       # a clarify answer: same frame and box numbers as the question
                 frame, boxes, occluded = reuse["frame"], reuse["boxes"], reuse["occluded"]
             else:
-                st.clear_view()
+                st.clear_view(move=move, ticket=ticket)
                 frame = st.frame()
                 boxes, occluded = st.proposals(frame)
             res = grok_find(st.grok, frame, boxes, request, query_img, history)
@@ -511,8 +729,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if res.status == "found" and st.calib and st.calib.ok:
                 table_mm = [round(v, 1) for v in st.calib.pixel_to_table(*res.box.center)]
                 arm_blocked = st.arm_blocked()
-                if not arm_blocked and move and not st.start_arm(st.arm.point_at, *table_mm, since=asked):
-                    arm_blocked = "STOP was pressed while Trova was looking: the arm stays put"
+                if not arm_blocked and move:
+                    try:
+                        st.start_arm(st.arm.point_at, *table_mm, since=asked, ticket=ticket)
+                    except ArmBusy as e:
+                        arm_blocked = str(e)
             total = time.perf_counter() - t0
             if res.status == "found":
                 st.metrics["find_times"].append(total)
@@ -523,13 +744,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "table_mm": table_mm, "arm_blocked": arm_blocked, "total_s": round(total, 2), "box": res.box,
                             "occluded": occluded, "moved": bool(table_mm and move and not arm_blocked),
                             "boxes": [b.as_dict() for b in boxes], **paths}
-            st.pending_move = st.last_find if res.status == "found" else None
+            st.pending_move = {**st.last_find, "_ticket": ticket} if res.status == "found" else None
             st.light.show({"found": "found", "not_found": "not_found"}.get(res.status, "idle"))
             st.pending = None
             if res.status == "clarify":
                 st.pending = {"request": request, "query_image": query_img, "history": history, "move": move,
                               "question": res.clarifying_question, "candidates": res.candidate_ids,
-                              "reuse": {"frame": frame, "boxes": boxes, "occluded": occluded}}
+                              "reuse": {"frame": frame, "boxes": boxes, "occluded": occluded}, "ticket": ticket}
             st.label_wait = None
             return {k: v for k, v in st.last_find.items() if k != "box"}
 
@@ -548,9 +769,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/find_all")
     def api_find_all(text: str = Form(...), move: bool = Form(True)):
         """Feature 6: "point at all the pens": every match, then the arm visits each in turn."""
+        ticket = st.motion_ticket()
         with st.lock:
             t0, asked = time.perf_counter(), time.time()
-            st.clear_view()
+            st.clear_view(move=move, ticket=ticket)
             frame = st.frame()
             boxes, occluded = st.proposals(frame)
             try:
@@ -564,13 +786,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if st.calib and st.calib.ok else []
             blocked = st.arm_blocked() if targets else None
             moved = bool(targets and move and not blocked)
-            if moved and not st.start_arm(st.run_tour, targets, since=asked, job="tour"):
-                moved, blocked = False, "STOP was pressed while Trova was looking: the arm stays put"
+            if moved:
+                try:
+                    st.start_arm(st.run_tour, targets, since=asked, job="tour", ticket=ticket)
+                except ArmBusy as e:
+                    moved, blocked = False, str(e)
             out = {"result": res.as_dict(), "targets": targets, "moved": moved, "arm_blocked": blocked,
                    "marked": st.audit.save_image("find_all", marked), "request": text.strip(),
                    "total_s": round(time.perf_counter() - t0, 2), "occluded": occluded}
             ev = st.audit.event("find_all", **out)
-            st.pending_move = {"result": {"label": res.label}, "targets": targets} if targets else None
+            st.pending_move = {"result": {"label": res.label}, "targets": targets, "_ticket": ticket} if targets else None
             return out | {"event_id": ev["id"]}
 
     @app.post("/api/clarify")
@@ -581,7 +806,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(400, "No question pending")
             try:
                 return do_find(p["request"], p["query_image"], p["history"] + [(p["question"], answer)],
-                               p.get("move", True), reuse=p.get("reuse"))
+                               p.get("move", True), reuse=p.get("reuse"), ticket=p["ticket"])
             except (ArmBusy, CameraError):
                 raise
             except (GrokError, ValueError, RuntimeError) as e:
@@ -915,11 +1140,20 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 and st.camera_on_arm else ""}
 
     @app.post("/api/arm/clear_errors")
-    def api_arm_clear_errors():
-        """After a collision stop or a protective stop: clear the controller error and enable motion again."""
+    def api_arm_clear_errors(request: Request):
+        """Controller recovery only; never resets the software STOP or interrupted-lift interlock."""
         arm = _need_cartesian()
+        if st.physical:
+            st.authenticate_operator(request.headers.get("x-trova-operator-token", ""))
         try:
-            arm.backend.clear_errors()
+            with st.arm_lock:
+                if st.arm_thread and st.arm_thread.is_alive():
+                    raise ArmBusy("Wait for the motion worker to finish before controller recovery")
+                if st.physical and not st.stop_latched.is_set():
+                    raise ArmBusy("Latch software STOP before explicit controller recovery")
+                arm.backend.clear_errors()
+        except ArmBusy:
+            raise
         except Exception as e:  # noqa: BLE001 - show the SDK message
             return fail(e, "clear_errors")
         arm.state, arm.last_error = "idle", None
@@ -927,10 +1161,12 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return arm.status()
 
     @app.post("/api/arm/freedrive")
-    def api_arm_freedrive(on: bool = Form(...)):
+    def api_arm_freedrive(request: Request, on: bool = Form(...)):
         arm = _need_cartesian()
+        if st.physical:
+            st.authenticate_operator(request.headers.get("x-trova-operator-token", ""))
         try:
-            arm.freedrive(on)
+            st.set_manual_mode(on, arm.freedrive)
         except NotImplementedError as e:
             return fail(e, "freedrive")
         st.audit.event("arm_freedrive", on=on)
@@ -948,17 +1184,31 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/arm/stop")
     def api_arm_stop():
-        st.stop_arm()
+        try:
+            st.stop_arm()
+        except Exception as e:  # software latch/cancellation remain set even when the driver cannot acknowledge STOP
+            return fail(e, "arm_stop")
         st.audit.event("arm_stop")
         return st.arm.status()
 
     @app.post("/api/arm/home")
     def api_arm_home():
-        """Explicit operator command: also the way out after an interrupted tray lift."""
-        st.lift_interrupted = False
-        st.start_arm(st.arm.home, job="home")
+        """Homing is motion: it cannot reset STOP or clear an interrupted lift."""
+        st.start_arm(st.arm.home, job="home", pixels=False)
         st.audit.event("arm_home")
         return st.arm.status()
+
+    @app.post("/api/arm/reset")
+    def api_arm_reset(r: StopReset, request: Request):
+        identity = st.operator_reset(r, credential=request.headers.get("x-trova-operator-token", ""))
+        st.audit.event("arm_reset", operator=identity)
+        return {"stop_latched": st.stop_latched.is_set(), "lift_interrupted": st.lift_interrupted, "moved": False}
+
+    @app.post("/api/arm/recover_lift")
+    def api_arm_recover_lift(r: LiftRecovery, request: Request):
+        identity = st.operator_reset(r, recover_lift=True, credential=request.headers.get("x-trova-operator-token", ""))
+        st.audit.event("arm_lift_recovery", operator=identity, note=r.note.strip())
+        return {"stop_latched": st.stop_latched.is_set(), "lift_interrupted": st.lift_interrupted, "moved": False}
 
     @app.post("/api/arm/point")
     def api_arm_point(p: Point):
@@ -966,7 +1216,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if blocked:
             raise HTTPException(409, blocked)
         x, y = _to_mm(p)
-        st.start_arm(st.arm.point_at, x, y)
+        st.start_arm(st.arm.point_at, x, y, pixels=p.u is not None)
         st.audit.event("arm_point", x_mm=x, y_mm=y)
         return {"x_mm": round(x, 1), "y_mm": round(y, 1)}
 
@@ -1010,10 +1260,12 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return {"home_q": st.arm.record_home()}
 
     @app.post("/api/arm/compliant")
-    def api_arm_compliant(on: bool = Form(...)):
+    def api_arm_compliant(request: Request, on: bool = Form(...)):
         if not isinstance(st.arm, TaughtGridArm):
             raise HTTPException(400, "Teaching needs TROVA_ARM=grid:...")
-        st.arm.backend.set_compliant(on)
+        if st.physical:
+            st.authenticate_operator(request.headers.get("x-trova-operator-token", ""))
+        st.set_manual_mode(on, st.arm.backend.set_compliant)
         st.audit.event("arm_compliant", on=on)
         return {"compliant": on}
 
@@ -1152,10 +1404,10 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if blocked:
             return JSONResponse({"error": blocked, "blocked": True}, 409)
         if lf.get("targets"):                                   # the last request was "point at all ..."
-            st.start_arm(st.run_tour, lf["targets"], job="tour")
+            st.start_arm(st.run_tour, lf["targets"], job="tour", ticket=lf["_ticket"])
             st.audit.event("arm_tour", targets=lf["targets"], after="voice confirmation")
             return {"ok": True, "label": lf["result"]["label"], "targets": lf["targets"]}
-        st.start_arm(st.arm.point_at, *lf["table_mm"])
+        st.start_arm(st.arm.point_at, *lf["table_mm"], ticket=lf["_ticket"])
         st.audit.event("arm_point", x_mm=lf["table_mm"][0], y_mm=lf["table_mm"][1], after="voice confirmation")
         return {"ok": True, "label": lf["result"]["label"], "table_mm": lf["table_mm"]}
 
@@ -1232,7 +1484,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             arm.backend.joints()
         except NotImplementedError as e:
             return fail(e, "room")
-        if not st.start_arm(st.run_room, text.strip(), job="room"):
+        if not st.start_arm(st.run_room, text.strip(), job="room", pixels=False):
             raise HTTPException(409, "STOP was pressed")
         st.audit.event("room_find", request=text.strip())
         return {"started": True, "views": len(room_mod.pan_settings()["angles"])}
@@ -1280,9 +1532,14 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     @app.post("/api/watch/ack")
     def api_watch_ack(who: str = Form("")):
         a = st.watch.ack(who.strip())
+        motion_blocked = None
         if a and a.get("pointed") and not isinstance(st.arm, SimArm):
-            st.start_arm(st.arm.home, job="home")      # the arm pointed at the problem: park it again
-        return {"acknowledged": a["id"] if a else None, "watch": st.watch.as_dict()}
+            try:
+                st.start_arm(st.arm.home, job="home", pixels=False, ticket=st.watch.motion_ticket_for(a),
+                             guard=st.watch.motion_guard_for(a))
+            except ArmBusy as e:
+                motion_blocked = str(e)
+        return {"acknowledged": a["id"] if a else None, "watch": st.watch.as_dict(), "motion_blocked": motion_blocked}
 
     # ------------------------------------------------------------------ demo helpers
     @app.post("/api/demo/tamper")

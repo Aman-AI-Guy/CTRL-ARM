@@ -157,6 +157,8 @@ def test_stop_during_tour_pause_and_during_a_find(tmp_path, monkeypatch):
     c.post("/api/arm/stop")
     st.arm_thread.join(timeout=3)
     assert st.tour["status"] == "stopped" and st.tour["index"] == 0
+    reset = {"operator": "Ana", "area_clear": True, "controller_ready": True}
+    assert c.post("/api/arm/reset", json={**reset, "stop_nonce": c.get("/api/state").json()["stop_nonce"]}).status_code == 200
 
     unique = _unique_color(c)
     slow = lambda prompt, images, ctx: (time.sleep(0.8), finder._mock_select(prompt, images, ctx))[1]  # noqa: E731
@@ -171,8 +173,11 @@ def test_stop_during_tour_pause_and_during_a_find(tmp_path, monkeypatch):
     finally:
         register_mock("trova_select", finder._mock_select)
     assert out["result"]["status"] == "found" and not out["moved"] and "STOP" in out["arm_blocked"]
-    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()   # a new request moves again
-    assert r["moved"]
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
+    assert not r["moved"] and "STOP" in r["arm_blocked"]  # new commands cannot reset STOP
+    assert c.post("/api/arm/reset", json={**reset, "stop_nonce": c.get("/api/state").json()["stop_nonce"]}).status_code == 200
+    assert c.post("/api/find", data={"text": f"the {unique} one"}).json()["moved"]
+    st.arm_thread.join(timeout=3)
 
 
 def test_one_motion_at_a_time_and_interrupted_lift(tmp_path, monkeypatch):
@@ -195,7 +200,12 @@ def test_one_motion_at_a_time_and_interrupted_lift(tmp_path, monkeypatch):
     r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
     assert not r["moved"] and "interrupted" in r["arm_blocked"]
     st.arm.speed = 5000
-    c.post("/api/arm/home")                              # the operator's explicit way out
+    assert c.post("/api/arm/home").status_code == 409    # home never clears STOP or the lift interlock
+    reset = {"operator": "Ana", "area_clear": True, "controller_ready": True}
+    assert c.post("/api/arm/recover_lift", json={**reset, "stop_nonce": c.get("/api/state").json()["stop_nonce"], "fork_freed": True,
+                                               "note": "Staff freed the fork by hand"}).status_code == 200
+    assert c.post("/api/arm/reset", json={**reset, "stop_nonce": c.get("/api/state").json()["stop_nonce"]}).status_code == 200
+    c.post("/api/arm/home")
     assert not st.lift_interrupted and c.post("/api/find", data={"text": f"the {unique} one"}).json()["moved"]
     first = st.arm_thread
     c.post("/api/arm/point", json={"x_mm": 100, "y_mm": 100})

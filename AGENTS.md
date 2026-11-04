@@ -33,7 +33,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Find by words / photo, clarifying question, direct-box fallback | Done, tested (mock + request format) | `finder.py` | Needs live key to verify accuracy |
 | What changed (match + 2-of-3 persistence + Grok verify + naive baseline) | Done, tested | `changes.py` | |
 | Line-clearance record + sign-off (HTML) | Done | `server.py` `/api/report` | |
-| Cobot drivers UR / Elite (sockets), xArm (SDK), safety box, stop-and-hold | Done, tested vs fakes | `arm/` | **The team has the xArm 5 (XF1203, 700 mm reach, 3 kg).** First connection: `python -m trova.arm.bringup <ip>` (`arm/bringup.py`: reads state and errors, hand-guided ready / park / corner poses, 30 mm test move, STOP test, prints the .env lines). `TROVA_ARM_TCP_MM` sets the pointer length; UI "Clear arm errors" after a collision stop. Not yet run on real hardware. STOP latches (drivers refuse until the server calls `ready()` for a new command); one motion at a time (`State.start_arm` under `arm_lock`); STOP during a find cancels its move; a real arm needs `TROVA_ARM_LIMITS` and `TROVA_ARM_HOME_MM` or it refuses to move |
+| Cobot drivers UR / Elite (sockets), xArm (SDK), safety box, stop-and-hold | Done, tested vs fakes | `arm/`, `server.py`, `safety.py`, `tests/test_motion_safety.py`, `tests/test_safety_review.py` | **The team has the xArm 5 (XF1203, 700 mm reach, 3 kg).** Bring-up remains staff-guided. Every physical boot is disarmed; explicit authenticated rearming is required. xArm construction never enables/recovers the controller, STOP only requests stop state and checks SDK results. `TROVA_ARM_TCP_MM` sets pointer length. Software reset uses the current STOP nonce and never moves or clears a lift interlock. Central authorization guards home/camera/room/watch motion; Cartesian limits + home are required and unavailable FK refuses joint movement. `move=false` never repositions. Only explicit built-in simulators bypass hardware startup/authentication requirements. No real hardware validation yet |
 | Calibration (ArUco, clicks, arm-tip clicks) | Done, tested | `calibration.py`, `server.py` | Real arm refuses to move until calibrated with the arm. Arm points (`st.arm_points`) are never mixed with table clicks; duplicate / collinear points and fits worse than 15 mm are rejected (the bad point is dropped); the image size is stored and an uploaded photo or another resolution blocks the arm |
 | Grok Voice (realtime, confirm-before-move, stop word) | Done; config/token tested | `voice.py`, `static/voice.js` | Not yet heard live |
 | Optional dog room search (sim) | Done, tested | `dog.py` | Go2 driver is a template |
@@ -44,7 +44,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | 4. Full-screen jury scoreboard | Done, tested | `static/jury.html`, `GET /jury`, `POST /api/metrics/reset` | Found x/N, median find time, false alarms, checks; latest request + verdict; live camera. Reset before the demo. Link "scoreboard" in the UI header |
 | 5. Failure log (cause of each wrong find) | Done, tested | `failures.py`, `/api/label`, `/api/judge` (cause), `GET /api/failures`, `run_eval.py failures` | Causes: missed_box (P2), wrong_pick / said_not_found / picked_absent_object / asked_unnecessarily / slow (P3), arm_missed (P1). Stored in `data/cases/failures.jsonl`. Clicking outside every box now records missed_box instead of an error |
 | 6. "Point at all the X" | Done, tested (mock) | `finder.find_all`, `POST /api/find_all`, `State.run_tour`, UI "Find all", voice tool `find_all` | Grok returns every matching box; the arm visits each (1 s pause). STOP ends the tour. With move=false, `/api/arm/point_last` starts the tour after a yes |
-| 7. Tray lift with the fork (experimental) | Done, tested vs fake robot; OFF by default | `arm/skills.py`, `run_waypoints` (Cartesian + sim), `POST /api/arm/lift_tray`, UI after a find | 12 straight moves: approach, slot height, fork in, lift, carry, set down, fork out, up. Whole path checked against the safety box before moving; STOP aborts. Enable with `TROVA_ALLOW_LIFT=1` only after measuring `TROVA_TRAY_Z_SLOT_MM` and `TROVA_TRAY_APPROACH` on the real tray with staff |
+| 7. Tray lift with the fork (experimental) | Done, tested vs fake robot; OFF by default | `arm/skills.py`, `safety.py`, `POST /api/arm/lift_tray` | 12 straight moves; whole path checked against safety box. A durable atomic in-progress marker precedes the FIRST physical waypoint. Missing/corrupt/ambiguous/incomplete records require authenticated staff recovery on restart; storage failures block dispatch/retain the interlock. Home/reset cannot clear it; `/api/arm/recover_lift` requires the current nonce, fork-freed confirmation and written note, keeps STOP latched and never moves |
 | 8. Offline fallback (Wi-Fi or xAI down) | Done, tested | `grok.py` (`GrokUnavailable`, circuit breaker), `finder.py` (mode `offline`), header badge | Network error, timeout or 429/5xx after retries: the call is answered by the local handler and marked offline; for 30 s calls skip the network, then live is retried. 400/401/403/422 still raise. Change verification offline keeps every candidate as real (never a false 'clear'). `TROVA_OFFLINE_FALLBACK=0` disables; eval always disables it. `TROVA_GROK_TIMEOUT_S` (60), connect timeout 5 s |
 | 9. Preflight check | Done, tested | `preflight.py`, `GET /api/preflight`, header button "preflight", `python -m trova.preflight [url]` | ok / warn / fail per item with the fix: camera (frozen, resolution), light, focus, empty table, objects / occlusion, calibration (real arm), arm state, safety box, home pose, tray lift, Wi-Fi access, Grok ping (real network attempt, latency), voice token, disk. Run it each morning and before the jury; exit code 1 on any failure |
 | 10. Watch the line (live guard) | Done, tested (mock) | `watch.py`, `POST /api/watch` (on, point), `/api/watch/ack`, UI "Watch the line" + red alarm bar with beep, jury page banner, voice tool `watch_line` | Twice a second, plain code compares the live view with the reference (2-of-3 persistence) and checks 'must be empty' zones; an alarm appears in ~1.5 s, Grok explains it in the background and can close a false alarm. Hand or moving arm pauses it. Optional: the arm points at the problem (homes again on acknowledge). An alarm stays until acknowledged; the same situation does not re-alarm; a new reference resets it |
@@ -70,9 +70,20 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 1. **Grok never moves the arm.** Grok returns structured JSON; plain code validates it, converts pixels to mm and
    calls the ArmDriver. Every move passes the safety box (`TROVA_ARM_LIMITS`).
 2. **STOP never waits for a model**: UI button, space bar, Escape, and the stop word in the live voice transcript all
-   call `/api/arm/stop` directly. Stop = hold position, never torque off. STOP latches: drivers never clear it
-   themselves; only `State.start_arm` / `clear_view` call `arm.ready()` for a new command. Every motion goes through
-   `State.start_arm` (one at a time; a running tray lift is never cut, 409 `ArmBusy`).
+   call `/api/arm/stop` directly. Stop = hold position, never torque off. The independent software STOP latch and
+   request cancellation epoch are set before driver STOP, without waiting for arm/model locks. Only explicit
+   operator `/api/arm/reset` calls `arm.ready()`; it checks quiescence, configuration and operator confirmations,
+   performs no controller recovery/motion, and preserves interrupted lifts. Every physical boot is disarmed;
+   reset and lift recovery require configured TROVA_OPERATOR_NAME/TROVA_OPERATOR_TOKEN and an
+   x-trova-operator-token header. Identity comes from authentication, never a submitted operator name. Both
+   confirmations must match the current /api/state.stop_nonce (rotated on boot/STOP/recovery/reset).
+   Lift recovery is a separate explicit
+   staff decision via `/api/arm/recover_lift`, with STOP latched. Every automatic motion goes through
+   `State.start_arm` / `authorize_motion`, including home/camera preparation (one at a time; a running tray lift is
+   never cut, 409 `ArmBusy`). `move=false` never initiates camera preparation motion.
+   Watch runs retain immutable generations, cancellation tickets, worker identities and their own histories;
+   callbacks carry the original alert/run, with authority rechecked on admission and worker dispatch. Replacing
+   a watch permanently invalidates its predecessor even if a callback takes longer than the join timeout.
 3. **Every Grok call has a mock handler** (`register_mock(name, fn)` next to the call) so the app and tests run
    without a key. New Grok call = new schema + prompt + mock + test.
 4. **English and Italian**: prompts answer in the language of the request; reports follow `TROVA_LANG`.
@@ -107,6 +118,7 @@ Changes: `POST /api/reference` · `POST /api/changes` · `POST /api/signoff` · 
 Setup: `POST /api/background` · `/api/source` · `/api/source/step` · `/api/upload_scene` · `/api/upload_scene/clear` · `/api/tune`
 Calibration: `POST /api/calibration/aruco` · `/click` · `/arm_click` · `/marker_from_arm` · `/reset` · `/markers`
 Arm: `POST /api/arm/stop` · `/home` · `/point` · `/freedrive` · `/clear_errors` · `/teach` · `/teach_home` · `/compliant`
+Software reset: `POST /api/arm/reset` JSON (operator, stop_nonce, area_clear=true, controller_ready=true), no motion; `GET /api/state` includes `stop_latched`, `stop_nonce`, `physical_arm`, `safety_persistence_error`. Lift recovery: `POST /api/arm/recover_lift` same JSON + fork_freed=true + note, requires STOP latched, clears only the lift interlock. Hardware reset/recovery/clear_errors/freedrive/compliant require x-trova-operator-token with configured operator credentials (403 if unconfigured, 401 if invalid); stale nonce 409. Successful recovery/reset rotates the nonce. Software reset never recovers controller/physical stops. Watch acknowledgement dismisses normally and returns `motion_blocked` when its guarded homing is refused.
 Jury: `POST /api/judge` · `/api/label`
 Voice: `GET /api/voice/config` · `POST /api/voice/session` · `/api/voice/log`
 Inventory: `POST /api/inventory` (names every object, labelled map image) · `POST /api/reference` takes `describe` (default true)
@@ -125,6 +137,13 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Known gaps
 
+- Every physical restart is disarmed and lift state is durable in data/arm_safety.json, but application persistence
+  cannot stop an abandoned controller command after a hard process crash: hardware watchdog/controller-side
+  safeguards are separately required. Software STOP is not safety-rated. Use one server process per robot with
+  exclusive ownership of its data directory (no multiple Uvicorn workers). Reset/recovery still rely on staff's
+  physical checks; target safety boxes do not validate swept volume. Hardware/communication stop latency and
+  actual SDK stop/hold behavior require independent review and staff-supervised validation. Controller protective
+  stops and physical emergency stops remain separate procedures.
 - No live Grok / Grok Voice call has run yet (keys arrive at the event).
 - Arm drivers are tested against fakes, not real robots or simulators. Elite is the least certain.
 - Go2 dog driver is a template.
@@ -140,6 +159,8 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Independent safety review fixes: disarmed hardware boots; fsynced atomic lift marker and conservative recovery of missing/corrupt records; no xArm constructor recovery/enabling; immutable watch generations/tickets/worker identity prevent old-callback authority reuse; mandatory hardware operator authentication and authenticated audit identity; nonce-bound one-use STOP confirmations; checked SDK stop/recovery/state results without implicit restart; unavailable FK/missing limits refuse joint motion. Review probes promoted into repository regressions: 131 offline tests passed (0 failed/skipped); Ruff unavailable. No secrets/hardware settings changed.
+- 2026-11-04 P0 motion fixes: independent operator-reset software STOP latch; cancelled request epochs survive reset, concurrent admission, delayed Grok, clarification/confirmation and watch callbacks. Central authorization guards home/camera/room/watch motion, Cartesian limits+home fail closed, move=false never repositions; interrupted lifts require separate staff-confirmed recovery with STOP latched. Offline regression coverage added; no hardware/configuration changes.
 - 2026-11-04 Camera on the arm (the team's xArm 5 sphere camera): taught survey pose as joints, pictures only from it, gating of pixel moves / watch / overlays, joint moves checked by forward kinematics, simulated arm camera, camera finder, bring-up --camera-on-arm, preflight items. Feature 14: look around the room and face the object. Optional LED ring driver + firmware.
 - 2026-11-04 xArm 5 on site: guided bring-up script (`python -m trova.arm.bringup <ip>`), `TROVA_ARM_TCP_MM` pointer offset, `/api/arm/clear_errors` + UI button; guide's arm-slot steps use the bring-up.
 - 2026-11-04 Docs: README and morning guide cover features 8-13, the required safety box and home pose, preflight, TROVA_TOKEN and the browser smoke test; known gaps list what the review could not confirm.
