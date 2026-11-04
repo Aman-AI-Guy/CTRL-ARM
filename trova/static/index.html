@@ -37,7 +37,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
 </head>
 <body>
 <header>
-  <h1>Trova</h1><span id="mode" class="badge">…</span><span id="armst" class="badge">arm …</span>
+  <h1>Trova</h1><span id="mode" class="badge">Grok …</span><span id="cambadge" class="badge">camera …</span><span id="visionbadge" class="badge">calibration …</span><span id="motionbadge" class="badge">motion …</span><span id="movedbadge" class="badge">movement …</span><span id="armst" class="badge">arm …</span>
   <a href="/jury" target="_blank" class="badge" style="text-decoration:none">scoreboard</a>
   <a href="/history" target="_blank" class="badge" style="text-decoration:none">history</a>
   <button class="badge" style="background:none;cursor:pointer" onclick="runPreflight()">preflight</button>
@@ -111,6 +111,34 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <div id="dogres" class="result"></div>
   </div>
 
+  <div class="panel">
+    <h2>Vision task</h2>
+    <div class="muted">Grok picks a skill. A move is a proposal until the motion gateway accepts it and calibration, clearance, and the operator unlock are all in place. A synthetic picture cannot authorize motion.</div>
+    <div class="row" style="margin-top:8px"><input type="text" id="agentq" placeholder="trova la penna blu e posizionati sopra" onkeydown="if(event.key==='Enter')runAgent()">
+      <button onclick="runAgent()">Run task</button><button onclick="post('/api/agent/cancel')">Cancel task</button></div>
+    <div id="agentres" class="result"></div>
+    <div class="muted" id="motioninfo"></div>
+    <div class="muted" id="visioninfo"></div>
+    <div class="muted">Calibration does not move the arm. Pose it yourself, with the physical e-stop in reach. The checkerboard stays fixed in the robot base during hand-eye captures. The Pi image is already rotated 180 degrees.</div>
+    <div class="row"><span class="muted">inner corners</span><input type="number" id="boardcols" value="9" style="max-width:70px"><input type="number" id="boardrows" value="6" style="max-width:70px">
+      <input type="number" id="boardsquare" placeholder="measured square mm" style="max-width:160px"></div>
+    <div class="row"><button onclick="previewBoard()">Show checkerboard</button>
+      <button onclick="captureBoard('intrinsics')">Capture intrinsics</button><button onclick="post('/api/vision/intrinsics/solve')">Solve intrinsics</button></div>
+    <div class="row"><label class="muted"><input type="checkbox" id="ontable"> board is flat on the table</label>
+      <button onclick="captureBoard('handeye')">Capture hand-eye view</button><button onclick="post('/api/vision/handeye/solve')">Solve hand-eye</button></div>
+    <div class="muted" id="calibinfo">no calibration samples yet</div>
+    <img id="boardview" alt="Checkerboard detection" style="display:none;width:100%;margin-top:8px;border-radius:8px;border:1px solid var(--line)">
+  </div>
+
+  <div class="panel">
+    <h2>Scan session</h2>
+    <div class="muted">Photos and the robot pose that was actually read. This does not build a mesh.</div>
+    <div class="row" style="margin-top:8px"><input type="text" id="scanobj" placeholder="object id" style="max-width:140px">
+      <button onclick="startScan()">Start scan</button><button onclick="captureView()">Capture view</button>
+      <button onclick="finishScan()">Finish scan</button><button onclick="exportScan()">Export poses</button></div>
+    <div id="scanres" class="muted"></div>
+  </div>
+
   <div class="panel"><h2>Score</h2>
     <div class="score"><div><b id="m-found">0/0</b>found</div><div><b id="m-time">–</b>avg find (s)</div><div><b id="m-fa">0</b>false alarms</div></div>
     <p class="muted" id="m-more"></p>
@@ -143,8 +171,17 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&
 
 // live view: next frame only after the previous one loaded
 const live = $('live');
-function nextFrame() { live.src = '/api/frame.jpg?boxes=' + ($('showboxes').checked ? 1 : 0) + '&t=' + Date.now(); }
-live.onload = () => setTimeout(nextFrame, 250); live.onerror = () => setTimeout(nextFrame, 1500); nextFrame();
+function usePiStream() { return S && S.source && S.source.kind === 'pi'; }
+function nextFrame() {
+  if (usePiStream()) {
+    if (live.dataset.mode !== 'stream') { live.dataset.mode = 'stream'; live.src = '/api/camera/stream'; }
+    return;
+  }
+  if (live.dataset.mode === 'stream') live.dataset.mode = '';
+  live.src = '/api/frame.jpg?boxes=' + ($('showboxes').checked ? 1 : 0) + '&t=' + Date.now();
+}
+live.onload = () => { if (live.dataset.mode !== 'stream') setTimeout(nextFrame, 250); };
+live.onerror = () => setTimeout(nextFrame, 1500); nextFrame();
 
 live.addEventListener('click', ev => {
   const r = live.getBoundingClientRect();
@@ -234,9 +271,17 @@ async function runSpoken(text) {
     return TrovaSpeech.say(it ? 'Fermo.' : 'Stopped.', $('pttlang').value);
   }
   if (p.cmd === 'inventory') return doInventory();
+  if (pendingSelection || (S && S.pending_select)) return selectSpoken(p.text || text);
   if ((selectionActive || pendingSelection || (S && S.pending_select)) && ['find', 'select', 'find_all'].includes(p.cmd)) return selectSpoken(p.text || text);
   if (['find', 'select'].includes(p.cmd) && S && S.pending_question) return answer(text);   // legacy Find clarification
   if (p.cmd === 'select') return selectSpoken(p.text);
+  if (p.cmd === 'jog') {
+    const d = await json('/api/arm/jog', {direction: p.direction, distance_mm: p.distance_mm});
+    $('pttinfo').textContent = d.reason || d.status;
+    if (speakOn()) TrovaSpeech.say(d.reason || '', $('pttlang').value);
+    return;
+  }
+  if (p.cmd === 'agent') { $('agentq').value = p.text || text; return runAgent(); }
   if (p.cmd === 'find' || p.cmd === 'find_all') { $('q').value = p.text; return p.cmd === 'find' ? doFind(false) : doFindAll(false); }
   if (p.cmd === 'room') { $('q').value = p.text; return lookAround(); }
   const run = {check: doCheck, labels: readLabels, reference: saveRef,
@@ -389,7 +434,9 @@ function showInventory(d) {
     rows.map(o => `<li><button onclick="pickObject(${Number(o.track_id)})"><b>${o.track_id}</b> ${esc(o.name)}</button> ` +
       `<span class="muted">box ${o.box_id} · ${esc(o.category)} · ${esc(o.note)}` +
       (o.confidence === '' || o.confidence == null ? '' : ` · confidence ${o.confidence}`) +
-      (o.ambiguous ? ' · similar objects' : '') + (o.touches_border ? ' · at the edge' : '') + `</span></li>`).join('') +
+      (o.ambiguous ? ' · similar objects' : '') + (o.identity_uncertain ? ' · identity uncertain' : '') +
+      (o.association && o.association !== 'same_view' ? ' · ' + esc(o.association) : '') +
+      (o.touches_border ? ' · at the edge' : '') + `</span></li>`).join('') +
     `</ul><div class="muted">Grok ${d.latency_s}s${snap.tracks_reset ? ' · tracks reset: ' + esc(snap.tracks_reset) : ''}</div>` +
     `<div class="thumbs">` + [snap.image, snap.map || d.map].filter(Boolean).map(p =>
       `<a href="/files/${p}" target="_blank"><img src="/files/${p}"></a>`).join('') + `</div>`;
@@ -455,6 +502,7 @@ async function toggleVoice() {
   const ok = await TrovaVoice.start({onStatus: s => $('vstatus').textContent = s, onLine: vline,
     onFind: d => { showFind(d); refresh(); }, onCheck: d => { showCheck(d); refresh(); }, onRefresh: refresh,
     onInventory: d => showInventory(d), onSelect: d => showSelection(d), onFindAll: d => { showFindAll(d); refresh(); },
+    onAgent: d => showAgent(d),
     onLabels: d => showLabels(d), onTool: () => refresh(), onClosed: () => { $('voicebtn').textContent = '🎤 Talk to Trova'; }}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
   if (!ok) $('voicebtn').textContent = '🎤 Talk to Trova';
 }
@@ -494,6 +542,88 @@ async function markerFromArm() { const id = prompt('Touch the centre of an ArUco
 async function markers() { const d = await call('/api/calibration/markers', {method: 'POST'}); d.files.forEach(u => window.open(u)); }
 async function tune() { await json('/api/tune', {thresh: +$('thresh').value, min_area_frac: +$('minarea').value}); }
 
+async function runAgent() {
+  const text = $('agentq').value.trim();
+  if (!text) return alert('Type the task, for example: trova la penna blu e posizionati sopra');
+  const el = $('agentres'); el.className = 'result show'; el.innerHTML = 'Running the task…';
+  try { showAgent(await json('/api/agent/task', {text})); } catch (e) {}
+}
+function showAgent(d) {
+  if (!d || !d.status) return;
+  const el = $('agentres');
+  el.className = 'result show st-' + (d.goal_achieved ? 'found' : d.status === 'clarify' ? 'clarify' : 'not_found');
+  const steps = (d.steps || []).map(s => `<li><b>${esc(s.skill)}</b> ${esc(s.reason || '')}</li>`).join('');
+  const prop = d.proposal && d.proposal.proposal ? d.proposal.proposal.target_mm : (d.planned_target || null);
+  const traj = (d.proposal && d.proposal.trajectory_mm) || [];
+  const blocks = (d.blockers || []).map(b => `<li>${esc(b)}</li>`).join('');
+  const safety = d.proposal && d.proposal.safety;
+  const camState = (typeof S !== 'undefined' && S && S.source) ? (S.source.online ? 'camera online' : (S.source.kind === 'pi' ? 'camera offline' : 'camera ' + S.source.kind)) : 'camera';
+  el.innerHTML = `<div class="big">${esc(d.status)} · ${esc(d.phase || '')}</div><div>${esc(d.reason || '')}</div>` +
+    (d.question ? `<div class="big">${esc(d.question)}</div>` : '') +
+    `<div class="muted">${esc(camState)} · Grok ${esc(d.grok_mode || (d.authoritative ? 'live' : 'not live'))} · calibration ${d.calibration_valid ? 'valid' : 'not valid'} · motion ${prop ? 'proposed' : 'not proposed'} · movement ${d.hardware_moved ? 'executed' : 'not executed'}</div>` +
+    (d.motion_lock ? `<div style="color:var(--warn)">${esc(d.motion_lock)}</div>` : '') +
+    (blocks ? `<ul class="changes">${blocks}</ul>` : '') +
+    (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm · geometry ${esc((d.proposal && d.proposal.geometry_source) || 'unknown')} · IK ${d.proposal && d.proposal.ik_verified ? 'confirmed by the controller' : 'not confirmed'} · collision avoidance: no</div>` : '') +
+    (traj.length ? `<div class="muted">straight-line samples ${esc(traj.map(p => p.join(', ')).join(' → '))} mm</div>` : '') +
+    (safety ? `<div class="muted">gateway ${esc(d.proposal.status || '')}: workspace ${esc(safety.workspace || '')} · clearance ${esc(safety.clearance || '')} · keep-out ${esc(safety.keep_out || 'not_assessed')} · motion ${d.proposal.allow_motion ? 'allowed' : 'not sent'} · collision avoidance: no</div>` : '') +
+    (steps ? `<ul class="changes">${steps}</ul>` : '');
+}
+function showBoard(d) {
+  if (d && d.image) {
+    $('boardview').style.display = 'block';
+    $('boardview').src = '/files/' + d.image + '?t=' + Date.now();
+  }
+  const bits = [d && d.reason, d && d.moved ? '' : 'arm not moved', d && d.pose_source ? 'pose ' + d.pose_source : ''];
+  window._boardNote = bits.filter(Boolean).join(' · ');
+  $('visioninfo').textContent = window._boardNote;
+}
+async function previewBoard() {
+  try { showBoard(await json('/api/vision/preview', {cols: +$('boardcols').value, rows: +$('boardrows').value})); }
+  catch (e) {}
+}
+async function captureBoard(which) {
+  if (!$('boardsquare').value) return alert('Measure one checkerboard square and type it in millimetres.');
+  const body = {cols: +$('boardcols').value, rows: +$('boardrows').value, square_mm: +$('boardsquare').value};
+  if (which === 'handeye') body.on_table = $('ontable').checked;
+  try { showBoard(await json('/api/vision/' + which, body)); } catch (e) {}
+}
+function showCalib() {
+  const p = S && S.vision_progress;
+  if (!p) return;
+  const sp = p.spread || {};
+  const rms = p.intrinsics_rms_px == null ? 'not solved' : p.intrinsics_rms_px + ' px';
+  const hold = p.holdout_mm == null ? 'not solved' : p.holdout_mm + ' mm';
+  const plane = p.plane_residual_mm == null ? 'not solved' : p.plane_residual_mm + ' mm';
+  const axis = sp.one_axis ? ' · rotations stay near one axis' : '';
+  $('calibinfo').textContent = `intrinsics ${p.n_intrinsics} · hand-eye ${p.n_handeye} · on table ${p.n_on_table} · rotation ${sp.max_rotation_deg || 0} deg · translation ${sp.max_translation_mm || 0} mm${axis} · rms ${rms} · held-out ${hold} · plane ${plane} · ${sp.reason || ''}`;
+}
+async function startScan() {
+  try { await json('/api/scan/start', {object_id: $('scanobj').value}); } catch (e) {}
+}
+async function captureView() {
+  try {
+    const d = await call('/api/scan/capture', {method: 'POST'});
+    $('scanres').textContent = `${d.viewpoint_id}: ${d.accepted ? 'accepted' : 'rejected ' + (d.reject_reason || '')}`;
+  } catch (e) {}
+  refresh();
+}
+async function finishScan() {
+  try { await call('/api/scan/finish', {method: 'POST'}); } catch (e) {}
+  refresh();
+}
+async function exportScan() {
+  try {
+    const d = await call('/api/scan/export', {method: 'POST'});
+    $('scanres').textContent = `exported ${d.images} images, reconstructed: ${d.reconstructed}`;
+  } catch (e) {}
+}
+function showScan(session) {
+  if (!session) return;
+  const views = session.views || [];
+  $('scanres').innerHTML = `${esc(session.id || '')} · ${esc(session.status || '')} · ${session.n_views || views.length} views · reconstructed: no` +
+    (views.length ? '<ul class="changes">' + views.map(v => `<li>${esc(v.viewpoint_id)} ${v.accepted ? 'accepted' : 'rejected'} ${esc(v.reject_reason || '')} pose ${esc((v.robot_tcp_mm || []).join(', '))}</li>`).join('') + '</ul>' : '');
+}
+
 async function refresh() {
   try { S = await (await fetch('/api/state')).json(); } catch { return; }
   if (S.selection_active) {
@@ -503,11 +633,42 @@ async function refresh() {
   }
   frameSize = S.frame_size;
   if (!refresh.langSet && S.lang === 'it') { $('pttlang').value = 'it-IT'; } refresh.langSet = true;
-  const m = $('mode'); m.textContent = S.mock ? 'MOCK Grok' : S.grok.offline ? 'OFFLINE: Grok unreachable' : 'LIVE ' + S.grok.model;
+  const m = $('mode'); m.textContent = S.mock ? 'Grok mock' : S.grok.offline ? 'Grok offline' : 'Grok online ' + S.grok.model;
   m.className = 'badge ' + (S.mock || S.grok.offline ? 'mock' : 'live'); m.title = S.grok.last_error || '';
-  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
+  const readOnly = S.robot && S.robot.source === 'telemetry' && !S.robot.process_can_move;
+  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.motion_mode ? ' · ' + S.arm.motion_mode : '') + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (readOnly ? ' · telemetry read-only' : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
   $('armst').title = S.arm_blocked || ''; $('armst').style.color = S.arm_blocked ? 'var(--warn)' : '';
-  $('srcinfo').textContent = 'source: ' + S.source.kind + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
+  const src = S.source || {};
+  let srcLabel = 'source: ' + src.kind + (src.provenance ? ' · ' + src.provenance : '');
+  if (src.kind === 'demo' || src.kind === 'armsim') srcLabel += ' · synthetic image';
+  if (src.kind === 'pi') srcLabel += src.online ? ' · camera online' : ' · camera offline (no held frame)';
+  $('srcinfo').textContent = srcLabel + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
+  if (usePiStream() && live.dataset.mode !== 'stream') nextFrame();
+  const cam = $('cambadge');
+  cam.textContent = src.kind === 'pi' ? (src.online ? 'Pi camera online' : 'Pi camera offline') : (src.kind === 'demo' || src.kind === 'armsim' ? 'synthetic camera' : 'camera ' + src.kind);
+  cam.className = 'badge ' + (src.kind === 'pi' && src.online ? 'live' : (src.kind === 'demo' || src.kind === 'armsim' ? 'mock' : ''));
+  const vis = S.vision || {};
+  const vb = $('visionbadge');
+  vb.textContent = vis.valid ? 'calibration valid' : 'calibration not valid';
+  vb.className = 'badge ' + (vis.valid ? 'live' : 'mock');
+  vb.title = (vis.reasons || []).join('; ');
+  const agent = S.agent || {};
+  const proposed = !!(agent.motion_proposed || agent.planned_target || (agent.proposal && agent.proposal.proposal && agent.proposal.proposal.target_mm));
+  const mb = $('motionbadge');
+  mb.textContent = proposed ? 'motion proposed' : 'motion not proposed';
+  mb.className = 'badge ' + (proposed ? 'mock' : '');
+  const moved = $('movedbadge');
+  moved.textContent = agent.hardware_moved ? 'movement executed' : 'movement not executed';
+  moved.className = 'badge ' + (agent.hardware_moved ? 'live' : '');
+  if (S.robot) {
+    let line = `robot pose: ${S.robot.source || 'unavailable'}` + (S.robot.pose6 ? '' : ' · no roll/pitch/yaw') + (S.robot.error_code ? ' · error ' + S.robot.error_code : '') + (S.robot.state_code == null ? '' : ' · state ' + S.robot.state_code) + (vis.reasons && vis.reasons.length ? ' · ' + vis.reasons[0] : '') + ' · sync not claimed';
+    if (window._boardNote) line += ' · ' + window._boardNote;
+    $('visioninfo').textContent = line;
+  }
+  showCalib();
+  if (S.motion) $('motioninfo').textContent = `motion ${S.motion.mode} · workspace ${S.motion.workspace || 'unknown'} · clearance ${S.motion.clearance} · keep-out ${S.motion.keep_out || 'not_assessed'} · collision avoidance: no · software stop is not the physical e-stop`;
+  if (S.agent && document.activeElement !== $('agentq')) showAgent(S.agent);
+  if (S.scan) showScan(S.scan);
   if (S.camera_on_arm) $('srcinfo').textContent += S.at_survey ? ' · arm camera at the survey pose' : ' · arm camera: moving view';
   if (S.camera_error) { $('srcinfo').textContent = 'CAMERA: ' + S.camera_error; $('srcinfo').style.color = 'var(--bad)'; } else $('srcinfo').style.color = '';
   $('bginfo').textContent = S.background ? 'set' : 'not set';

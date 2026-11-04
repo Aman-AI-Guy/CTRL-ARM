@@ -7,7 +7,13 @@
   path/to/video.mp4    a recording of the station, looped (work without the arm)
   path/to/image.jpg    one still
   path/to/folder/      every jpg/png in the folder; step with next/prev
+  pi                   Raspberry Pi camera (TROVA_CAM_HOST, default trova-cam.local, port 8080)
+  pi:host              same client, this hostname or address
+  pi:host:port         same client, host and port
 An uploaded photo (e.g. a phone shot of the table) overrides the source until cleared.
+The Pi server already rotates the image 180 degrees. Trova does not rotate it again unless
+TROVA_CAM_EXTRA_ROTATE is set. Localization uses /snapshot.jpg, which is captured after the
+request. The MJPEG URL is only for the live view.
 """
 
 from __future__ import annotations
@@ -218,12 +224,102 @@ class ArmCameraSim(DemoSource):
         return np.clip(view + np.random.normal(0, 2.5, view.shape), 0, 255).astype(np.uint8)
 
 
+class PiSource(FrameSource):
+    """Arm-mounted Pi camera. Every read() is a new /snapshot.jpg. A failure drops the last frame."""
+
+    kind = "pi"
+
+    def __init__(self, host: str | None = None, port: int | None = None):
+        from .pi_cam import PiCam
+        self.cam = PiCam(host or "", port or 0)
+        self.error: str | None = None
+        self._frame: np.ndarray | None = None
+        self._size: list[int] | None = None
+        self.last_capture: dict | None = None
+        self._lock = threading.Lock()
+
+    def read_capture(self) -> dict:
+        from .pi_cam import CameraError as PiError
+        with self._lock:
+            try:
+                cap = self.cam.capture()
+                frame = _decode_jpeg(cap.jpeg)
+            except (PiError, RuntimeError) as exc:
+                self.error = str(exc)
+                self._frame = None
+                self.last_capture = None
+                raise RuntimeError(str(exc)) from exc
+            if self.cam.extra_rotate:
+                frame = _rotate_extra(frame, self.cam.extra_rotate)
+            reported = (cap.meta.get("width_reported"), cap.meta.get("height_reported"))
+            actual = (int(frame.shape[1]), int(frame.shape[0]))
+            cap.meta["width"], cap.meta["height"] = actual
+            cap.meta["resolution_mismatch"] = bool(reported[0] and reported[1] and tuple(reported) != actual)
+            cap.meta["thermal_reduced"] = cap.meta.get("protection") not in (None, "normal")
+            self.error = None
+            self._frame = frame
+            self._size = [actual[0], actual[1]]
+            self.last_capture = cap.meta
+            return {"frame": frame.copy(), "jpeg": cap.jpeg, "meta": dict(cap.meta)}
+
+    def read(self) -> np.ndarray:
+        return self.read_capture()["frame"]
+
+    def info(self) -> dict:
+        meta = self.last_capture or {}
+        return {
+            "kind": self.kind, "host": self.cam.host, "port": self.cam.port,
+            "online": self.error is None and self.last_capture is not None,
+            "error": self.error, "size": self._size,
+            "protection": meta.get("protection"), "temp_c": meta.get("temp_c"),
+            "rotate_reported": meta.get("rotate_reported"), "extra_rotate": self.cam.extra_rotate,
+            "request_s": meta.get("request_s"), "requested_at": meta.get("requested_at"),
+            "resolution_mismatch": meta.get("resolution_mismatch"),
+            "thermal_reduced": meta.get("thermal_reduced"),
+            "provenance": "raspberry_pi", "stream": True,
+            "image_held": False,
+        }
+
+    def stream_url(self) -> str:
+        return self.cam.stream_url()
+
+    def close(self) -> None:
+        self._frame = None
+        self.last_capture = None
+
+
+def _decode_jpeg(data: bytes) -> np.ndarray:
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise RuntimeError("could not decode the JPEG from the camera")
+    return img
+
+
+def _rotate_extra(frame: np.ndarray, degrees: int) -> np.ndarray:
+    code = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}[degrees]
+    return cv2.rotate(frame, code)
+
+
+def _open_pi(spec: str) -> PiSource:
+    rest = spec[3:] if spec.startswith("pi:") else ""
+    host, port = None, None
+    if rest:
+        tail = rest.rsplit(":", 1)
+        if len(tail) == 2 and tail[1].isdigit():
+            host, port = tail[0], int(tail[1])
+        else:
+            host = rest
+    return PiSource(host, port)
+
+
 def open_source(spec: str) -> FrameSource:
     spec = str(spec).strip()
     if spec == "demo":
         return DemoSource()
     if spec == "armsim":
         return ArmCameraSim()
+    if spec == "pi" or spec.startswith("pi:"):
+        return _open_pi(spec)
     if spec.isdigit():
         return WebcamSource(int(spec))
     p = Path(spec)

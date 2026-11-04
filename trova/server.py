@@ -11,6 +11,7 @@ import json
 import os
 import threading
 import time
+import urllib.request
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
@@ -18,13 +19,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from . import changes as chg
 from .arm import CartesianArm, FakeCartesian, FakeJointBackend, SimArm, TaughtGridArm, load_poses, make_arm, save_pose
 from .arm.skills import TrayParams, lift_allowed, waypoints as tray_waypoints
+from .arm.cartesian import MOTION_SESSION
 from .audit import AuditLog
 from .boxes import Box
 from .calibration import Calibration, calibrate_aruco, load_marker_positions, make_marker_sheet
@@ -34,7 +36,14 @@ from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
 from .finder import find as grok_find, find_all as grok_find_all
 from .inventory import describe as describe_table, draw_map
-from .scene import Decision, TrackState, assign_tracks, build_objects, decide_text, from_finder, pack, question_for
+from .scene import (
+    Decision, TrackState, assign_tracks, build_objects, decide_text, from_finder, pack, question_for,
+    remember_world,
+)
+from .geom import VisionStore, annotate_checkerboard, pose_changed
+from .arm.telemetry import observation_record, open_reader
+from .acquire import ScanBook
+from . import agent as agent_mod
 from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
 from . import history, preflight
@@ -130,6 +139,13 @@ class WatchReq(BaseModel):
     point: bool = False       # the arm points at the problem when the alarm goes off
 
 
+class JogReq(BaseModel):
+    """Spoken or typed relative move. Mode, speed, and limits are not fields: Grok cannot set them."""
+    model_config = ConfigDict(extra="forbid")
+    direction: str
+    distance_mm: float
+
+
 class VoiceLog(BaseModel):
     who: str
     text: str
@@ -145,6 +161,52 @@ class StopReset(BaseModel):
 class LiftRecovery(StopReset):
     fork_freed: bool = False
     note: str = ""
+
+
+class BoardReq(BaseModel):
+    """Checkerboard capture. square_mm is the measured square. The arm is not moved."""
+    model_config = ConfigDict(extra="forbid")
+    cols: int
+    rows: int
+    square_mm: float
+
+
+class HandEyeReq(BoardReq):
+    on_table: bool = False
+
+
+class PreviewReq(BaseModel):
+    """Look for a checkerboard. This stores nothing and does not move the arm."""
+    model_config = ConfigDict(extra="forbid")
+    cols: int
+    rows: int
+
+
+class AgentReq(BaseModel):
+    """A spoken or typed task. Mode, limits, speed and unlock are not fields."""
+    model_config = ConfigDict(extra="forbid")
+    text: str
+
+
+class ScanStartReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    object_id: str = ""
+
+
+class OrientReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    orientation: str
+
+
+def _observe_clearance() -> float | None:
+    raw = os.getenv("TROVA_OBSERVE_CLEARANCE_MM", "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 class State:
@@ -173,10 +235,19 @@ class State:
                 and type(self.arm.backend) is FakeCartesian)
             or (s.arm == "grid:fake" and isinstance(self.arm, TaughtGridArm)
                 and type(self.arm.backend) is FakeJointBackend))
+        if self.physical and type(getattr(self.arm, "backend", None)) not in (FakeCartesian, FakeJointBackend):
+            # A loopback IP or an SDK wrapper is not an offline simulator exemption.
+            from .motion import _shrink_joints, resolve_mode
+            self.arm.gateway.simulated = False
+            self.arm.gateway.mode, self.arm.gateway.note = resolve_mode(False)
+            if getattr(getattr(self.arm, "backend", None), "name", "") == "xarm":
+                self.arm.gateway.joint_limits = _shrink_joints(os.getenv("TROVA_ARM_JOINT_LIMITS", ""))
         self.lift_store = LiftStore(s.data_dir) if self.physical else None
         self.persistence_error: str | None = None
         self.operator_name = os.getenv("TROVA_OPERATOR_NAME", "").strip()
         self.operator_token = os.getenv("TROVA_OPERATOR_TOKEN", "").strip()
+        # Pose reads stay off the motion driver. Empty means "use whatever the arm driver reports".
+        self.reader = open_reader(os.getenv("TROVA_ARM_READ", ""))
         # the camera is on the arm (the event's xArm 5): every picture is taken from the taught survey pose
         self.camera_on_arm = os.getenv("TROVA_CAMERA_ON_ARM", "0").lower() in ("1", "true", "yes")
         self.settle_s = float(os.getenv("TROVA_CAMERA_SETTLE_S", "0.6"))
@@ -215,6 +286,7 @@ class State:
         self.scene_frame: np.ndarray | None = None
         self.scene_boxes: list[Box] | None = None
         self.select_history: list[tuple[str, str]] = []
+        self.view_generation = 0  # an agent cannot reuse geometry/targets after a source or survey change
         self.pending_select: dict | None = None  # snapshot-bound, one-use clarification; never motion permission
         self.selection_active = False           # leaving read-only scene mode needs an explicit new Find
         self.tour: dict | None = None
@@ -242,6 +314,11 @@ class State:
         self.batch = json.loads(self.batch_path.read_text()) if self.batch_path.exists() else {"lot": os.getenv("TROVA_BATCH", "")}
         self.labels: dict | None = None
         self.room: dict | None = None          # feature 14: last room scan (status, views, result)
+        self.vision = VisionStore.load(s.data_dir / "vision_calib.json")
+        self.scans = ScanBook(s.data_dir / "scans")
+        self.last_agent: dict | None = None
+        self.task_cancel = threading.Event()
+        self.task_lock = threading.Lock()  # one task owns the cancellation event and snapshot context
 
     # ---------- frames, proposals, calibration
     def invalidate_scene(self, reason: str, *, reset_tracks: bool = True) -> None:
@@ -250,7 +327,9 @@ class State:
         self.pending_select = None
         self.select_history = []
         if reset_tracks:
+            self.view_generation += 1
             self.tracks.previous = []
+            self.tracks.pose_mm = None
             self.tracks_reset_reason = reason
 
     def frame(self) -> np.ndarray:
@@ -330,6 +409,7 @@ class State:
             self.stop_latched.set()
             self.stop_epoch.set()
             self.cancel.set()
+            self.task_cancel.set()
             self.stops_pending += 1
         try:
             self.arm.stop()
@@ -369,15 +449,19 @@ class State:
         ticket = self.motion_ticket(ticket)
         with self.arm_lock:
             if guard is not None and not guard():
-                raise ArmBusy("The watch worker/generation is no longer authorized")
+                raise ArmBusy("The motion source, worker or generation is no longer authorized")
             cancel = self._take_arm(job, pixels=pixels, ticket=ticket, since=since)
             if guard is not None and not guard():
-                raise ArmBusy("The watch worker/generation is no longer authorized")
+                raise ArmBusy("The motion source, worker or generation is no longer authorized")
 
             def run():
                 if (not cancel.is_set() and not ticket.is_set() and not self.stop_latched.is_set()
                         and (guard is None or guard())):
-                    fn(*args)
+                    session = MOTION_SESSION.set(ticket)
+                    try:
+                        fn(*args)
+                    finally:
+                        MOTION_SESSION.reset(session)
 
             worker = threading.Thread(target=run, daemon=True)
             self.arm_thread = worker
@@ -591,6 +675,281 @@ class State:
             time.sleep(0.4)
         return f, boxes, True
 
+    def robot_telemetry(self) -> dict:
+        """Read the pose. Does not enable motors, clear errors, or send a motion command."""
+        reader = getattr(self, "reader", None)
+        if reader is not None:
+            reading = reader.read()
+            reading["arm_state"] = "read-only"
+            reading["tip_mm"] = reading.get("xyz_mm")
+            reading["status_tcp_mm"] = reading.get("xyz_mm")
+            # This connection never enables motion. process_can_move is the motion driver, separately.
+            reading["movements_enabled"] = False
+            reading["motion_sent"] = False
+            reading["process_can_move"] = self._process_can_move()
+            reading["read_only"] = not reading["process_can_move"]
+            return reading
+        out = {"xyz_mm": None, "pose6": None, "joints": None, "moving": None,
+               "source": "unavailable", "simulated": None, "error": None,
+               "motion_sent": False, "movements_enabled": False, "motors_enabled_by_trova": False,
+               "tcp_changed": False, "sync_precision_claimed": False,
+               "process_can_move": False, "read_only": True}
+        try:
+            status = self.arm.status()
+        except Exception as exc:  # noqa: BLE001 - telemetry is optional; a dead link is reported
+            out["error"] = str(exc)
+            return out
+        out["moving"] = status.get("state") == "moving"
+        out["arm_state"] = status.get("state")
+        out["tip_mm"] = status.get("tip_mm")
+        out["status_tcp_mm"] = status.get("tcp_mm")
+        out["simulated"] = bool(status.get("simulated"))
+        backend = getattr(self.arm, "backend", None)
+        try:
+            if backend is not None and hasattr(backend, "tcp_pose"):
+                pose = [round(float(v), 3) for v in backend.tcp_pose()]
+                if len(pose) >= 6:
+                    out["pose6"] = pose[:6]
+                    out["xyz_mm"] = pose[:3]
+                    out["source"] = "simulated" if out["simulated"] else "telemetry"
+                else:
+                    out["xyz_mm"] = pose[:3]
+                    out["source"] = "xyz_only"
+            elif status.get("tcp_mm"):
+                out["xyz_mm"] = [float(v) for v in status["tcp_mm"]]
+                out["source"] = "simulated" if out["simulated"] else "xyz_only"
+            elif status.get("tip_mm") and len(status["tip_mm"]) >= 2:
+                out["xyz_mm"] = [float(status["tip_mm"][0]), float(status["tip_mm"][1]),
+                                 float(getattr(self.arm, "z", 0.0))]
+                out["source"] = "simulated"
+            if backend is not None and hasattr(backend, "joints"):
+                out["joints"] = [round(float(v), 3) for v in backend.joints()]
+            if backend is not None and hasattr(backend, "is_moving"):
+                out["moving"] = bool(backend.is_moving())
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = str(exc)
+            out["pose6"] = None
+        # A live controller pose is telemetry, and that driver can be asked to move.
+        # A simulated pose must not be labeled as a read-only physical connection.
+        out["movements_enabled"] = out.get("source") == "telemetry" and not out.get("simulated")
+        out["process_can_move"] = self._process_can_move()
+        out["read_only"] = not out["process_can_move"]
+        return out
+
+    def _process_can_move(self) -> bool:
+        """True only when this process is in hardware mode on a non-simulated driver."""
+        gateway = getattr(getattr(self, "arm", None), "gateway", None)
+        if gateway is None:
+            return False
+        return gateway.mode == "hardware" and not bool(getattr(gateway, "simulated", True))
+
+    def snapshot_scene(self, *, home: bool = False) -> dict:
+        """Read-only capture shared by inventory and vision skills.
+
+        home=True requires an already parked view; it NEVER commands Home. Calibrated vision
+        skills may observe from a stationary arbitrary pose without moving the camera.
+        """
+        with self.lock:
+            self.selection_active = True
+            self.invalidate_scene("new snapshot requested", reset_tracks=False)
+            if home:
+                self.clear_view(move=False)
+            frame, boxes, occl = self.capture_clean(attempts=3)
+            pose = self.robot_telemetry()
+            size = [int(frame.shape[1]), int(frame.shape[0])]
+            if self.override is None:
+                self.frame_size = size
+            vision_ok = self.vision.assess(size)["valid"]
+            reset = self.tracks_reset_reason
+            pose_mm = pose.get("xyz_mm") if vision_ok else None
+            if self.camera_on_arm and not self.at_survey() and not vision_ok:
+                reset = "arm camera is not at the survey pose"
+            boxes, reset = assign_tracks(self.tracks, boxes, frame, reset, pose_mm=pose_mm)
+            inv = describe_table(self.grok, frame, boxes, self.s.lang)
+            objects = build_objects(boxes, frame, inv.items)
+            image = self.audit.save_image("scene", frame)
+            drawn = self.audit.save_image("inventory_map", draw_map(frame, boxes, inv))
+            info = self.source.info()
+            snapshot = {
+                "id": image, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "image": image, "map": drawn, "width": size[0], "height": size[1],
+                "at_survey": self.at_survey(), "camera_on_arm": self.camera_on_arm,
+                "pose": {"state": pose.get("arm_state"), "tip_mm": pose.get("tip_mm"),
+                         "tcp_mm": pose.get("status_tcp_mm"), "pose6": pose.get("pose6"),
+                         "source": pose.get("source"), "moving": pose.get("moving"),
+                         "joints": pose.get("joints")},
+                "grok_mode": inv.grok_mode, "tracks_reset": reset,
+                "occluded": occl, "objects": objects,
+                "authoritative": inv.grok_mode == "live", "motion_allowed": False,
+                "provenance": info.get("provenance") or info.get("kind"),
+                "camera_kind": info.get("kind"),
+                "vision_valid": vision_ok,
+            }
+            out = inv.as_dict() | {"map": drawn, "n_objects": len(boxes), "occluded": occl, "snapshot": snapshot}
+            self.scene_frame, self.scene_boxes = frame, boxes
+            self.select_history = []
+            self.pending_select = None
+            self.inventory = out
+            self.tracks_reset_reason = None
+            self.audit.event("inventory", summary=inv.summary, n_objects=len(boxes), occluded=occl,
+                             map=drawn, image=image, snapshot_id=image, tracks=objects,
+                             grok_mode=inv.grok_mode, authoritative=snapshot["authoritative"],
+                             tracks_reset=reset, provenance=snapshot["provenance"], motion_allowed=False)
+            return out
+
+
+class TaskGrok:
+    """Record every model decision in a task, including selection/skill offline fallback."""
+
+    def __init__(self, client):
+        self.client = client
+        self.modes: list[str] = []
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def json(self, **kwargs):
+        result = self.client.json(**kwargs)
+        self.modes.append("offline" if result.offline else "mock" if result.mock else "live")
+        return result
+
+
+class AgentHost:
+    """What the skill loop may touch. Motion goes through the gateway and start_arm."""
+
+    def __init__(self, st: State):
+        self.st = st
+        self.grok = TaskGrok(st.grok)
+        self.vision = st.vision
+        self.gateway = getattr(st.arm, "gateway", None)
+        self.settle_s = st.settle_s
+        self.cancel = st.task_cancel
+        self.ticket = st.motion_ticket()  # immutable across delayed skills, STOP and reset
+        self.view_generation = st.view_generation
+        self.vision_version = st.vision.version
+        self.snapshot_mode = "unknown"
+        self.timeout_s = float(os.getenv("TROVA_TASK_TIMEOUT_S", "90"))
+        info = st.source.info()
+        self.camera_kind = info.get("kind") or ""
+        self.image_size = list(st.frame_size or info.get("size") or [0, 0])
+        self.observe_clearance_mm = _observe_clearance()
+        self.read_only_robot = getattr(st, "reader", None) is not None
+        self.frame = st.scene_frame
+        self.boxes = st.scene_boxes
+        self._jpeg: bytes | None = None
+
+    def snapshot(self) -> dict:
+        out = self.st.snapshot_scene(home=False)
+        self.frame = self.st.scene_frame
+        self.boxes = self.st.scene_boxes
+        snap = out["snapshot"]
+        self.snapshot_mode = snap.get("grok_mode", "unknown")
+        self.grok.modes.append(self.snapshot_mode)
+        self.image_size = [snap["width"], snap["height"]]
+        return snap
+
+    def robot(self) -> dict:
+        return self.st.robot_telemetry()
+
+    def inverse(self, pose6, ref_joints=None) -> dict:
+        reader = getattr(self.st, "reader", None)
+        if reader is None or not hasattr(reader, "inverse"):
+            return {"ok": False, "ik_verified": False, "joints": None, "motion_sent": False,
+                    "reason": "inverse kinematics was not asked of the controller"}
+        return reader.inverse(pose6, ref_joints)
+
+    def read_frame(self):
+        kind = self.st.source.info().get("kind")
+        if kind == "pi":
+            packed = self.st.source.read_capture()
+            self._jpeg = packed["jpeg"]
+            meta = dict(packed["meta"])
+            meta["kind"] = "pi"
+        else:
+            frame = self.st.frame()
+            self.frame = frame
+            self._jpeg = None
+            meta = {"kind": kind, "requested_at": time.time(), "width": int(frame.shape[1]),
+                    "height": int(frame.shape[0]),
+                    "provenance": "synthetic" if kind in ("demo", "armsim") else kind,
+                    "sync": "local_read", "sync_precision_claimed": False}
+            robot = self.robot()
+            meta["moving"] = robot.get("moving")
+            meta["pose6"] = robot.get("pose6")
+            meta["robot_tcp_mm"] = robot.get("xyz_mm")
+            meta["joints_deg"] = robot.get("joints")
+            return frame, meta
+        robot = self.robot()
+        meta["moving"] = robot.get("moving")
+        meta["pose6"] = robot.get("pose6")
+        meta["robot_tcp_mm"] = robot.get("xyz_mm")
+        meta["joints_deg"] = robot.get("joints")
+        if self.vision.hand_eye:
+            meta["tool_camera"] = self.vision.hand_eye["matrix"]
+        meta["calibration_version"] = self.vision.version
+        return packed["frame"], meta
+
+    def redetect(self, frame):
+        boxes, _occl = self.st.proposals(frame)
+        pose = self.robot()
+        vision_ok = self.vision.assess([frame.shape[1], frame.shape[0]])["valid"]
+        boxes, _reset = assign_tracks(self.st.tracks, boxes, frame, None,
+                                      pose_mm=pose.get("xyz_mm") if vision_ok else None)
+        self.frame, self.boxes = frame, boxes
+        return build_objects(boxes, frame, {})
+
+    def remember(self, track_id, point) -> None:
+        remember_world(self.st.tracks, track_id, point)
+
+    def execute(self, target) -> dict:
+        gateway = self.gateway
+        if gateway is None:
+            return {"ok": False, "reason": "this arm has no motion gateway"}
+        holder: dict = {}
+
+        def current():
+            return (not self.cancel.is_set() and self.view_generation == self.st.view_generation
+                    and self.vision_version == self.st.vision.version
+                    and self.st.override is None and self.snapshot_mode == "live"
+                    and bool(self.grok.modes) and all(mode == "live" for mode in self.grok.modes))
+
+        def go():
+            holder["ok"] = bool(gateway._execute_cartesian(tuple(target)))
+            holder["final"] = gateway.current_pose()
+            holder["error"] = getattr(self.st.arm, "last_error", None)
+
+        try:
+            self.st.start_arm(go, job="approach", pixels=False, ticket=self.ticket, guard=current, wait=True)
+        except ArmBusy as exc:
+            return {"ok": False, "reason": str(exc)}
+        if "ok" not in holder:
+            return {"ok": False, "reason": holder.get("error") or "the approach did not finish"}
+        return {"ok": bool(holder["ok"]), "final_mm": holder.get("final"),
+                "reason": "moved" if holder["ok"] else (holder.get("error") or "the arm did not complete the approach")}
+
+    def record_capture(self, frame, meta, selected):
+        if self.st.scans.active is None:
+            return None
+        data = self._jpeg
+        if not data:
+            data = jpeg(frame, 90)
+        detection = {}
+        if selected:
+            detection = {k: selected.get(k) for k in ("track_id", "name", "box", "association", "confidence")}
+        packed = dict(meta or {})
+        robot = self.robot()
+        packed.setdefault("pose6", robot.get("pose6"))
+        packed.setdefault("robot_tcp_mm", robot.get("xyz_mm"))
+        packed.setdefault("robot_rpy_deg", None if not robot.get("pose6") else list(robot["pose6"][3:]))
+        packed.setdefault("joints_deg", robot.get("joints"))
+        packed.setdefault("moving", robot.get("moving"))
+        if self.vision.hand_eye:
+            packed.setdefault("tool_camera", self.vision.hand_eye["matrix"])
+        packed.setdefault("calibration_version", self.vision.version)
+        packed.setdefault("calibration_valid", bool(self.vision.assess(self.image_size)["valid"]))
+        record = self.st.scans.capture(data, packed, detection)
+        return {k: record.get(k) for k in ("viewpoint_id", "accepted", "reject_reason", "session_id")}
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     st = State(settings or load_settings())
@@ -688,11 +1047,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/state")
     def state():
-        try:
-            f = st.frame()
-            size = [f.shape[1], f.shape[0]]
-        except CameraError:
-            size = st.frame_size or [1280, 800]
+        info = st.source.info()
+        # A Pi snapshot waits for a new frame on the camera. The status poll must not take one.
+        if info.get("kind") == "pi":
+            size = info.get("size") or st.frame_size or [0, 0]
+        else:
+            try:
+                f = st.frame()
+                size = [f.shape[1], f.shape[0]]
+            except CameraError:
+                size = st.frame_size or [1280, 800]
         m = st.metrics
         judged = m["find_ok"] + m["find_wrong"]
         lf = {k: v for k, v in (st.last_find or {}).items() if k not in ("box",)}
@@ -701,6 +1065,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "override": st.override is not None, "frame_size": size, "camera_error": st.camera_error,
             "background": st.background is not None, "calibration": st.calib.as_dict() if st.calib else None,
             "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
+            "motion": st.arm.gateway.public() if hasattr(st.arm, "gateway") else None,
             "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
             "stop_latched": st.stop_latched.is_set(),
             "stop_error": st.stop_error,
@@ -719,6 +1084,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
             "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(), "batch": st.batch, "room": st.room,
             "light": st.light.status(),
+            "vision": st.vision.assess(size),
+            "vision_progress": st.vision.progress(),
+            "robot": st.robot_telemetry(),
+            "agent": st.last_agent,
+            "scan": None if not st.scans.active else st.scans.public(st.scans.sessions[st.scans.active]),
             "labels": None if not st.labels else {k: v for k, v in st.labels.items() if k != "codes"},
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
@@ -1263,6 +1633,34 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         identity = st.operator_reset(r, recover_lift=True, credential=request.headers.get("x-trova-operator-token", ""))
         st.audit.event("arm_lift_recovery", operator=identity, note=r.note.strip())
         return {"stop_latched": st.stop_latched.is_set(), "lift_interrupted": st.lift_interrupted, "moved": False}
+    @app.post("/api/arm/jog")
+    def api_arm_jog(body: JogReq):
+        """Relative jog in the robot base frame. The gateway keeps the requested millimetres and says why if it refuses."""
+        gateway = getattr(st.arm, "gateway", None)
+        if gateway is None:
+            raise HTTPException(400, "this arm has no motion gateway")
+        ticket = st.motion_ticket()
+        st.authorize_motion(pixels=False, ticket=ticket)
+        if st.pending_select:
+            raise ArmBusy("A scene clarification is pending: answer it via /api/select before a jog")
+        planned = gateway.plan_relative(body.direction, body.distance_mm, execute=False)
+        if not planned.allow_motion:
+            st.audit.event("arm_jog", direction=body.direction, distance_mm=body.distance_mm,
+                           status=planned.status, ok=planned.ok, mode=planned.mode, reason=planned.reason)
+            return planned.as_dict()
+        holder: dict = {}
+
+        def go():
+            holder["decision"] = gateway.plan_relative(body.direction, body.distance_mm, execute=True)
+
+        st.start_arm(go, job="jog", pixels=False, ticket=ticket, wait=True)
+        decision = holder.get("decision", planned)
+        if "decision" not in holder:
+            decision.ok, decision.status, decision.allow_motion = False, "error", False
+            decision.reason = decision.reason or "the jog did not finish"
+        st.audit.event("arm_jog", direction=body.direction, distance_mm=body.distance_mm,
+                       status=decision.status, ok=decision.ok, mode=decision.mode, reason=decision.reason)
+        return decision.as_dict()
 
     @app.post("/api/arm/point")
     def api_arm_point(p: Point):
@@ -1397,54 +1795,12 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             f.write(json.dumps(case, ensure_ascii=False) + "\n")
 
     # ------------------------------------------------------------------ feature 1: inventory map + M1 snapshot
-    def _pose_readonly() -> dict | None:
-        """Telemetry only. status() reads the pose; it does not enable or command motion."""
-        try:
-            pose = st.arm.status()
-        except Exception:  # noqa: BLE001 - a pose is optional on the snapshot
-            return None
-        if not isinstance(pose, dict):
-            return None
-        return {"state": pose.get("state"), "tip_mm": pose.get("tip_mm"), "tcp_mm": pose.get("tcp_mm")}
-
     @app.post("/api/inventory")
     def api_inventory():
-        with st.lock:
-            st.selection_active = True  # failures also retain read-only intent; no fallback into moving Find
-            st.invalidate_scene("new snapshot requested", reset_tracks=False)
-            st.clear_view(move=False)  # a read-only snapshot must never park/reposition the arm
-            f, boxes, occl = st.capture_clean(attempts=3)
-            reset = st.tracks_reset_reason
-            if st.camera_on_arm and not st.at_survey():
-                reset = "arm camera is not at the survey pose"
-            boxes, reset = assign_tracks(st.tracks, boxes, f, reset)
-            try:
-                inv = describe_table(st.grok, f, boxes, st.s.lang)
-            except GrokError as e:
-                return fail(e, "inventory")
-            objects = build_objects(boxes, f, inv.items)
-            image = st.audit.save_image("scene", f)
-            drawn = st.audit.save_image("inventory_map", draw_map(f, boxes, inv))
-            snapshot = {
-                "id": image, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "image": image, "map": drawn, "width": int(f.shape[1]), "height": int(f.shape[0]),
-                "at_survey": st.at_survey(), "camera_on_arm": st.camera_on_arm,
-                "pose": _pose_readonly(), "grok_mode": inv.grok_mode, "tracks_reset": reset,
-                "occluded": occl, "objects": objects,
-                "authoritative": inv.grok_mode == "live", "motion_allowed": False,
-            }
-            out = inv.as_dict() | {"map": drawn, "n_objects": len(boxes), "occluded": occl, "snapshot": snapshot}
-            st.scene_frame, st.scene_boxes = f, boxes
-            st.select_history = []
-            st.pending_select = None
-            st.selection_active = True
-            st.inventory = out
-            st.tracks_reset_reason = None
-            st.audit.event("inventory", summary=inv.summary, n_objects=len(boxes), occluded=occl,
-                           map=drawn, image=image, snapshot_id=image, tracks=objects,
-                           grok_mode=inv.grok_mode, authoritative=snapshot["authoritative"],
-                           tracks_reset=reset)
-            return out
+        try:
+            return st.snapshot_scene(home=True)
+        except GrokError as e:
+            return fail(e, "inventory")
 
     @app.post("/api/select")
     def api_select(text: str = Form(""), track_id: str = Form(""), box_id: str = Form(""),
@@ -1719,5 +2075,289 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             raise HTTPException(400, "Only in demo mode")
         st.source.hand = on
         return {"hand": on}
+
+    # ------------------------------------------------------------------ arm camera, vision task, scan sessions
+    @app.get("/api/camera/status")
+    def api_camera_status():
+        info = st.source.info()
+        if info.get("kind") == "pi":
+            try:
+                live = st.source.cam.status()
+            except Exception as exc:  # noqa: BLE001 - the UI shows the camera as offline
+                return info | {"online": False, "error": str(exc), "live_status": None}
+            info = info | {"online": live.get("camera") != "paused", "live_status": live,
+                           "error": None if live.get("camera") != "paused" else (live.get("message") or "cooling")}
+        return info
+
+    @app.get("/api/camera/stream")
+    def api_camera_stream():
+        """MJPEG for the live view. Localization uses /snapshot.jpg, not this queue."""
+        if st.source.info().get("kind") != "pi":
+            raise HTTPException(404, "The MJPEG stream is the Pi camera. This source has no stream.")
+        url = st.source.stream_url()
+
+        def chunks():
+            request = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+            try:
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    while True:
+                        block = response.read(8192)
+                        if not block:
+                            break
+                        yield block
+            except Exception:  # noqa: BLE001 - the browser retries the image
+                return
+
+        return StreamingResponse(chunks(), media_type="multipart/x-mixed-replace; boundary=frame",
+                                 headers={"Cache-Control": "no-store"})
+
+    def _fresh_frame():
+        """A picture for calibration or a scan. Does not move the arm."""
+        if st.source.info().get("kind") == "pi":
+            packed = st.source.read_capture()
+            return packed["frame"], packed["jpeg"], packed["meta"]
+        frame = st.frame()
+        return frame, jpeg(frame, 90), {
+            "kind": st.source.info().get("kind"), "requested_at": time.time(),
+            "width": int(frame.shape[1]), "height": int(frame.shape[0]),
+            "provenance": st.source.info().get("provenance") or st.source.info().get("kind"),
+            "sync": "local_read", "sync_precision_claimed": False,
+        }
+
+    def _capture_meta(frame, meta: dict) -> dict:
+        packed = dict(meta)
+        packed["width"] = int(frame.shape[1])
+        packed["height"] = int(frame.shape[0])
+        return packed
+
+    def _reported_size(frame, meta: dict) -> str | None:
+        width, height = meta.get("width_reported"), meta.get("height_reported")
+        if not width or not height:
+            return None
+        if (int(width), int(height)) != (int(frame.shape[1]), int(frame.shape[0])):
+            return (f"decoded image is {frame.shape[1]}x{frame.shape[0]} but the camera reported "
+                    f"{width}x{height}")
+        return None
+
+    @app.get("/api/vision/calibration")
+    def api_vision_calibration():
+        size = st.frame_size or st.source.info().get("size")
+        report = st.vision.as_dict()
+        report["status"] = st.vision.assess(size)
+        report["progress"] = st.vision.progress()
+        report["moved"] = False
+        return report
+
+    @app.post("/api/vision/preview")
+    def api_vision_preview(body: PreviewReq):
+        if body.cols < 2 or body.rows < 2:
+            raise HTTPException(400, "cols and rows are the inner corners of the checkerboard")
+        frame, _data, meta = _fresh_frame()
+        meta = _capture_meta(frame, meta)
+        robot = st.robot_telemetry()
+        drawn, info = annotate_checkerboard(frame, body.cols, body.rows)
+        path = st.audit.save_image("board", drawn)
+        return info | {
+            "image": path, "moved": False, "persisted": False,
+            "size_conflict": _reported_size(frame, meta),
+            "observation": observation_record(meta, robot, info),
+        }
+
+    @app.post("/api/vision/intrinsics")
+    def api_vision_intrinsics(body: BoardReq):
+        if body.square_mm <= 0:
+            raise HTTPException(400, "square_mm has to be the measured checkerboard square")
+        frame, _data, meta = _fresh_frame()
+        meta = _capture_meta(frame, meta)
+        conflict = _reported_size(frame, meta)
+        drawn, info = annotate_checkerboard(frame, body.cols, body.rows)
+        path = st.audit.save_image("board", drawn)
+        if conflict:
+            out = {"ok": False, "reason": conflict, "count": len(st.vision.intrinsic_views), "corners": 0}
+        else:
+            out = st.vision.add_intrinsics(frame, body.cols, body.rows, body.square_mm, image_meta=meta)
+        st.audit.event("vision_capture", step="intrinsics", ok=out["ok"], reason=out["reason"],
+                       count=out.get("count"), moved=False)
+        return out | {"moved": False, "image": path, "found": info["found"],
+                      "observation": observation_record(meta, st.robot_telemetry(), info),
+                      "progress": st.vision.progress()}
+
+    @app.post("/api/vision/intrinsics/solve")
+    def api_vision_intrinsics_solve():
+        report = st.vision.solve()
+        st.audit.event("vision_capture", step="solve", version=report["version"],
+                       status=report["status"]["status"], moved=False)
+        return report | {"moved": False, "progress": st.vision.progress()}
+
+    @app.post("/api/vision/handeye")
+    def api_vision_handeye(body: HandEyeReq):
+        if body.square_mm <= 0:
+            raise HTTPException(400, "square_mm has to be the measured checkerboard square")
+        before = st.robot_telemetry()
+        frame, _data, meta = _fresh_frame()
+        meta = _capture_meta(frame, meta)
+        after = st.robot_telemetry()
+        drawn, info = annotate_checkerboard(frame, body.cols, body.rows)
+        path = st.audit.save_image("board", drawn)
+        conflict = _reported_size(frame, meta)
+        if pose_changed(before.get("pose6"), after.get("pose6")):
+            out = {"ok": False, "corners": info["corners"], "count": len(st.vision.handeye_views),
+                   "reason": "the arm moved while the picture was taken, so the pose was not stored"}
+        elif conflict:
+            out = {"ok": False, "corners": 0, "count": len(st.vision.handeye_views), "reason": conflict}
+        elif after.get("source") != "telemetry":
+            if not after.get("pose6"):
+                reason = "the controller did not report roll, pitch and yaw"
+            else:
+                reason = (f"the pose source is {after.get('source') or 'unavailable'}, not telemetry; "
+                          "the view was not stored")
+            out = {"ok": False, "corners": info["corners"], "count": len(st.vision.handeye_views), "reason": reason}
+        else:
+            out = st.vision.add_handeye(
+                frame, after.get("pose6"), body.cols, body.rows, body.square_mm,
+                on_table=body.on_table, pose_source="telemetry", robot=after, image_meta=meta,
+                moving=bool(after.get("moving")))
+        st.audit.event("vision_capture", step="handeye", ok=out["ok"], reason=out["reason"],
+                       count=out.get("count"), pose_source=after.get("source"), moved=False)
+        return out | {"moved": False, "pose_source": after.get("source"), "image": path,
+                      "found": info["found"], "observation": observation_record(meta, after, info),
+                      "progress": st.vision.progress()}
+
+    @app.post("/api/vision/handeye/solve")
+    def api_vision_handeye_solve():
+        report = st.vision.solve()
+        st.audit.event("vision_capture", step="solve", version=report["version"],
+                       status=report["status"]["status"], moved=False)
+        return report | {"moved": False}
+
+    @app.post("/api/agent/task")
+    def api_agent_task(body: AgentReq):
+        if not body.text.strip():
+            raise HTTPException(400, "Say what to do")
+        if st.pending_select:
+            raise ArmBusy("A scene clarification is pending: answer it via /api/select before a vision task")
+        if not st.task_lock.acquire(blocking=False):
+            raise ArmBusy("A vision task is still running: cancel it and wait for it to finish")
+        try:
+            with st.safety_lock:
+                st.task_cancel = threading.Event()
+                if st.motion_ticket().is_set():
+                    st.task_cancel.set()
+            host = AgentHost(st)
+            try:
+                result = agent_mod.run(host, body.text.strip())
+            except GrokError as exc:
+                return fail(exc, "agent")
+            modes = list(host.grok.modes)
+            result["authoritative"] = bool(result.get("authoritative") and modes and all(m == "live" for m in modes))
+            result["provenance"] = {"snapshot": host.snapshot_mode, "decisions": modes}
+            if any(m != "live" for m in modes):
+                result["grok_mode"] = next(m for m in ("offline", "mock", "unknown") if m in modes)
+        finally:
+            st.task_lock.release()
+        st.last_agent = result
+        st.audit.event("vision_task", goal=result.get("goal"), status=result.get("status"),
+                       phase=result.get("phase"), hardware_moved=result.get("hardware_moved"),
+                       goal_achieved=result.get("goal_achieved"), motion_lock=result.get("motion_lock"),
+                       calibration_valid=result.get("calibration_valid"),
+                       verified_tool_position=False, reason=result.get("reason"))
+        return result
+
+    @app.post("/api/agent/cancel")
+    def api_agent_cancel():
+        st.task_cancel.set()
+        if st.arm_job == "approach" and st.arm_thread and st.arm_thread.is_alive():
+            try:
+                st.stop_arm()  # cancel must hold an approach already running, not merely stop the next skill
+            except Exception as exc:
+                return fail(exc, "agent_cancel")
+        st.audit.event("vision_task", status="cancel_requested")
+        return {"cancelled": True}
+
+    def _scan_meta(meta: dict, robot: dict, settled_at: float | None) -> dict:
+        packed = dict(meta)
+        packed["pose6"] = robot.get("pose6")
+        packed["robot_tcp_mm"] = robot.get("xyz_mm")
+        packed["robot_rpy_deg"] = None if not robot.get("pose6") else list(robot["pose6"][3:])
+        packed["joints_deg"] = robot.get("joints")
+        packed["pose_source"] = robot.get("source")
+        packed["moving"] = bool(robot.get("moving"))
+        packed["state_code"] = robot.get("state_code")
+        packed["error_code"] = robot.get("error_code")
+        packed["warn_code"] = robot.get("warn_code")
+        packed["read_finished_at"] = robot.get("read_finished_at")
+        packed["calibration_version"] = st.vision.version
+        packed["calibration_valid"] = bool(st.vision.assess(st.frame_size)["valid"])
+        if st.vision.hand_eye:
+            packed["tool_camera"] = st.vision.hand_eye["matrix"]
+        # settled_at is taken before the snapshot, and only when the robot was already still.
+        if settled_at is not None:
+            packed["stopped_at"] = settled_at
+        return packed
+
+    @app.post("/api/scan/start")
+    def api_scan_start(body: ScanStartReq):
+        session = st.scans.start(body.object_id)
+        if st.vision.intrinsics:
+            st.scans.sessions[session["id"]]["intrinsics"] = st.vision.intrinsics
+        st.audit.event("scan", action="start", session=session["id"], object_id=body.object_id)
+        return session
+
+    @app.post("/api/scan/capture")
+    def api_scan_capture():
+        try:
+            robot = st.robot_telemetry()
+            settled_at = None if robot.get("moving") else time.time()
+            _frame, data, meta = _fresh_frame()
+            record = st.scans.capture(data, _scan_meta(meta, robot, settled_at))
+        except KeyError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc)) from None
+        st.audit.event("scan", action="capture", viewpoint=record["viewpoint_id"],
+                       accepted=record["accepted"], reason=record["reject_reason"])
+        return {k: record.get(k) for k in ("viewpoint_id", "session_id", "object_id", "accepted",
+                                           "reject_reason", "pose_source", "robot_tcp_mm", "joints_deg",
+                                           "camera_pose", "calibration_version", "recorded_at",
+                                           "sync", "sync_precision_claimed")}
+
+    @app.get("/api/scan")
+    def api_scan_list():
+        if not st.scans.last or st.scans.last not in st.scans.sessions:
+            return {"session": None, "views": []}
+        session = st.scans.sessions[st.scans.last]
+        return {"session": st.scans.public(session), "views": st.scans.list_views(session["id"])}
+
+    @app.get("/api/scan/candidates")
+    def api_scan_candidates():
+        point = ((st.last_agent or {}).get("location") or {}).get("point_mm")
+        try:
+            return st.scans.candidates(point, _observe_clearance())
+        except KeyError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.post("/api/scan/orientation")
+    def api_scan_orientation(body: OrientReq):
+        try:
+            return st.scans.mark_orientation(body.orientation)
+        except KeyError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.post("/api/scan/finish")
+    def api_scan_finish():
+        try:
+            done = st.scans.finish()
+        except KeyError as exc:
+            raise HTTPException(400, str(exc)) from None
+        st.audit.event("scan", action="finish", session=done["id"], n_views=done["n_views"],
+                       reconstructed=False)
+        return done
+
+    @app.post("/api/scan/export")
+    def api_scan_export():
+        try:
+            return st.scans.export_colmap()
+        except KeyError as exc:
+            raise HTTPException(400, str(exc)) from None
 
     return app

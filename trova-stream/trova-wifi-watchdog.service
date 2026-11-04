@@ -1,0 +1,7 @@
+[Unit]
+Description=Reconnect WiFi if NetworkManager gave up
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/trova-wifi-watchdog

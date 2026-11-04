@@ -1,189 +1,152 @@
 #!/usr/bin/env python3
-"""Voice -> Grok speech transcription -> Grok JSON -> xArm5 single movement.
+"""Spoken or typed relative move, checked by Trova's motion gateway.
 
-Install this file at Grok_Hackathon/xarm_voice_execute.py, alongside .env and
-speech_to_text/grok_to_xarm_json.py.
+Default is a dry-run. This process does not import the xArm SDK and does not connect.
 
-First tests:
-  python3 xarm_voice_execute.py --mic                    # no motion
-  python3 xarm_voice_execute.py --mic --execute          # motion after typing MOVE
-  python3 xarm_voice_execute.py --text 'Move backward by 3 millimeters' --execute
+    python3 xarm_voice_execute.py --text "Move backward by 3 millimeters"
+    python3 xarm_voice_execute.py --text "Sposta indietro di 40 centimetri"
 
-For the very first physical test, only the direction 'backward' is enabled.
-This means -X in the ROBOT BASE frame, not relative to the operator.
-After manually calibrating directions in UFACTORY Studio, passing
---allow-all-base-directions enables the other five base-frame movements.
-All movements remain capped at <=3mm by default and require confirmation.
+--execute moves a real arm only when the operator has already set
+TROVA_MOTION_MODE=hardware and TROVA_HARDWARE_UNLOCK=MOVE, and then types MOVE.
+Pytest cannot reach that path. The requested distance is never rewritten: a distance
+outside the jog limit comes back as a rejection with the heard millimetres.
 
-This demo is NOT a safety-rated robot controller and performs NO collision check.
-Keep people clear of the robot and the physical E-stop in reach.
+Directions are the robot base frame (backward = -X). The first physical jog stays
+backward-only unless --allow-all-base-directions is passed after each direction is checked.
+
+A voice STOP is not a safety-rated emergency stop. Keep the physical e-stop in reach.
+This script does not claim collision avoidance.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
+import json
 import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / 'speech_to_text'))
-from grok_to_xarm_json import grok_to_command, record_wav, transcribe_wav
-
-# Coordinates are xArm BASE frame, millimeters. 'Left' and 'right' have to be
-# physically checked against your own viewing direction before using them.
-DIRECTION_AXIS_SIGN = {
-    'forward':  (0, +1),   # +X
-    'backward': (0, -1),   # -X
-    'left':     (1, +1),   # +Y
-    'right':    (1, -1),   # -Y
-    'up':       (2, +1),   # +Z
-    'down':     (2, -1),   # -Z
-}
-MAX_ALLOWED_STEP_MM = 300
-SPEED_MM_S = 100
-ACC_MM_S2 = 50
 
 
-def read_checked(label, fn):
-    code, result = fn()
-    if code != 0:
-        raise RuntimeError(f'{label}: SDK read failed, code={code}')
-    return result
+def _load_command(text: str, api_key: str | None):
+    speech = str(ROOT / "speech_to_text")
+    if speech not in sys.path:
+        sys.path.insert(0, speech)
+    from grok_to_xarm_json import RobotCommand, grok_to_command, offline_robot_command
+
+    if not (text or "").strip():
+        return RobotCommand(action="ignore", direction="none", distance_mm=0)
+    if api_key:
+        return grok_to_command(text, api_key)
+    return offline_robot_command(text)
 
 
-def call_checked(label, result):
-    if result != 0:
-        raise RuntimeError(f'{label}: SDK command failed, code={result}')
+def _execute_on_hardware(command, env: dict):
+    """Operator path. Builds a controller and lets the gateway move it. Tests never call this."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        raise RuntimeError("refusing hardware execution")
+    ip = (env.get("XARM_IP") or "").strip()
+    if not ip:
+        raise RuntimeError("XARM_IP is not set")
+    from trova.arm.cartesian import CartesianArm, Limits
+    from trova.arm.xarm import XArmBackend
+
+    limits = Limits.parse(env.get("TROVA_ARM_LIMITS", ""))
+    if limits is None:
+        raise RuntimeError("TROVA_ARM_LIMITS is required before hardware execution")
+    backend = XArmBackend(ip)   # read-only connect: motors stay as they are until a ticketed move
+    speed = float(env.get("TROVA_ARM_SPEED_MM_S") or 30)
+    arm = CartesianArm(backend, float(env.get("TROVA_ARM_Z_MM") or 150), None, limits, speed_mm_s=speed)
+    if arm.gateway.mode != "hardware":
+        raise RuntimeError(arm.gateway.note or "the gateway is not in hardware mode")
+    return arm.gateway.plan_relative(command.direction, command.distance_mm, execute=True)
 
 
-def main():
-    p = argparse.ArgumentParser(description='Microphone -> Grok -> confirmed xArm5 micro-movement')
-    source = p.add_mutually_exclusive_group(required=True)
-    source.add_argument('--mic', action='store_true', help='Record microphone audio')
-    source.add_argument('--text', help='Use typed text instead of the microphone')
-    p.add_argument('--seconds', type=float, default=4.0)
-    p.add_argument('--ip', default=os.getenv('XARM_IP', '192.168.1.111'))
-    p.add_argument('--execute', action='store_true', help='Allow motion AFTER typed MOVE confirmation')
-    p.add_argument('--allow-all-base-directions', action='store_true',
-                   help='Unlock base-frame directions beyond backward AFTER calibration')
-    args = p.parse_args()
+def run_text(text: str, *, execute: bool = False, confirm: str = "", allow_all_directions: bool = False,
+             environ: dict | None = None, api_key: str | None = None) -> dict:
+    """Parse one sentence and return the gateway proposal. Does not connect to a robot."""
+    from trova.motion import MotionGateway, resolve_mode
 
+    env = os.environ if environ is None else environ
+    command = _load_command(text, api_key)
+    mode, note = resolve_mode(False, environ=env)
+    payload = {"command": command.model_dump(), "sdk_called": False}
+    if command.action != "move":
+        reason = ("Voice STOP was parsed. It holds nothing here and it is not the physical emergency stop."
+                  if command.action == "stop" else "Not a movement command.")
+        payload["motion"] = {
+            "ok": False, "status": "stopped" if command.action == "stop" else "rejected", "mode": mode,
+            "reason": reason, "requested": command.model_dump(), "proposal": {},
+            "safety": {"software_stop_is_not_safety_rated": True, "collision_avoidance": False},
+            "allow_motion": False, "software_stop_is_not_safety_rated": True, "collision_avoidance": False,
+            "final_mm": None,
+        }
+        return payload
+    allowed = None if allow_all_directions else ("backward",)
+    decision = MotionGateway.standalone(environ=env).plan_relative(
+        command.direction, command.distance_mm, allowed_directions=allowed, execute=False)
+    motion = decision.as_dict()
+    if execute:
+        if mode != "hardware" or confirm != "MOVE":
+            motion["ok"] = False
+            motion["status"] = "rejected"
+            motion["allow_motion"] = False
+            motion["mode"] = mode
+            if mode != "hardware":
+                why = note or "hardware mode is not enabled by the operator"
+            else:
+                why = "hardware execution needs the operator to type MOVE"
+            motion["reason"] = why + ". The requested distance was not changed."
+        else:
+            moved = _execute_on_hardware(command, env)
+            motion = moved.as_dict()
+            payload["sdk_called"] = True
+    payload["motion"] = motion
+    return payload
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Voice or text to a gateway-checked xArm jog (dry-run by default)")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--mic", action="store_true")
+    source.add_argument("--text")
+    parser.add_argument("--seconds", type=float, default=4.0)
+    parser.add_argument("--execute", action="store_true", help="Ask to move only when hardware mode is already unlocked")
+    parser.add_argument("--allow-all-base-directions", action="store_true",
+                        help="Allow all six base-frame directions after each one has been checked on the station")
+    args = parser.parse_args()
     if not 0.5 <= args.seconds <= 15:
-        p.error('--seconds must be between 0.5 and 15')
+        parser.error("--seconds must be between 0.5 and 15")
 
-    load_dotenv(ROOT / '.env', override=False)
-    api_key = os.environ.get('XAI_API_KEY')
-    if not api_key:
-        p.error('Missing XAI_API_KEY; set it or put it in Grok_Hackathon/.env')
-
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env", override=False)
+    api_key = os.environ.get("XAI_API_KEY") or None
     if args.mic:
-        spoken_text = transcribe_wav(record_wav(args.seconds), api_key)
-        print('Transcript:', spoken_text)
+        if not api_key:
+            parser.error("Missing XAI_API_KEY for the microphone")
+        speech = str(ROOT / "speech_to_text")
+        if speech not in sys.path:
+            sys.path.insert(0, speech)
+        from grok_to_xarm_json import record_wav, transcribe_wav
+        text = transcribe_wav(record_wav(args.seconds), api_key)
+        print("Transcript:", text)
     else:
-        spoken_text = args.text
+        text = args.text
 
-    if not spoken_text.strip():
-        print('No speech detected. NO MOTION.')
-        return
-    command = grok_to_command(spoken_text, api_key)
-    print('Validated Grok JSON:', command.model_dump_json(indent=2))
-
-    if command.action != 'move':
-        print('Not a movement command. NO MOTION. (Voice STOP is not an emergency stop.)')
-        return
-    if command.direction not in DIRECTION_AXIS_SIGN:
-        print('Unknown direction. NO MOTION.')
-        return
-    if not (1 <= command.distance_mm <= MAX_ALLOWED_STEP_MM):
-        print(f'REFUSED: first physical tests require 1-{MAX_ALLOWED_STEP_MM} mm.')
-        print('Try saying: "Move backward by three millimeters."')
-        return
-    if command.direction != 'backward' and not args.allow_all_base_directions:
-        print('REFUSED: initial test allows only "backward" = -X in robot BASE frame.')
-        print('After calibrating each direction, opt in with --allow-all-base-directions.')
-        return
-
-    from xarm.wrapper import XArmAPI
-    arm = XArmAPI(args.ip, is_radian=False)
-    try:
-        if not arm.connected:
-            raise RuntimeError(f'Robot at {args.ip} is not connected')
-        state = read_checked('get_state', arm.get_state)
-        errs = read_checked('get_err_warn_code', arm.get_err_warn_code)
-        pose = list(read_checked('get_position', arm.get_position))
-        print('Robot state:', state, '| error/warning:', errs)
-        print('Current TCP [X,Y,Z,roll,pitch,yaw]:', [round(x, 3) for x in pose])
-
-        if errs[0] != 0:
-            raise RuntimeError('Robot reports an error. Resolve it in UFACTORY Studio first.')
-        if state not in (2, 5):
-            raise RuntimeError(f'Robot state {state} is not idle; motion rejected.')
-        if len(pose) != 6 or not all(math.isfinite(v) for v in pose):
-            raise RuntimeError('Robot returned invalid Cartesian coordinates.')
-        if abs(abs(pose[3]) - 180) > 1 or abs(pose[4]) > 1:
-            raise RuntimeError('xArm5 roll/pitch orientation unexpected; refusing.')
-
-        axis, sign = DIRECTION_AXIS_SIGN[command.direction]
-        goal = pose.copy()
-        goal[axis] += sign * command.distance_mm
-
-        # Extra restraint for the initial -X motion, since last measured X,Y
-        # were very close to the horizontal extension of the arm.
-        if not args.allow_all_base_directions:
-            if not (pose[0] > 100 and math.hypot(goal[0], goal[1]) < math.hypot(pose[0], pose[1])):
-                raise RuntimeError('Not a verified inward -X step; rejecting.')
-
-        print('Target TCP [X,Y,Z,roll,pitch,yaw]:', [round(x, 3) for x in goal])
-        print(f'Planned: {command.direction}, {command.distance_mm} mm at {SPEED_MM_S} mm/s')
-        print('NOTE: No camera, collision model, or autonomous safety assessment is used.')
-
-        if not args.execute:
-            print('DRY RUN ONLY. Re-run with --execute to request a real movement.')
-            return
-
-        print('Check workspace is clear; keep your hand near the physical E-stop.')
-        if input('Type MOVE (uppercase) to enable motors and execute this step: ').strip() != 'MOVE':
-            print('Cancelled. NO MOTION.')
-            return
-
-        # Check that the robot has not moved between planning and approval.
-        fresh_pose = list(read_checked('fresh get_position', arm.get_position))
-        fresh_state = read_checked('fresh get_state', arm.get_state)
-        fresh_errs = read_checked('fresh get_err_warn_code', arm.get_err_warn_code)
-        if math.dist(fresh_pose[:3], pose[:3]) > 1.0:
-            raise RuntimeError('Robot moved since the command was planned. Aborting.')
-        if fresh_state not in (2, 5) or fresh_errs[0] != 0:
-            raise RuntimeError('State/errors changed since the command was planned. Aborting.')
-
-        # SDK mode 0 = position control; setting state 0 re-arms state 5.
-        call_checked('motion_enable', arm.motion_enable(enable=True))
-        call_checked('set_mode(0)', arm.set_mode(0))
-        call_checked('set_state(0)', arm.set_state(0))
-
-        new_state = read_checked('ready state', arm.get_state)
-        if new_state != 2:
-            raise RuntimeError(f'Robot did not enter READY state (reported {new_state}).')
-
-        # Recompute destination from the latest verified pose to preserve orientation.
-        target = fresh_pose.copy()
-        target[axis] += sign * command.distance_mm
-        call_checked('set_position', arm.set_position(
-            x=target[0], y=target[1], z=target[2],
-            roll=180.0 if fresh_pose[3] >= 0 else -180.0,
-            pitch=0.0, yaw=fresh_pose[5],
-            speed=SPEED_MM_S, mvacc=ACC_MM_S2,
-            is_radian=False, wait=True, timeout=30,
-        ))
-        after = read_checked('final get_position', arm.get_position)
-        print('Final TCP:', [round(x, 3) for x in after])
-        print('SDK reported completion. Verify actual movement visually.')
-    finally:
-        arm.disconnect()
+    from trova.motion import resolve_mode
+    mode, note = resolve_mode(False)
+    confirm = ""
+    if args.execute and mode == "hardware":
+        print("Keep a hand on the physical e-stop. A voice STOP is not a safety-rated emergency stop.")
+        confirm = input("Type MOVE to execute this step: ").strip()
+    elif args.execute and note:
+        print(note)
+    # A typed sentence uses Grok when a key is present, and the offline parser otherwise.
+    out = run_text(text, execute=args.execute, confirm=confirm,
+                   allow_all_directions=args.allow_all_base_directions, api_key=None if not api_key else api_key)
+    print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

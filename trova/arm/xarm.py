@@ -31,6 +31,7 @@ class XArmBackend(CartesianBackend):
         self.accel = accel_mm_s2
         self.arm = XArmAPI(ip, is_radian=False)
         # Connection is not operator authorization to recover faults or enable the controller.
+        # Explicit controller recovery is separate; telemetry uses its own read-only connection.
         tcp = os.getenv("TROVA_ARM_TCP_MM", "").strip()
         if tcp:      # the pointer / printed tool: positions then refer to its tip, not the flange
             x, y, z = (float(v) for v in tcp.split(","))
@@ -47,6 +48,10 @@ class XArmBackend(CartesianBackend):
             raise RuntimeError(f"xArm {operation} returned code {code}")
 
     def move_linear(self, x, y, z, speed_mm_s):
+        from ..motion import require_ticket
+        ticket = require_ticket()
+        speed_mm_s = min(float(speed_mm_s), ticket.max_speed_mm_s)
+        accel = min(self.accel, ticket.max_accel_mm_s2)
         with self.lock:
             if self._moving():                  # never recover/re-enable a moving controller implicitly
                 raise RuntimeError("xArm controller is still moving: STOP and explicit staff recovery required")
@@ -57,11 +62,14 @@ class XArmBackend(CartesianBackend):
             flat = code == 0 and pose and abs(abs(pose[3]) - 180) < 3 and abs(pose[4]) < 3
             extra = {} if flat else {"motion_type": 2}
             code = self.arm.set_position(x=x, y=y, z=z, roll=180, pitch=0, yaw=self.yaw, speed=speed_mm_s,
-                                         mvacc=self.accel, wait=False, **extra)
+                                         mvacc=accel, wait=False, **extra)
         if code != 0:
             raise RuntimeError(f"xArm set_position returned code {code} (error {self.arm.error_code})")
 
     def move_joints(self, q, speed_deg_s):
+        from ..motion import require_ticket
+        ticket = require_ticket()
+        speed_deg_s = min(float(speed_deg_s), ticket.max_joint_speed_deg_s)
         with self.lock:
             if self._moving():
                 raise RuntimeError("xArm controller is still moving: STOP and explicit staff recovery required")
@@ -104,13 +112,21 @@ class XArmBackend(CartesianBackend):
             self._halt()
 
     def tcp_mm(self):
+        return self.tcp_pose()[:3]
+
+    def tcp_pose(self):
+        """Read-only tool pose: x, y, z millimetres and roll, pitch, yaw degrees. Does not enable motion."""
         with self.lock:
             code, pose = self.arm.get_position()
         if code != 0:
             raise RuntimeError(f"xArm get_position code {code}")
-        return tuple(pose[:3])
+        if pose is None or len(pose) < 6:
+            raise RuntimeError("xArm get_position did not return roll, pitch and yaw")
+        return tuple(float(v) for v in pose[:6])
 
     def freedrive(self, on: bool):
+        from ..motion import require_ticket
+        require_ticket()
         with self.lock:
             self._check(self.arm.set_mode(2 if on else 0), "set_mode")
             self._check(self.arm.set_state(0), "set_state")

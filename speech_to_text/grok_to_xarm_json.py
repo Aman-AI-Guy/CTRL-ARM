@@ -18,6 +18,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import wave
 from typing import Literal
@@ -43,9 +44,11 @@ Allowed commands:
   use direction=none and distance_mm=0
 Directions: left, right, up, down, forward, backward.
 Convert centimetres to millimetres (50 cm = 500 mm).
-Only accept explicit distances in the range 1 to 500 mm.
-Do not invent a distance or infer a reference frame.
-If the request is ambiguous, lacks distance, or asks for >500 mm, ignore it.
+Keep the distance you heard, even when it is outside 1 to 500 mm.
+Do not invent a distance or a reference frame, and do not replace an
+out-of-range move with ignore: the motion gateway rejects it and reports
+the requested millimetres. ignore is only for ambiguous or non-motion
+requests (direction none, distance_mm 0).
 An output is only a request for review, not permission to move hardware.
 """
 
@@ -99,15 +102,43 @@ def grok_to_command(text: str, api_key: str) -> RobotCommand:
     chat.append(user(text))
     response = chat.sample()
     result = RobotCommand.model_validate_json(response.content)
+    # Do not rewrite the distance or the action. The motion gateway rejects it in the open.
+    return preserve_robot_command(result)
 
-    # Application-level semantic validation, independent of the model output.
-    # Invalid combinations are mapped to a harmless ignore command.
-    if result.action == "move":
-        if result.direction == "none" or not 1 <= result.distance_mm <= 500:
-            return RobotCommand(action="ignore", direction="none", distance_mm=0)
-    elif result.direction != "none" or result.distance_mm != 0:
+
+_DIRECTIONS = {
+    "left": "left", "sinistra": "left", "right": "right", "destra": "right",
+    "up": "up", "su": "up", "down": "down", "giu": "down", "giù": "down",
+    "forward": "forward", "avanti": "forward", "backward": "backward",
+    "back": "backward", "indietro": "backward",
+}
+_NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "uno": 1, "due": 2, "tre": 3, "quattro": 4, "cinque": 5}
+
+
+def preserve_robot_command(command: RobotCommand) -> RobotCommand:
+    """Return the parsed command unchanged, including a distance the gateway will reject."""
+    return command
+
+
+def offline_robot_command(text: str) -> RobotCommand:
+    """English or Italian relative move, with no network. Distances are kept even when they are too large."""
+    raw = " " + (text or "").lower().replace(",", ".") + " "
+    if not raw.strip():
         return RobotCommand(action="ignore", direction="none", distance_mm=0)
-    return result
+    dirs = "|".join(sorted(_DIRECTIONS, key=len, reverse=True))
+    nums = "|".join(_NUMBERS)
+    unit = r"(mm|millimet(?:er|re)s?|cm|centimet(?:er|re)s?|centimetr[oi])"
+    match = re.search(rf"\b({dirs})\b.{{0,48}}?\b(\d+(?:\.\d+)?|{nums})\s*{unit}\b", raw)
+    if match is None:
+        if re.search(r"\b(stop|halt|fermo|ferma|fermati|basta)\b", raw):
+            return RobotCommand(action="stop", direction="none", distance_mm=0)
+        return RobotCommand(action="ignore", direction="none", distance_mm=0)
+    token = match.group(2)
+    value = float(_NUMBERS[token]) if token in _NUMBERS else float(token)
+    if match.group(3).startswith("c"):
+        value *= 10.0
+    return RobotCommand(action="move", direction=_DIRECTIONS[match.group(1)], distance_mm=int(round(value)))
 
 
 def main() -> None:

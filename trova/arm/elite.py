@@ -43,6 +43,8 @@ class EliteBackend(CartesianBackend):
             return s.recv(4096).decode(errors="ignore").strip()
 
     def move_linear(self, x, y, z, speed_mm_s):
+        from ..motion import require_ticket
+        require_ticket()
         r1, r2, r3 = self.reader.get()[3:]
         self._send("def trova_move():\n\tmovel([%.5f,%.5f,%.5f,%.5f,%.5f,%.5f], a=%.3f, v=%.4f)\nend"
                    % (x / 1000, y / 1000, z / 1000, r1, r2, r3, self.accel, speed_mm_s / 1000))

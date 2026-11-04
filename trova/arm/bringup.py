@@ -73,6 +73,8 @@ class Bringup:
         self.sleep(0.3)
 
     def move(self, p: list[float], speed: float = SPEED, wait: bool = True) -> int:
+        from ..motion import approve_bringup_speed
+        approve_bringup_speed(speed)     # no workspace exists yet; the gateway still caps the speed
         x, y, z, r, pi, yaw = p
         return self.api.set_position(x=x, y=y, z=z, roll=r, pitch=pi, yaw=yaw, speed=speed, mvacc=ACC,
                                      wait=wait, timeout=30)

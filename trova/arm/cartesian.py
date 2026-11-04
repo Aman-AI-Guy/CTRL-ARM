@@ -14,14 +14,18 @@ Each robot family only implements CartesianBackend (connect, move, stop, tcp, fr
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from .base import ArmDriver
 
 START_GRACE_S = 0.5   # a controller may report 'not moving' for a moment after accepting a move
+# Installed only by State.start_arm after central authorization, never by a gateway proposal.
+MOTION_SESSION: ContextVar[threading.Event | None] = ContextVar("authorized_arm_session", default=None)
 
 
 class CartesianBackend(ABC):
@@ -101,8 +105,11 @@ class CartesianArm(ArmDriver):
         self.timeout = timeout_s
         self.state = "idle"
         self.last_error: str | None = None
+        self.last_motion = None
         self.step: str | None = None
         self._stop = threading.Event()
+        from ..motion import MotionGateway
+        self.gateway = MotionGateway.for_arm(self)
 
     def _halted(self) -> bool:
         """A STOP arrived: stop again (it may have raced a move still being sent, which would replace it)."""
@@ -114,9 +121,42 @@ class CartesianArm(ArmDriver):
         self.state = "stopped"
         return False
 
+    def _hold_decision(self, decision) -> bool:
+        """True when the gateway refused the move. The driver is not called."""
+        self.last_motion = decision
+        if decision.allow_motion:
+            return False
+        if decision.status == "stopped":
+            self.state = "stopped"
+        elif decision.status == "dry_run":
+            self.state, self.last_error = "idle", None
+        else:
+            self.state, self.last_error = "refused", decision.reason
+        return True
+
+    def _session_blocked(self) -> bool:
+        """A hardware gateway ticket cannot replace startup, recovery and STOP authorization."""
+        # Gateway SDK/loopback heuristics are useful for test doubles, not production authorization.
+        if (type(self.backend) is FakeCartesian or self.gateway.mode == "dry_run"
+                or (os.environ.get("PYTEST_CURRENT_TEST") and self.gateway.simulated)):
+            return False
+        session = MOTION_SESSION.get()
+        if session is None or session.is_set():
+            self.state, self.last_error = "refused", (
+                "Physical motion requires an active authorized server session; gateway unlock alone "
+                "cannot reset STOP, startup disarming or interrupted-lift recovery")
+            return True
+        return False
+
     def _go(self, x: float, y: float, z: float) -> bool:
         if self._stop.is_set():          # STOP latched: refuse until the server calls ready()
             self.state = "stopped"
+            return False
+        if self._session_blocked():
+            return False
+        from ..motion import motion_ticket
+        decision = self.gateway.authorize_cartesian((x, y, z), self.speed, source="cartesian")
+        if self._hold_decision(decision):
             return False
         if self.limits:
             err = self.limits.check(x, y, z)
@@ -125,7 +165,8 @@ class CartesianArm(ArmDriver):
                 return False
         self.state, self.last_error = "moving", None
         try:
-            self.backend.move_linear(x, y, z, self.speed)
+            with motion_ticket(decision.ticket):
+                self.backend.move_linear(x, y, z, self.speed)
             if self._stop.is_set():
                 return self._halted()
             t0 = time.time()
@@ -165,6 +206,15 @@ class CartesianArm(ArmDriver):
     def run_waypoints(self, wps: list[tuple], speed_factor: float = 0.5) -> bool:
         """Feature 7: a fixed sequence of straight moves (label, x, y, z). Stops at the first refusal or stop.
         All waypoints are checked against the safety box BEFORE the first move."""
+        start = None
+        try:
+            start = self.backend.tcp_mm()
+        except Exception:  # noqa: BLE001
+            start = None
+        points = ([start] if start is not None else []) + [(x, y, z) for _label, x, y, z in wps]
+        decision = self.gateway.authorize_polyline(points, self.speed * speed_factor, source="waypoints")
+        if self._hold_decision(decision):
+            return False
         if self.limits:
             for label, x, y, z in wps:
                 err = self.limits.check(x, y, z)
@@ -193,6 +243,8 @@ class CartesianArm(ArmDriver):
         if self._stop.is_set():
             self.state = "stopped"
             return False
+        if self._session_blocked():
+            return False
         if self.limits is None:
             self.state, self.last_error = "refused", "No safety box: cannot validate the joint target"
             return False
@@ -206,9 +258,14 @@ class CartesianArm(ArmDriver):
             if err:
                 self.state, self.last_error = "refused", f"joint pose: {err}"
                 return False
+        from ..motion import motion_ticket
+        decision = self.gateway.authorize_joints(q, self.joint_speed, source="joints")
+        if self._hold_decision(decision):
+            return False
         self.state, self.last_error = "moving", None
         try:
-            self.backend.move_joints(q, self.joint_speed)
+            with motion_ticket(decision.ticket):
+                self.backend.move_joints(q, self.joint_speed)
             if self._stop.is_set():
                 return self._halted()
             t0, seen = time.time(), False
@@ -260,8 +317,21 @@ class CartesianArm(ArmDriver):
     def tcp_mm(self) -> tuple[float, float, float]:
         return self.backend.tcp_mm()
 
+    def tcp_pose(self):
+        """Six numbers when the backend reports orientation. Otherwise xyz only."""
+        backend = self.backend
+        if hasattr(backend, "tcp_pose"):
+            return tuple(float(v) for v in backend.tcp_pose())
+        xyz = self.tcp_mm()
+        return tuple(float(v) for v in xyz)
+
     def freedrive(self, on: bool) -> None:
-        self.backend.freedrive(on)
+        from ..motion import motion_ticket
+        decision = self.gateway.authorize_freedrive(on)
+        if self._hold_decision(decision):
+            raise RuntimeError(decision.reason)
+        with motion_ticket(decision.ticket):
+            self.backend.freedrive(on)
 
     def status(self) -> dict:
         try:
@@ -270,7 +340,9 @@ class CartesianArm(ArmDriver):
             tcp = None
         return {"name": self.name, "state": self.state, "tip_mm": tcp[:2] if tcp else None, "tcp_mm": tcp,
                 "z_hover_mm": self.z, "error": self.last_error, "step": self.step, "simulated": isinstance(self.backend, FakeCartesian),
-                "home": "joints" if self.home_joints else ("mm" if self.home_mm else None)}
+                "home": "joints" if self.home_joints else ("mm" if self.home_mm else None),
+                "motion_mode": self.gateway.mode, "collision_avoidance": False,
+                "software_stop_is_not_safety_rated": True}
 
 
 class FakeCartesian(CartesianBackend):
@@ -345,6 +417,11 @@ class FakeCartesian(CartesianBackend):
         with self._lock:
             self._advance()
             return tuple(self.pos)
+
+    def tcp_pose(self):
+        """xyz from the fake plus the downward tool orientation a straight xArm line holds."""
+        x, y, z = self.tcp_mm()
+        return (float(x), float(y), float(z), 180.0, 0.0, 0.0)
 
     def freedrive(self, on):
         self.free = on

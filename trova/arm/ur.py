@@ -45,6 +45,8 @@ class URBackend(CartesianBackend):
             return s.recv(1024).decode(errors="ignore").strip()
 
     def move_linear(self, x, y, z, speed_mm_s):
+        from ..motion import require_ticket
+        require_ticket()
         rx, ry, rz = self.reader.get()[3:]
         self._send("def trova_move():\n  movel(p[%.5f,%.5f,%.5f,%.5f,%.5f,%.5f], a=%.3f, v=%.4f)\nend\n"
                    % (x / 1000, y / 1000, z / 1000, rx, ry, rz, self.accel, speed_mm_s / 1000))

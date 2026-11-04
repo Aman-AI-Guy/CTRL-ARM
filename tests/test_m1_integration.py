@@ -187,7 +187,8 @@ def test_delayed_selection_stays_motion_free_across_stop_and_reset(tmp_path, mon
 
 @pytest.mark.parametrize("poll_state", [False, True])
 @pytest.mark.parametrize("context_state", ["valid", "missing", "stale"])
-def test_spoken_selection_answer_stays_readonly_after_state_poll(tmp_path, monkeypatch, poll_state, context_state):
+@pytest.mark.parametrize("utterance", ["the second black object", "right 3 millimeters", "move above the black object"])
+def test_spoken_selection_answer_stays_readonly_after_state_poll(tmp_path, monkeypatch, poll_state, context_state, utterance):
     import json
     import subprocess
     import trova.server as server
@@ -208,7 +209,7 @@ const fs = require('fs'), vm = require('vm');
 const payload = JSON.parse(process.argv[1]);
 const elements = new Map(), requests = [];
 const node = id => {
-  if (!elements.has(id)) elements.set(id, {value: id==='pttlang'?'en-US':'', checked:false, style:{},
+  if (!elements.has(id)) elements.set(id, {value: id==='pttlang'?'en-US':'', checked:false, style:{}, dataset:{},
     className:'', innerHTML:'', textContent:'', blur(){}, addEventListener(){},
     classList:{add(){},remove(){},toggle(){}}, querySelector(){return null;}});
   return elements.get(id);
@@ -235,12 +236,12 @@ vm.runInContext(`(async()=>{
   const before=!!pendingSelection;
   if(payload.poll) await refresh();
   const after=!!pendingSelection;
-  await runSpoken('the second black object');
+  await runSpoken(payload.answer);
   return {before,after,requests};
 })()`,context).then(r=>console.log(JSON.stringify(r))).catch(e=>{console.error(e);process.exit(1)});
 '''
     completed = subprocess.run(["node", "-e", script, json.dumps({"state": state, "question": question,
-                                                                "poll": poll_state})],
+                                                                "poll": poll_state, "answer": utterance})],
                                capture_output=True, text=True, check=True)
     observed = json.loads(completed.stdout)
     assert observed["before"]

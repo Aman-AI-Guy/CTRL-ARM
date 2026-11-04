@@ -127,7 +127,22 @@ const TrovaVoice = (() => {
       return {batch: d.lot, ok: d.ok, problems: d.problems.map(p => p.text), labels: d.items.map(i => ({object: i.box_id, lot: i.lot, expiry: i.expiry}))}; },
     async watch_line({on}) { const d = await api('/api/watch', {on: !!on, point: false}, true); h.onRefresh && h.onRefresh();
       return d.error ? {error: d.error} : {watching: d.on, status: d.status}; },
-    async stop_arm() { await api('/api/arm/stop'); return {stopped: true}; },
+    async run_vision_task({text}) {
+      const d = await api('/api/agent/task', {text}, true);
+      h.onAgent && h.onAgent(d);
+      return {status: d.status, phase: d.phase, reason: d.reason || d.error, question: d.question,
+              goal_achieved: !!d.goal_achieved, hardware_moved: !!d.hardware_moved,
+              motion_lock: d.motion_lock, verified_tool_position: false,
+              calibration_valid: !!d.calibration_valid};
+    },
+    async jog_relative({direction, distance_mm}) {
+      const d = await api('/api/arm/jog', {direction, distance_mm: Number(distance_mm)}, true);
+      h.onRefresh && h.onRefresh();
+      return {ok: !!d.ok, status: d.status, reason: d.reason || d.error, mode: d.mode,
+              requested_mm: d.requested && d.requested.distance_mm,
+              software_stop_is_not_safety_rated: true, collision_avoidance: false};
+    },
+    async stop_arm() { await api('/api/arm/stop'); return {stopped: true, software_stop_is_not_safety_rated: true}; },
     async arm_home() { await api('/api/arm/home'); return {parking: true}; },
     async search_other_rooms({description}) {
       const d = await api('/api/dog/search', {description}); h.onRefresh && h.onRefresh();
