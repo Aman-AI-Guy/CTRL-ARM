@@ -62,6 +62,8 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
       <div class="row"><b class="muted">Real cobot (UR, xArm, Elite):</b><button onclick="sendForm('/api/arm/freedrive',{on:true})">Freedrive on</button><button onclick="sendForm('/api/arm/freedrive',{on:false})">off</button>
         <button onclick="setClick('armcal')">Calibrate with arm (click the tip)</button><button onclick="markerFromArm()">Record marker from arm</button>
         <button onclick="post('/api/arm/clear_errors')">Clear arm errors</button></div>
+      <div class="row"><b class="muted">Camera on the arm:</b><button onclick="teachPose('home_joints')">Teach survey pose here</button>
+        <button onclick="teachPose('look_joints')">Teach look pose here</button><span class="muted" id="poseinfo"></span></div>
       <div class="row"><button onclick="post('/api/arm/home')">Arm home</button><button onclick="setClick('point')">Click to point</button><button onclick="setClick('teach')">Teach pose (click)</button><button onclick="post('/api/arm/teach_home')">Teach home</button>
         <button onclick="sendForm('/api/arm/compliant',{on:true})">Compliant on</button><button onclick="sendForm('/api/arm/compliant',{on:false})">off</button></div>
       <div class="row"><span class="muted">object threshold</span><input type="number" id="thresh" step="2" style="max-width:90px" onchange="tune()"><span class="muted">min area</span><input type="number" id="minarea" step="0.0002" style="max-width:110px" onchange="tune()"></div>
@@ -77,7 +79,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <div class="muted">Ask in English or Italian, type, talk, or show a photo.</div>
     <div class="row" style="margin-top:8px"><input type="text" id="q" placeholder="e.g. something to write with · qualcosa per scrivere" onkeydown="if(event.key==='Enter')doFind()"></div>
     <div class="row"><label class="file">📷 Photo of the object<input type="file" accept="image/*" capture="environment" id="photo" onchange="photoChosen()"></label>
-      <button class="primary" id="findbtn" onclick="doFind()">Find</button><button onclick="doFindAll()">Find all</button><button onclick="doInventory()">What's on the table?</button><span class="muted" id="photoname"></span></div>
+      <button class="primary" id="findbtn" onclick="doFind()">Find</button><button onclick="doFindAll()">Find all</button><button onclick="doInventory()">What's on the table?</button><button onclick="lookAround()">👀 Look around the room</button><span class="muted" id="photoname"></span></div>
     <div class="row"><button id="voicebtn" onclick="toggleVoice()">🎤 Talk to Trova</button>
       <label class="muted"><input type="checkbox" id="confirm" checked> ask before the arm moves</label>
       <span class="badge" id="vstatus">voice off</span></div>
@@ -229,6 +231,7 @@ async function runSpoken(text) {
   }
   if (p.cmd === 'find' && S && S.pending_question) return answer(text);   // the answer to Trova's question
   if (p.cmd === 'find' || p.cmd === 'find_all') { $('q').value = p.text; return p.cmd === 'find' ? doFind() : doFindAll(); }
+  if (p.cmd === 'room') { $('q').value = p.text; return lookAround(); }
   const run = {check: doCheck, labels: readLabels, reference: saveRef, inventory: doInventory,
     watch_on: () => json('/api/watch', {on: true, point: $('watchpoint').checked}), watch_off: () => json('/api/watch', {on: false}),
     home: () => post('/api/arm/home')}[p.cmd];
@@ -288,6 +291,37 @@ function showWatch() {
     $('alarmimg').href = '/files/' + a.image;
     if (a.id !== lastAlarm) { lastAlarm = a.id; beep(); }
   }
+}
+
+// ---- feature 14: camera on the arm, look around the room
+async function teachPose(name) {
+  const what = name === 'home_joints' ? 'SURVEY pose: the camera sees the whole table' : 'LOOK pose: the camera looks out at the room';
+  if (!confirm(`Record the arm's current joints as the ${what}?`)) return;
+  try { const d = await sendForm('/api/arm/teach_pose', {name}); if (d.note) alert(d.note); } catch (e) {}
+}
+let roomActive = false, roomKey = '';
+async function lookAround() {
+  const q = $('q').value.trim(); if (!q) return alert('Type what to look for, e.g. the red umbrella');
+  $('q').blur(); roomActive = true; roomKey = '';
+  const el = $('findres'); el.className = 'result show st-clarify'; el.innerHTML = 'Turning to look around the room…';
+  try { await sendForm('/api/room/find', {text: q}); } catch (e) { roomActive = false; }
+}
+function showRoom() {
+  const d = S.room; if (!roomActive || !d) return;
+  const key = d.status + (d.done || '') + (d.request || ''); if (key === roomKey) return; roomKey = key;
+  const el = $('findres');
+  if (d.status === 'scanning') { el.className = 'result show st-clarify'; el.innerHTML = `Looking around for “${esc(d.request)}”… photo ${d.done} of ${d.total}`; return; }
+  const thumbs = (d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>` : '') +
+    (d.sheet ? `<a href="/files/${d.sheet}" target="_blank"><img src="/files/${d.sheet}"></a>` : '');
+  el.className = 'result show st-' + (d.status === 'found' ? 'found' : 'not_found');
+  el.innerHTML = (d.status === 'found'
+      ? `<div class="big">Found in photo ${d.view} of ${d.n_views}: ${esc(d.label)}</div><div>${esc(d.reason)}</div>` +
+        `<div class="muted">${d.facing ? 'The arm is facing it' : 'Not turned: ' + esc(d.error || '')} · turned to ${d.angle}° · ${esc(d.px_per_deg_source)} · Grok ${d.grok_latency_s}s · total ${d.total_s}s</div>`
+      : d.status === 'not_found' ? `<div class="big">Not seen in the room</div><div>${esc(d.reason || '')}</div><div class="muted">${d.n_views} photos · Grok ${d.grok_latency_s}s</div>`
+      : `<div class="big">${d.status === 'stopped' ? 'Stopped' : 'Error'}</div><div>${esc(d.error || '')}</div>`) +
+    `<div class="thumbs">${thumbs}</div>`;
+  if (speakOn() && d.status === 'found') TrovaSpeech.say((TrovaSpeech.italian(d.request) ? 'Trovato: ' : 'Found: ') + d.label, sayLang(d.request));
+  if (d.status !== 'scanning') roomActive = false;
 }
 
 // ---- feature 9: preflight check
@@ -403,6 +437,7 @@ async function refresh() {
   $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
   $('armst').title = S.arm_blocked || ''; $('armst').style.color = S.arm_blocked ? 'var(--warn)' : '';
   $('srcinfo').textContent = 'source: ' + S.source.kind + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
+  if (S.camera_on_arm) $('srcinfo').textContent += S.at_survey ? ' · arm camera at the survey pose' : ' · arm camera: moving view';
   if (S.camera_error) { $('srcinfo').textContent = 'CAMERA: ' + S.camera_error; $('srcinfo').style.color = 'var(--bad)'; } else $('srcinfo').style.color = '';
   $('bginfo').textContent = S.background ? 'set' : 'not set';
   $('calinfo').textContent = (S.calibration ? `${S.calibration.source}, err ${S.calibration.error_mm ?? '–'} mm` : '') + (S.click_points.length ? `, ${S.click_points.length} clicks` : '') + (S.arm_points ? `, ${S.arm_points} arm points` : '') + (S.arm_blocked ? ' · arm: ' + S.arm_blocked : '');
@@ -415,7 +450,9 @@ async function refresh() {
   $('absentbtn').style.display = S.label_wait ? 'inline-block' : 'none';
   if (S.label_wait) { const el = $('clickmode'); el.className = 'mode on'; el.textContent = 'Wrong find: click the object that should have been found (even if it has no box), or press "not on the table".'; }
   else if (!clickMode) $('clickmode').className = 'mode';
-  showDog(); showWatch();
+  showDog(); showWatch(); showRoom();
+  $('poseinfo').textContent = S.camera_on_arm ? (S.at_survey ? 'at the survey pose ✓' : 'away from the survey pose') +
+    ` · survey ${S.poses.home_joints ? '✓' : '–'} · look ${S.poses.look_joints ? '✓' : '–'}` : 'off (TROVA_CAMERA_ON_ARM=1 to use)';
   $('batchinfo').textContent = S.batch && S.batch.lot ? 'current: LOT ' + S.batch.lot : 'no batch set';
   try { const fl = await (await fetch('/api/failures')).json();
     $('m-fail').textContent = fl.total ? 'Failures: ' + fl.by_cause.map(c => `${c.cause.replace(/_/g, ' ')} ${c.count} (${c.owner})`).join(' · ') : ''; } catch (e) {}

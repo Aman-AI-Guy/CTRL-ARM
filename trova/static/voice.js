@@ -81,6 +81,16 @@ const TrovaVoice = (() => {
       return {line_clear: r.line_clear, summary: r.summary,
               changes: r.changes.map(c => ({kind: c.kind, object: c.label, risk: c.risk, why: c.explanation}))};
     },
+    async look_around({description}) {
+      const s = await api('/api/room/find', {text: description}); if (s.error) return {error: s.error};
+      for (let i = 0; i < 120; i++) {          // the scan takes a few seconds per photo: wait for it
+        await new Promise(r => setTimeout(r, 1000));
+        const st = await (await fetch('/api/state')).json(), d = st.room;
+        if (d && d.status !== 'scanning') { h.onRefresh && h.onRefresh();
+          return {status: d.status, label: d.label, where: d.reason, photo: d.view, facing: !!d.facing, error: d.error}; }
+      }
+      return {error: 'the scan took too long'};
+    },
     async read_labels() { const d = await api('/api/labels'); if (d.error) return {error: d.error};
       h.onLabels && h.onLabels(d);
       return {batch: d.lot, ok: d.ok, problems: d.problems.map(p => p.text), labels: d.items.map(i => ({object: i.box_id, lot: i.lot, expiry: i.expiry}))}; },

@@ -12,6 +12,7 @@ An uploaded photo (e.g. a phone shot of the table) overrides the source until cl
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -169,13 +170,111 @@ class ImageSource(FrameSource):
         return {"kind": self.kind, "file": str(self.files[self.i]), "index": self.i, "count": len(self.files)}
 
 
+class ArmCameraSim(DemoSource):
+    """The camera on the arm, simulated (TROVA_CAMERA=armsim, with TROVA_ARM=cartesian:fake): what the arm would see.
+    At the survey pose: the table. At the look pose (any pan angle): a slice of a room panorama. Elsewhere: a blurred,
+    shifted 'moving' view, so code that forgets to go back to the survey pose fails in rehearsal, not in the demo."""
+    kind = "armsim"
+    HFOV = 70.0
+
+    def __init__(self, seed: int = 7):
+        super().__init__(seed)
+        self.arm, self.data_dir = None, None
+        self.w, self.h = 1280, 800
+        self.px_per_deg = self.w / self.HFOV
+        self.room = SyntheticTable(width=int(self.w + 2 * 160 * self.px_per_deg), height=self.h, n_objects=26, seed=seed + 100)
+        self.room_img = self.room.render(noise=0)
+
+    def attach(self, arm, data_dir=None) -> None:
+        self.arm, self.data_dir = arm, data_dir
+
+    def _pose(self) -> str | float:
+        from .arm import CartesianArm, load_poses
+        if not isinstance(self.arm, CartesianArm):
+            return "survey"
+        if self.arm.at_home():
+            return "survey"
+        look = load_poses(self.data_dir).get("look_joints") if self.data_dir else None
+        try:
+            q = self.arm.backend.joints()
+        except Exception:  # noqa: BLE001
+            return "moving"
+        if look:
+            pan = int(os.getenv("TROVA_PAN_JOINT", "1")) - 1
+            if all(abs(a - b) < 1.0 for i, (a, b) in enumerate(zip(q, look)) if i != pan):
+                return q[pan] - look[pan]
+        return "moving"
+
+    def read(self) -> np.ndarray:
+        where = self._pose()
+        if where == "survey":
+            return super().read()
+        if where == "moving":
+            return cv2.GaussianBlur(np.roll(super().read(), 200, axis=1), (31, 31), 0)
+        cx = self.room_img.shape[1] / 2 - where * self.px_per_deg     # pan +: the view turns left, the scene moves right
+        x0 = int(round(cx - self.w / 2))
+        x0 = max(0, min(self.room_img.shape[1] - self.w, x0))
+        view = self.room_img[:, x0:x0 + self.w].astype(np.float32)
+        return np.clip(view + np.random.normal(0, 2.5, view.shape), 0, 255).astype(np.uint8)
+
+
 def open_source(spec: str) -> FrameSource:
     spec = str(spec).strip()
     if spec == "demo":
         return DemoSource()
+    if spec == "armsim":
+        return ArmCameraSim()
     if spec.isdigit():
         return WebcamSource(int(spec))
     p = Path(spec)
     if p.is_dir() or p.suffix.lower() in (".jpg", ".jpeg", ".png"):
         return ImageSource(spec)
     return VideoSource(spec)
+
+
+def list_cameras(out_dir: Path = Path("data"), max_index: int = 6) -> list[dict]:
+    """Try camera indices 0..max_index-1: resolution, mean brightness and a snapshot (data/camera_<i>.jpg), so the
+    team can tell which index is the camera on the arm, the Mac's own camera, or an iPhone (Continuity Camera)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    found = []
+    for i in range(max_index):
+        cap = cv2.VideoCapture(i)
+        if not cap.isOpened():
+            cap.release()
+            continue
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        f = None
+        for _ in range(15):                     # the first frames are often black while exposure settles
+            ok, g = cap.read()
+            if ok:
+                f = g
+            time.sleep(0.05)
+        cap.release()
+        if f is None:
+            continue
+        p = out_dir / f"camera_{i}.jpg"
+        cv2.imwrite(str(p), f)
+        found.append({"index": i, "size": [f.shape[1], f.shape[0]], "brightness": round(float(f.mean()), 1), "snapshot": str(p)})
+    return found
+
+
+def main() -> None:
+    import subprocess
+    import sys
+    if "--list" not in sys.argv:
+        sys.exit("usage: python -m trova.camera --list      (then TROVA_CAMERA=<index> in .env)")
+    if sys.platform == "darwin":
+        try:
+            names = subprocess.run(["system_profiler", "SPCameraDataType"], capture_output=True, text=True, timeout=15).stdout
+            print("macOS cameras (usually in index order):")
+            print("\n".join("  " + n.strip().rstrip(":") for n in names.splitlines() if n.startswith("    ") and n.strip().endswith(":")))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for c in list_cameras():
+        print(f"index {c['index']}: {c['size'][0]}x{c['size'][1]}, brightness {c['brightness']}, snapshot {c['snapshot']}")
+    print("Open the snapshots: the arm camera shows the table (or the room) from the sphere. Put its index in TROVA_CAMERA.")
+
+
+if __name__ == "__main__":
+    main()

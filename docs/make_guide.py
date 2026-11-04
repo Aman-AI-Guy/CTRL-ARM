@@ -248,7 +248,11 @@ s += numbered([
     "the ready pose, park pose and work-area corners BY HAND, does a 30 mm test move and a STOP test, and prints the "
     "<font face='Courier'>.env</font> lines below. Other arms: fill them in by hand, first move at low speed, test STOP.",
     "<i>Freedrive on</i>, put the tip on the table at 4-6 spread-out spots and click the tip each time "
-    "(<i>Calibrate with arm</i>). Then touch each ArUco marker and record it, so later recalibration takes seconds."])
+    "(<i>Calibrate with arm</i>). Then touch each ArUco marker and record it, so later recalibration takes seconds.",
+    "<b>Our xArm has the camera on the arm</b> (black sphere, LED ring, looks sideways). Run the bring-up with "
+    "<font face='Courier'>--camera-on-arm</font>, find the camera with <font face='Courier'>python -m trova.camera --list</font>, "
+    "set <font face='Courier'>TROVA_CAMERA_ON_ARM=1</font>, teach the <i>survey pose</i> (camera sees the whole table) and "
+    "the <i>look pose</i> (camera faces the room), and calibrate with ArUco markers touched by the arm."])
 s.append(Preformatted("TROVA_ARM=xarm:192.168.1.xxx        # or ur:<ip>  or  elite:<ip>\n"
                       "TROVA_ARM_SPEED_MM_S=50\n"
                       "TROVA_ARM_Z_MM=150                  # tip height: table surface + 3-5 cm, measure it\n"

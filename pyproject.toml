@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
-robots = ["xarm-python-sdk"]   # UR and Elite need nothing: plain sockets
+robots = ["xarm-python-sdk", "pyserial"]   # UR and Elite need nothing: plain sockets; pyserial for the LED ring
 ui = ["playwright"]            # tests/browser_smoke.py (uses the installed Google Chrome)
 
 [tool.pytest.ini_options]

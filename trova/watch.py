@@ -70,6 +70,7 @@ class Watch:
             self._acked = a["signature"]
             a["acknowledged_by"], a["acknowledged_at"] = who, time.strftime("%H:%M:%S")
             self.st.audit.event("watch_ack", alert=a["id"], who=who)
+            self.st.light.show("idle")
         self.alert = None
         return a
 
@@ -96,6 +97,9 @@ class Watch:
             return
         if not isinstance(st.arm, SimArm) and st.arm.status().get("state") == "moving":
             self._pause("paused: the arm is moving")
+            return
+        if not st.at_survey():                       # camera on the arm, looking somewhere else
+            self._pause("paused: the arm camera is away from the survey pose")
             return
         if not st.lock.acquire(blocking=False):      # a find or check is running: do not compete with it
             return
@@ -147,6 +151,7 @@ class Watch:
                  "pointed": False, "grok": "pending" if cands else "not needed"}
         self.alert = alert
         self.status = "ALARM"
+        st.light.show("alarm")
         ev = st.audit.event("watch_alert", **{k: v for k, v in alert.items() if k != "signature"})
         alert["event_id"] = ev["id"]
         if self.point:

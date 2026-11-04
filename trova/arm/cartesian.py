@@ -44,6 +44,17 @@ class CartesianBackend(ABC):
     def freedrive(self, on: bool) -> None:
         raise NotImplementedError(f"{self.name}: freedrive not supported, jog from the pendant instead")
 
+    def move_joints(self, q: list[float], speed_deg_s: float) -> None:
+        """Start a joint-space move to the taught angles (degrees). Optional: needed for taught poses."""
+        raise NotImplementedError(f"{self.name}: joint moves not supported, use TROVA_ARM_HOME_MM")
+
+    def joints(self) -> list[float]:
+        raise NotImplementedError(f"{self.name}: joint angles not available")
+
+    def fk_mm(self, q: list[float]) -> tuple[float, float, float]:
+        """Where the tool would be at these joint angles: lets the safety box check joint moves too."""
+        raise NotImplementedError
+
     def clear_errors(self) -> None:
         pass
 
@@ -77,11 +88,14 @@ class CartesianArm(ArmDriver):
     name = "cartesian"
 
     def __init__(self, backend: CartesianBackend, z_hover_mm: float, home_mm: tuple[float, float, float] | None,
-                 limits: Limits | None, speed_mm_s: float = 100.0, timeout_s: float = 20.0):
+                 limits: Limits | None, speed_mm_s: float = 100.0, timeout_s: float = 20.0,
+                 home_joints: list[float] | None = None, joint_speed_deg_s: float = 20.0):
         self.backend = backend
         self.name = backend.name
         self.z = z_hover_mm
         self.home_mm = home_mm
+        self.home_joints = home_joints      # a taught joint pose wins over home_mm (camera on the arm: the survey pose)
+        self.joint_speed = joint_speed_deg_s
         self.limits = limits
         self.speed = speed_mm_s
         self.timeout = timeout_s
@@ -167,8 +181,70 @@ class CartesianArm(ArmDriver):
             self.speed, self.step = speed, None
 
     def home(self) -> None:
-        if self.home_mm:
+        if self.home_joints:
+            self.go_joints(self.home_joints)
+        elif self.home_mm:
             self._go(*self.home_mm)
+
+    def go_joints(self, q: list[float], tol_deg: float = 1.0) -> bool:
+        """Joint-space move to taught angles (degrees), with the same STOP latch, timeout and reached check as _go."""
+        q = [float(v) for v in q]
+        if self._stop.is_set():
+            self.state = "stopped"
+            return False
+        if self.limits:
+            try:
+                err = self.limits.check(*self.backend.fk_mm(q))
+            except NotImplementedError:
+                err = None
+            except Exception as e:  # noqa: BLE001
+                err = f"forward kinematics failed: {e}"
+            if err:
+                self.state, self.last_error = "refused", f"joint pose: {err}"
+                return False
+        self.state, self.last_error = "moving", None
+        try:
+            self.backend.move_joints(q, self.joint_speed)
+            if self._stop.is_set():
+                return self._halted()
+            t0, seen = time.time(), False
+            while True:
+                if self._stop.is_set():
+                    return self._halted()
+                moving = self.backend.is_moving()
+                seen = seen or moving
+                if not moving and (seen or time.time() - t0 > START_GRACE_S):
+                    break
+                if time.time() - t0 > self.timeout:
+                    self.backend.stop()
+                    self.state, self.last_error = "error", "joint move timed out"
+                    return False
+                time.sleep(0.02)
+            got = self.backend.joints()
+        except Exception as e:  # noqa: BLE001
+            self.state, self.last_error = "error", f"{type(e).__name__}: {e}"
+            return False
+        if self._stop.is_set():
+            return self._halted()
+        off = max(abs(a - b) for a, b in zip(got, q))
+        if off > tol_deg:
+            self.state, self.last_error = "error", f"stopped {off:.1f} deg from the taught pose"
+            return False
+        self.state = "idle"
+        return True
+
+    def at_home(self, tol_mm: float = 3.0, tol_deg: float = 1.0) -> bool:
+        """Is the arm parked at home right now (for a camera on the arm: is this the calibrated view)?"""
+        if self.state == "moving":
+            return False
+        try:
+            if self.home_joints:
+                return bool(max(abs(a - b) for a, b in zip(self.backend.joints(), self.home_joints)) <= tol_deg)
+            if self.home_mm:
+                return bool(sum((a - b) ** 2 for a, b in zip(self.backend.tcp_mm(), self.home_mm)) ** 0.5 <= tol_mm)
+        except Exception:  # noqa: BLE001
+            return False
+        return False
 
     def stop(self) -> None:
         self._stop.set()
@@ -189,7 +265,8 @@ class CartesianArm(ArmDriver):
         except Exception:  # noqa: BLE001
             tcp = None
         return {"name": self.name, "state": self.state, "tip_mm": tcp[:2] if tcp else None, "tcp_mm": tcp,
-                "z_hover_mm": self.z, "error": self.last_error, "step": self.step, "simulated": isinstance(self.backend, FakeCartesian)}
+                "z_hover_mm": self.z, "error": self.last_error, "step": self.step, "simulated": isinstance(self.backend, FakeCartesian),
+                "home": "joints" if self.home_joints else ("mm" if self.home_mm else None)}
 
 
 class FakeCartesian(CartesianBackend):
@@ -202,8 +279,18 @@ class FakeCartesian(CartesianBackend):
         self.speed = 100.0
         self.free = False
         self.history: list[tuple] = []
+        self.q = self.ik(self.pos)          # joint angles (toy model: see fk)
+        self.q_target: list[float] | None = None
         self._t = time.time()
         self._lock = threading.Lock()
+
+    @staticmethod
+    def fk(q):            # toy forward model, only for rehearsal and tests: 1 deg of joint = 1 mm
+        return [300.0 + q[1], q[0], 200.0 + q[2]]
+
+    @staticmethod
+    def ik(p):
+        return [p[1], p[0] - 300.0, p[2] - 200.0, 0.0, 0.0]
 
     def _advance(self):
         now = time.time()
@@ -215,12 +302,30 @@ class FakeCartesian(CartesianBackend):
             self.pos = list(self.target)
         else:
             self.pos = [p + v / dist * step for p, v in zip(self.pos, d)]
+        if self.q_target is not None and self.pos == self.target:
+            self.q, self.q_target = list(self.q_target), None
+        elif self.q_target is None:
+            self.q = self.ik(self.pos)[:3] + list(self.q[3:])
 
     def move_linear(self, x, y, z, speed_mm_s):
         with self._lock:
             self._advance()
-            self.target, self.speed = [x, y, z], speed_mm_s
+            self.target, self.speed, self.q_target = [x, y, z], speed_mm_s, None
             self.history.append((x, y, z))
+
+    def move_joints(self, q, speed_deg_s):
+        with self._lock:
+            self._advance()
+            self.target, self.speed, self.q_target = self.fk(q), speed_deg_s, list(q)
+            self.history.append(("joints", *q))
+
+    def joints(self):
+        with self._lock:
+            self._advance()
+            return list(self.q)
+
+    def fk_mm(self, q):
+        return tuple(self.fk(q))
 
     def is_moving(self):
         with self._lock:
@@ -230,7 +335,7 @@ class FakeCartesian(CartesianBackend):
     def stop(self):
         with self._lock:
             self._advance()
-            self.target = list(self.pos)
+            self.target, self.q_target = list(self.pos), None
 
     def tcp_mm(self):
         with self._lock:

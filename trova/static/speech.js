@@ -15,13 +15,15 @@ const TrovaSpeech = (() => {
     ['home', /\b(go home|park the arm|vai a casa|parcheggia)\b/],
   ];
   const ALL = /\b(all the|every|tutti i|tutte le|tutti gli)\b/;
+  const ROOM = /\b(look around( the room)?( for)?|in the room|guarda (in giro|intorno)( per)?|nella stanza)\b/g;
 
   function parse(text, stopWords) {
     const t = ' ' + String(text || '').toLowerCase().replace(/[^a-zà-ù0-9' ]/g, ' ').replace(/\s+/g, ' ') + ' ';
     if ((stopWords || []).some(w => t.includes(' ' + w + ' ')))      // safety first: any stop word stops the arm
       return RULES[1][1].test(t) ? {cmd: 'stop', also: 'watch_off'} : {cmd: 'stop'};
-    for (const [cmd, re] of RULES) if (re.test(t)) return {cmd};
     const q = t.trim().replace(/^(trova|find|where is|where's|dov'?(è|e)|cerca|show me|mostrami)\s+/, '');
+    if (new RegExp(ROOM.source).test(t)) return {cmd: 'room', text: q.replace(ROOM, ' ').replace(/\s+/g, ' ').trim()};
+    for (const [cmd, re] of RULES) if (re.test(t)) return {cmd};
     if (!q) return {cmd: 'none'};
     return {cmd: ALL.test(t) ? 'find_all' : 'find', text: q};
   }

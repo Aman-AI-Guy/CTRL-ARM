@@ -41,10 +41,37 @@ class XArmBackend(CartesianBackend):
         with self.lock:
             if self.arm.get_is_moving():          # the SDK queues moves: flush before retargeting
                 self._halt()
+            # xArm 5 moves in straight lines only with the flange parallel to the base (roll +-180, pitch 0). Coming
+            # from a taught pose that is not (e.g. a camera survey pose), plan this one move in joint space via IK.
+            code, pose = self.arm.get_position()
+            flat = code == 0 and pose and abs(abs(pose[3]) - 180) < 3 and abs(pose[4]) < 3
+            extra = {} if flat else {"motion_type": 2}
             code = self.arm.set_position(x=x, y=y, z=z, roll=180, pitch=0, yaw=self.yaw, speed=speed_mm_s,
-                                         mvacc=self.accel, wait=False)
+                                         mvacc=self.accel, wait=False, **extra)
         if code != 0:
             raise RuntimeError(f"xArm set_position returned code {code} (error {self.arm.error_code})")
+
+    def move_joints(self, q, speed_deg_s):
+        with self.lock:
+            if self.arm.get_is_moving():
+                self._halt()
+            code = self.arm.set_servo_angle(angle=list(q), speed=speed_deg_s, mvacc=speed_deg_s * 5, wait=False)
+        if code != 0:
+            raise RuntimeError(f"xArm set_servo_angle returned code {code} (error {self.arm.error_code})")
+
+    def fk_mm(self, q):
+        with self.lock:
+            code, pose = self.arm.get_forward_kinematics(list(q))
+        if code != 0 or not pose:
+            raise RuntimeError(f"xArm forward kinematics code {code}")
+        return tuple(pose[:3])
+
+    def joints(self):
+        with self.lock:
+            code, q = self.arm.get_servo_angle()
+        if code != 0:
+            raise RuntimeError(f"xArm get_servo_angle code {code}")
+        return [float(v) for v in q[:5]]
 
     def is_moving(self) -> bool:
         with self.lock:

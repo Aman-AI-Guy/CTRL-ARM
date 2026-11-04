@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import changes as chg
-from .arm import CartesianArm, SimArm, TaughtGridArm, make_arm
+from .arm import CartesianArm, SimArm, TaughtGridArm, load_poses, make_arm, save_pose
 from .arm.skills import TrayParams, lift_allowed, waypoints as tray_waypoints
 from .audit import AuditLog
 from .boxes import Box
@@ -36,6 +36,8 @@ from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
 from . import history, preflight
 from .watch import Watch
+from . import room as room_mod
+from .light import make_light
 from . import labels as lbl
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
@@ -146,6 +148,11 @@ class State:
         self.frame_size: list[int] | None = None      # live camera frame size (not an uploaded photo)
         self.camera_error: str | None = None
         self.arm = make_arm(s.arm, s.data_dir, s.table_w_mm, s.table_h_mm)
+        # the camera is on the arm (the event's xArm 5): every picture is taken from the taught survey pose
+        self.camera_on_arm = os.getenv("TROVA_CAMERA_ON_ARM", "0").lower() in ("1", "true", "yes")
+        self.settle_s = float(os.getenv("TROVA_CAMERA_SETTLE_S", "0.6"))
+        if hasattr(self.source, "attach"):
+            self.source.attach(self.arm, s.data_dir)   # simulated arm camera: renders what the arm would see
         self.arm_thread: threading.Thread | None = None
         self.arm_lock = threading.Lock()        # one motion command at a time
         self.cancel = threading.Event()         # set by STOP; a fresh one per command
@@ -175,9 +182,16 @@ class State:
         self.dog_stop = threading.Event()
         self.dog_thread: threading.Thread | None = None
         self.watch = Watch(self)
+        try:
+            self.light = make_light()         # optional LED ring on the arm camera
+        except Exception as e:  # noqa: BLE001 - a missing light must never stop Trova
+            from .light import NoLight
+            self.light = NoLight()
+            self.audit.event("error", where="light", error=str(e))
         self.batch_path = s.data_dir / "batch.json"          # feature 11: the batch being cleared for
         self.batch = json.loads(self.batch_path.read_text()) if self.batch_path.exists() else {"lot": os.getenv("TROVA_BATCH", "")}
         self.labels: dict | None = None
+        self.room: dict | None = None          # feature 14: last room scan (status, views, result)
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
@@ -209,10 +223,13 @@ class State:
         if isinstance(self.arm, CartesianArm):
             if not self.arm.limits:
                 return "No safety box: set TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax (robot mm) with staff, restart"
-            if not self.arm.home_mm:
-                return "No home pose: set TROVA_ARM_HOME_MM=x,y,z outside the camera view, restart"
+            if not (self.arm.home_mm or self.arm.home_joints):
+                return ("No home pose: teach one (Setup: Teach survey pose here) or set TROVA_ARM_HOME_MM=x,y,z, restart"
+                        if self.camera_on_arm else "No home pose: set TROVA_ARM_HOME_MM=x,y,z outside the camera view, restart")
             if not pixels:
                 return None
+            if self.camera_on_arm and not self.at_survey():
+                return "The arm camera is not at the survey pose, so the picture does not match the calibration: Arm home"
             if not self.calib or self.calib.source not in ("arm", "aruco_robot"):
                 return "Calibrate with the arm first (Setup: Calibrate with arm, or ArUco with markers recorded by the arm)"
             if self.override is not None:
@@ -228,6 +245,7 @@ class State:
         self.stop_ts = time.time()
         self.cancel.set()
         self.arm.stop()
+        self.light.show("stop")
 
     def _take_arm(self, job: str) -> threading.Event:
         """Caller holds arm_lock. End the running command (unless it must not be cut), then arm a fresh cancel."""
@@ -258,15 +276,28 @@ class State:
             self.arm_thread.start()
             return True
 
+    def at_survey(self) -> bool:
+        """Camera on the arm: is the arm at the survey pose, i.e. does the picture match the calibration?"""
+        if not self.camera_on_arm or not isinstance(self.arm, CartesianArm):
+            return True
+        return self.arm.at_home()
+
     def clear_view(self) -> None:
-        """A real arm parks before every capture so it is not mistaken for an object."""
+        """A real arm parks before every capture so it is not mistaken for an object. With the camera on the arm,
+        home is the survey pose: the picture is only valid there, after the image settles."""
         if isinstance(self.arm, SimArm):
             return
         if self.lift_interrupted:
             raise ArmBusy(self.arm_blocked())
         with self.arm_lock:
+            was_there = self.at_survey() if self.camera_on_arm else False
             self._take_arm("home")
             self.arm.home()
+        if self.camera_on_arm:
+            if not self.at_survey():
+                raise ArmBusy("The arm did not reach the survey pose: " + (self.arm.last_error or self.arm.state))
+            if not was_there:
+                time.sleep(self.settle_s)      # motion blur and auto exposure settle before the picture
 
     def run_tour(self, targets: list, pause_s: float = 1.0) -> None:
         """Feature 6: visit each target in turn. STOP ends the whole tour, even during a pause."""
@@ -278,6 +309,49 @@ class State:
                 self.tour["status"] = "stopped"
                 return
         self.tour["status"] = "done"
+
+    def run_room(self, request: str) -> None:
+        """Feature 14: look around from the taught look pose, let Grok pick the photo and box, turn to face it."""
+        cfg = room_mod.pan_settings()
+        look = load_poses(self.s.data_dir).get("look_joints")
+        self.room = {"status": "scanning", "request": request, "done": 0, "total": len(cfg["angles"])}
+        views = []
+
+        def grab():
+            f = self.frame()
+            views.append(f)
+            self.room["done"] = len(views)
+            return f
+        t0 = time.perf_counter()
+        got = room_mod.scan(self.arm, grab, look, cfg["joint"], cfg["angles"], settle_s=self.settle_s)
+        if got is None:
+            self.room.update(status="stopped", error=self.arm.last_error or "STOP pressed")
+            self.audit.event("room_scan", **self.room)
+            return
+        for v in got:
+            v.path = self.audit.save_image(f"room_{v.angle:+.0f}", v.frame)
+        try:
+            res = room_mod.find(self.grok, got, request)
+        except GrokError as e:
+            self.room.update(status="error", error=str(e))
+            self.audit.event("room_scan", **self.room)
+            return
+        out = res.as_dict() | {"sheet": self.audit.save_image("room_sheet", room_mod.sheet(got))}
+        if res.status == "found":
+            res.px_per_deg, res.px_per_deg_source = room_mod.measure_px_per_deg(got, cfg["hfov"], cfg["sign"])
+            res.angle = room_mod.aim_angle(res, res.px_per_deg)
+            out |= res.as_dict() | {"marked": self.audit.save_image("room_found", room_mod.draw_found(res))}
+            q = list(look)
+            q[cfg["joint"]] = look[cfg["joint"]] + res.angle
+            if not self.cancel.is_set() and self.arm.go_joints(q):
+                out["facing"] = True
+                out["facing_view"] = self.audit.save_image("room_facing", self.frame())
+            else:
+                out["facing"], out["error"] = False, self.arm.last_error or "STOP pressed"
+        out["total_s"] = round(time.perf_counter() - t0, 1)
+        self.light.show("found" if res.status == "found" else "not_found")
+        self.room = out
+        self.audit.event("room_scan", **self.room)
 
     def run_lift(self, wps: list) -> None:
         """Feature 7: if the lift does not finish, block automatic moves until the operator frees the arm."""
@@ -348,6 +422,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def frame_jpg(boxes: int = 1, max_w: int = 1280):
         f = st.frame()
         img = f.copy()
+        survey = st.at_survey()
+        if st.camera_on_arm and not survey:      # the arm camera is somewhere else: nothing calibrated to draw
+            s = max(0.6, f.shape[1] / 1600)
+            cv2.putText(img, "arm camera: moving view (not the survey pose)", (20, int(40 * s)), cv2.FONT_HERSHEY_SIMPLEX,
+                        s, (0, 200, 255), 2, cv2.LINE_AA)
+            if img.shape[1] > max_w:
+                img = cv2.resize(img, (max_w, int(img.shape[0] * max_w / img.shape[1])), interpolation=cv2.INTER_AREA)
+            return Response(jpeg(img, 80), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
         if boxes:
             props, _ = st.proposals(f)
             img = draw_marks(img, props)
@@ -356,7 +438,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             b = lf["box"]
             cv2.rectangle(img, (int(b.x0), int(b.y0)), (int(b.x1), int(b.y1)), HIGHLIGHT, max(4, f.shape[1] // 250))
         arm = st.arm.status()
-        if st.calib and st.calib.ok and arm.get("tip_mm"):
+        if st.calib and st.calib.ok and arm.get("tip_mm") and not st.camera_on_arm:
             u, v = st.calib.table_to_pixel(*arm["tip_mm"])
             if 0 <= u < f.shape[1] and 0 <= v < f.shape[0]:
                 r = max(10, f.shape[1] // 90)
@@ -388,6 +470,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "background": st.background is not None, "calibration": st.calib.as_dict() if st.calib else None,
             "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
             "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
+            "camera_on_arm": st.camera_on_arm, "at_survey": st.at_survey(), "poses": load_poses(st.s.data_dir),
             "reference": None if not st.reference else {k: st.reference[k] for k in ("time", "path", "n_objects")},
             "pending_question": st.pending["question"] if st.pending else None,
             "pending_candidates": st.pending.get("candidates", []) if st.pending else [],
@@ -396,7 +479,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "last_check": None if not st.last_check else {k: v for k, v in st.last_check.items() if k != "objects"},
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
             "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
-            "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(), "batch": st.batch,
+            "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(), "batch": st.batch, "room": st.room,
+            "light": st.light.status(),
             "labels": None if not st.labels else {k: v for k, v in st.labels.items() if k != "codes"},
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
@@ -440,6 +524,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "occluded": occluded, "moved": bool(table_mm and move and not arm_blocked),
                             "boxes": [b.as_dict() for b in boxes], **paths}
             st.pending_move = st.last_find if res.status == "found" else None
+            st.light.show({"found": "found", "not_found": "not_found"}.get(res.status, "idle"))
             st.pending = None
             if res.status == "clarify":
                 st.pending = {"request": request, "query_image": query_img, "history": history, "move": move,
@@ -686,6 +771,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             return fail(e, "source")
         old, st.source = st.source, new
         old.close()
+        if hasattr(new, "attach"):
+            new.attach(st.arm, st.s.data_dir)
         st.override, st.background, st.background_path = None, None, None
         st.audit.event("source", spec=spec)
         return st.source.info()
@@ -720,6 +807,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     # ------------------------------------------------------------------ calibration
     @app.post("/api/calibration/aruco")
     def api_cal_aruco():
+        st.clear_view()            # park (camera on the arm: go to the survey pose) before looking for the markers
         try:
             mpath = st.s.data_dir / "markers.json"
             pos = load_marker_positions(mpath, st.s.table_w_mm, st.s.table_h_mm)
@@ -803,6 +891,28 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         mpath.write_text(json.dumps(d, indent=2))
         st.audit.event("marker_from_arm", marker=marker_id, x_mm=x, y_mm=y)
         return {"markers": {k: v for k, v in d.items() if k != "_frame"}}
+
+    @app.post("/api/arm/teach_pose")
+    def api_arm_teach_pose(name: str = Form("home_joints")):
+        """Record the arm's current joint angles as a named pose: home_joints (with the camera on the arm: the
+        survey pose, where the camera sees the whole table) or look_joints (the room scan starts here)."""
+        arm = _need_cartesian()
+        if name not in ("home_joints", "look_joints"):
+            raise HTTPException(400, "name must be home_joints or look_joints")
+        try:
+            q = arm.backend.joints()
+        except NotImplementedError as e:
+            return fail(e, "teach_pose")
+        poses = save_pose(st.s.data_dir, name, q)
+        if name == "home_joints":
+            arm.home_joints = poses[name]
+            if st.camera_on_arm and st.calib and st.calib.source in ("arm", "aruco_robot"):
+                st.calib = None                # the view changed: the old pixel -> robot mapping is wrong now
+                if st.calib_path.exists():
+                    st.calib_path.unlink()
+        st.audit.event("teach_pose", name=name, joints=poses[name])
+        return {"poses": poses, "note": "survey pose changed: calibrate again (ArUco)" if name == "home_joints"
+                and st.camera_on_arm else ""}
 
     @app.post("/api/arm/clear_errors")
     def api_arm_clear_errors():
@@ -1106,6 +1216,26 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     preflight.register(app, st)      # feature 9: GET /api/preflight
     history.register(app, st, STATIC)   # feature 13: /history, /api/history(.csv), /api/history/verify
+
+    # ------------------------------------------------------------------ feature 14: look around the room
+    @app.post("/api/room/find")
+    def api_room_find(text: str = Form(...)):
+        """Scan the room from the taught look pose and face the requested object (runs in the arm thread; poll state.room)."""
+        arm = _need_cartesian()
+        if not load_poses(st.s.data_dir).get("look_joints"):
+            raise HTTPException(400, "Teach the look pose first: Setup, move the arm by hand so the camera looks at the room, "
+                                     "Teach look pose here")
+        blocked = st.arm_blocked(pixels=False)
+        if blocked:
+            raise HTTPException(409, blocked)
+        try:
+            arm.backend.joints()
+        except NotImplementedError as e:
+            return fail(e, "room")
+        if not st.start_arm(st.run_room, text.strip(), job="room"):
+            raise HTTPException(409, "STOP was pressed")
+        st.audit.event("room_find", request=text.strip())
+        return {"started": True, "views": len(room_mod.pan_settings()["angles"])}
 
     # ------------------------------------------------------------------ feature 11: labels and batch
     @app.post("/api/batch")

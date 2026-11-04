@@ -36,8 +36,9 @@ class Abort(RuntimeError):
 
 
 class Bringup:
-    def __init__(self, api, ask=input, say=print, sleep=time.sleep):
+    def __init__(self, api, ask=input, say=print, sleep=time.sleep, camera_on_arm: bool = False):
         self.api, self.ask, self.say, self.sleep = api, ask, say, sleep
+        self.camera_on_arm = camera_on_arm      # the event's sphere camera: home is the SURVEY pose, not a park pose
         self.result: dict = {}
 
     # ---------- small helpers
@@ -128,11 +129,18 @@ class Bringup:
 
     def step_home(self) -> list[float]:
         self.hand_mode(True)
-        self.wait_enter("Move the arm by hand to its PARK pose: out of the camera's view, flange down if you can")
+        if self.camera_on_arm:
+            self.wait_enter("Move the arm by hand to the SURVEY pose: the camera on the arm sees the WHOLE work area "
+                            "(watch Trova's live view or the camera preview)")
+        else:
+            self.wait_enter("Move the arm by hand to its PARK pose: out of the camera's view, flange down if you can")
         self.hand_mode(False)
         p = self.pose()
         self.result["home"] = p
-        self.say(f"park pose {p[:3]}")
+        code, q = self.api.get_servo_angle()
+        if code == 0 and q:
+            self.result["home_joints"] = [round(float(v), 2) for v in q[:5]]
+        self.say(f"{'survey' if self.camera_on_arm else 'park'} pose {p[:3]}, joints {self.result.get('home_joints')}")
         return p
 
     def step_corners(self) -> list[list[float]]:
@@ -202,6 +210,10 @@ class Bringup:
                "TROVA_ARM_Z_MM": f"{z_table + HOVER:.0f}",
                "TROVA_ARM_HOME_MM": ",".join(f"{v:.0f}" for v in home[:3]),
                "TROVA_ARM_LIMITS": ",".join(f"{v:.0f}" for v in lim)}
+        if self.camera_on_arm and self.result.get("home_joints"):
+            env["TROVA_CAMERA_ON_ARM"] = "1"
+            env["TROVA_ARM_HOME_JOINTS"] = ",".join(f"{v:g}" for v in self.result["home_joints"])
+            notes.append("camera on the arm: home is the survey pose (joints); calibrate with ArUco markers recorded by the arm")
         return {"env": env, "table_z_mm": round(z_table, 1), "notes": notes}
 
     def run(self, ip: str, out: Path | None) -> dict:
@@ -226,7 +238,11 @@ class Bringup:
             self.say(f"{k}={v}")
         for n in s["notes"]:
             self.say(f"# note: {n}")
-        self.say("\nThen in Trova: Setup -> Freedrive on -> Calibrate with arm (click the tip at 4-6 spots) -> preflight.")
+        if self.camera_on_arm:
+            self.say("\nThen in Trova: print 4 ArUco markers, tape them on the table, touch each centre with the sphere and "
+                     "press Record marker from arm, then Calibrate (ArUco) -> preflight. Teach the look pose for the room scan.")
+        else:
+            self.say("\nThen in Trova: Setup -> Freedrive on -> Calibrate with arm (click the tip at 4-6 spots) -> preflight.")
         if out:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(self.result, indent=2))
@@ -235,15 +251,16 @@ class Bringup:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        sys.exit("usage: python -m trova.arm.bringup <xarm ip>   (e.g. 192.168.1.185)")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args:
+        sys.exit("usage: python -m trova.arm.bringup <xarm ip> [--camera-on-arm]   (e.g. 192.168.1.185)")
     try:
         from xarm.wrapper import XArmAPI
     except ImportError:
         sys.exit("pip install xarm-python-sdk   (or: pip install -e '.[robots]')")
-    ip = sys.argv[1]
+    ip = args[0]
     api = XArmAPI(ip, is_radian=False)
-    b = Bringup(api)
+    b = Bringup(api, camera_on_arm="--camera-on-arm" in sys.argv)
     try:
         b.run(ip, Path("data") / "xarm_bringup.json")
     except (Abort, KeyboardInterrupt) as e:

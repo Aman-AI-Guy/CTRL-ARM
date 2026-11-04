@@ -536,7 +536,8 @@ def test_browser_speech_commands():
     from trova.voice import STOP_WORDS
     said = ["Stop!", "fermo", "stop watching", "find my watch", "watch the line", "sorveglia la linea", "check",
             "what changed?", "check the lot", "leggi le etichette", "what's on the table", "trova la penna rossa",
-            "all the pens", "tutte le forbici", "where is the red mug", "something to write with", "save the reference"]
+            "all the pens", "tutte le forbici", "where is the red mug", "something to write with", "save the reference",
+            "look around for the red umbrella", "guarda in giro per la borsa nera"]
     js = ("const S = require(process.argv[1]); const [said, sw] = JSON.parse(process.argv[2]);"
           "console.log(JSON.stringify(said.map(t => S.parse(t, sw))));")
     out = subprocess.run([node, "-e", js, str(STATIC / "speech.js"), json.dumps([said, STOP_WORDS])],
@@ -552,6 +553,8 @@ def test_browser_speech_commands():
     assert got["trova la penna rossa"] == {"cmd": "find", "text": "la penna rossa"}
     assert got["all the pens"]["cmd"] == got["tutte le forbici"]["cmd"] == "find_all"
     assert got["where is the red mug"]["text"] == "the red mug"
+    assert got["look around for the red umbrella"] == {"cmd": "room", "text": "the red umbrella"}
+    assert got["guarda in giro per la borsa nera"] == {"cmd": "room", "text": "la borsa nera"}
 
 
 # ---------------------------------------------------------------- feature 13: audit trail page, tamper evidence
@@ -760,3 +763,163 @@ def test_xarm_tcp_offset_from_env_and_clear_errors_endpoint(tmp_path, monkeypatc
     assert r["error"] is None and r["state"] == "idle"
     app2, c2 = _client(tmp_path / "sim", monkeypatch, TROVA_ARM="sim")
     assert c2.post("/api/arm/clear_errors").status_code == 400            # the simulated arm has no controller
+
+
+# ---------------------------------------------------------------- camera on the arm (the event's xArm 5 sphere camera)
+def _arm_cam_client(tmp_path, monkeypatch, **extra):
+    from test_pipeline import _client
+    env = dict(TROVA_ARM="cartesian:fake", TROVA_CAMERA="armsim", TROVA_CAMERA_ON_ARM="1", TROVA_CAMERA_SETTLE_S="0",
+               TROVA_ARM_LIMITS="-2000,2000,-2000,2000,-2000,2000", TROVA_ARM_SPEED_MM_S="20000",
+               TROVA_ARM_JOINT_SPEED_DEG_S="20000", TROVA_ARM_HOME_MM="")
+    env.update(extra)
+    return _client(tmp_path, monkeypatch, **env)
+
+
+def test_camera_on_arm_survey_pose_flow(tmp_path, monkeypatch):
+    from trova.calibration import Calibration
+    app, c = _arm_cam_client(tmp_path, monkeypatch)
+    st = app.state.trova
+    assert "teach one" in st.arm_blocked()                                    # no survey pose yet
+    r = c.post("/api/arm/teach_pose", data={"name": "home_joints"}).json()  # the arm is where the camera sees the table
+    assert r["poses"]["home_joints"] == [0.0] * 5 and st.at_survey()
+    st.calib = Calibration.default(1280, 800, 600, 400)
+    st.calib.source, st.calib.size = "aruco_robot", [1280, 800]             # as if calibrated from ArUco at this pose
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/reference", data={"describe": "false"})
+    unique = _unique_color(c)
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
+    assert r["result"]["status"] == "found" and r["moved"], r["arm_blocked"]
+    assert _wait(lambda: st.arm.status()["state"] == "idle" and not st.at_survey())
+    s = c.get("/api/state").json()
+    assert not s["at_survey"] and "survey pose" in s["arm_blocked"]          # the live picture is not the calibrated one
+    assert c.post("/api/arm/point", json={"u": 100, "v": 100}).status_code == 409
+    assert c.get("/api/frame.jpg").status_code == 200
+    st.watch.step()
+    assert "away from the survey pose" in st.watch.status                    # never compares a different view
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()      # goes back to the survey pose first
+    assert r["result"]["status"] == "found" and r["moved"]
+    c.post("/api/arm/home")
+    assert _wait(lambda: st.at_survey())
+    r = c.post("/api/arm/teach_pose", data={"name": "home_joints"}).json()   # a new survey pose invalidates the calibration
+    assert "calibrate again" in r["note"] and "Calibrate" in st.arm_blocked()
+
+
+def test_room_scan_finds_and_faces_the_object(tmp_path, monkeypatch):
+    import numpy as np
+
+    from trova.synthetic import COLORS, ObjSpec
+    app, c = _arm_cam_client(tmp_path, monkeypatch)
+    st = app.state.trova
+    c.post("/api/arm/teach_pose", data={"name": "home_joints"})
+    assert c.post("/api/room/find", data={"text": "the lamp"}).status_code == 400      # no look pose yet
+    assert st.arm.go_joints([10.0, 50.0, 30.0, 0.0, 0.0])
+    c.post("/api/arm/teach_pose", data={"name": "look_joints"})
+    cam = st.source
+    color = "purple"
+    cam.room.objects = [o for o in cam.room.objects if o.color != color]     # exactly one purple thing in the room
+    x = cam.room_img.shape[1] / 2 - 40 * cam.px_per_deg                     # the object sits at pan +40 degrees
+    cam.room.objects.append(ObjSpec("lamp", color, "square", x, 420, 140))
+    cam.room_img = cam.room.render(noise=0)
+    assert c.post("/api/room/find", data={"text": f"the {color} lamp"}).json()["started"]
+    assert _wait(lambda: st.room and st.room["status"] != "scanning", timeout=20)
+    room = c.get("/api/state").json()["room"]
+    assert room["status"] == "found" and room["facing"], room
+    assert abs(room["angle"] - 40) < 4 and room["n_views"] == 7 and len(room["views"]) == 7
+    facing = cam.read()                                                       # what the camera sees now
+    m = (np.abs(facing.astype(int) - np.array(COLORS[color])).sum(axis=2) < 60)
+    assert m.sum() > 500 and abs(np.nonzero(m)[1].mean() - 640) < 90           # the object is in the middle
+    assert room["sheet"] and room["marked"]
+
+
+def test_room_scan_stops_and_joint_poses_obey_the_safety_box(tmp_path, monkeypatch):
+    app, c = _arm_cam_client(tmp_path, monkeypatch, TROVA_ARM_JOINT_SPEED_DEG_S="60")
+    st = app.state.trova
+    c.post("/api/arm/teach_pose", data={"name": "home_joints"})
+    st.arm.joint_speed = 20000
+    assert st.arm.go_joints([10.0, 50.0, 30.0, 0.0, 0.0])
+    c.post("/api/arm/teach_pose", data={"name": "look_joints"})
+    st.arm.joint_speed = 60
+    c.post("/api/room/find", data={"text": "the red lamp"})
+    assert _wait(lambda: st.arm.status()["state"] == "moving")
+    c.post("/api/arm/stop")
+    st.arm_thread.join(timeout=5)
+    assert st.room["status"] == "stopped"
+    from trova.arm import CartesianArm, FakeCartesian, Limits
+    arm = CartesianArm(FakeCartesian(), 150, None, Limits.parse("100,600,-300,300,0,400"), speed_mm_s=5000)
+    arm.joint_speed = 5000
+    assert not arm.go_joints([0.0, 400.0, 0.0, 0.0, 0.0]) and "joint pose" in arm.last_error   # fk x = 700: outside
+    assert arm.backend.history == []
+
+
+def test_camera_list_and_bringup_for_the_arm_camera(tmp_path, monkeypatch):
+    import numpy as np
+
+    from trova import camera as cam_mod
+
+    class FakeCap:
+        def __init__(self, i):
+            self.i = i
+
+        def isOpened(self):
+            return self.i in (0, 2)
+
+        def set(self, *a):
+            return True
+
+        def read(self):
+            return True, np.full((720, 1280, 3), 40 * (self.i + 1), np.uint8)
+
+        def release(self):
+            pass
+    monkeypatch.setattr(cam_mod.cv2, "VideoCapture", FakeCap)
+    monkeypatch.setattr(cam_mod.time, "sleep", lambda s: None)
+    found = cam_mod.list_cameras(tmp_path, max_index=4)
+    assert [c["index"] for c in found] == [0, 2] and found[1]["size"] == [1280, 720]
+    assert (tmp_path / "camera_2.jpg").exists()
+
+    clock = [0.0]
+    sim = SimXArm(clock)
+    b, said = _bringup(sim, clock)
+    b.camera_on_arm = True
+    env = b.run("192.168.1.185", None)["settings"]["env"]
+    assert env["TROVA_CAMERA_ON_ARM"] == "1" and env["TROVA_ARM_HOME_JOINTS"] == "0,0,0,0,0"
+    assert any("ArUco" in line for line in said)
+
+
+def test_led_ring_commands_and_never_breaking_trova(tmp_path, monkeypatch):
+    from trova.light import NoLight, SerialRing, make_light
+    sent = []
+
+    class FakeSerialMod:
+        class Serial:
+            def __init__(self, port, baud, timeout, write_timeout):
+                self.port = port
+
+            def write(self, data):
+                sent.append(data.decode().strip())
+    ring = SerialRing("/dev/tty.fake", serial_mod=FakeSerialMod)
+    assert sent == ["C 90 90 90"]                                        # white light for the camera at start
+    ring.show("alarm")
+    assert sent[-2:] == ["F 220 0 0 6", "C 220 0 0"]
+    ring.show("found")
+    assert sent[-2:] == ["F 0 180 0 2", "C 90 90 90"]
+    ring.ser.write = lambda data: (_ for _ in ()).throw(OSError("unplugged"))
+    ring.show("stop")                                                    # an unplugged ring never raises
+    assert "unplugged" in ring.status()["error"]
+    assert isinstance(make_light(""), NoLight)
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch, TROVA_LED="serial:/dev/does-not-exist")
+    assert c.get("/api/state").json()["light"]["name"] == "off"           # a bad port: Trova runs without the light
+
+
+def test_state_stays_json_after_a_room_scan(tmp_path, monkeypatch):
+    app, c = _arm_cam_client(tmp_path, monkeypatch)
+    st = app.state.trova
+    c.post("/api/arm/teach_pose", data={"name": "home_joints"})
+    c.post("/api/arm/teach_pose", data={"name": "look_joints"})
+    c.post("/api/room/find", data={"text": "the purple thing"})
+    assert _wait(lambda: st.room and st.room["status"] != "scanning", timeout=20)
+    s = c.get("/api/state")                                   # numpy numbers from the scan once broke this (500)
+    assert s.status_code == 200 and s.json()["at_survey"] is False
+    pre = {i["name"]: i for i in c.get("/api/preflight").json()["items"]}
+    assert pre["Home pose"]["status"] == "ok" and "joints" in pre["Home pose"]["detail"]

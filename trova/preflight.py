@@ -108,9 +108,23 @@ def _arm(st) -> list[dict]:
         out.append(_item("Safety box", "ok" if st.arm.limits else "fail",
                          "TROVA_ARM_LIMITS set" if st.arm.limits else "no workspace limits",
                          "" if st.arm.limits else "Set TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax with staff"))
-        out.append(_item("Home pose", "ok" if st.arm.home_mm else "fail",
-                         f"{st.arm.home_mm}" if st.arm.home_mm else "none: the arm refuses to move without one",
-                         "" if st.arm.home_mm else "Set TROVA_ARM_HOME_MM=x,y,z outside the camera view"))
+        home = st.arm.home_joints and f"joints {st.arm.home_joints}" or (st.arm.home_mm and f"{st.arm.home_mm}")
+        out.append(_item("Home pose", "ok" if home else "fail", home or "none: the arm refuses to move without one",
+                         "" if home else "Teach survey pose here (camera on the arm) or set TROVA_ARM_HOME_MM=x,y,z"))
+    if st.camera_on_arm:
+        from .arm import load_poses
+        poses = load_poses(st.s.data_dir)
+        if not isinstance(st.arm, CartesianArm):
+            out.append(_item("Arm camera", "warn", "TROVA_CAMERA_ON_ARM=1 with a simulated arm", "Use the real arm or cartesian:fake"))
+        elif not st.arm.home_joints:
+            out.append(_item("Arm camera", "fail", "no survey pose", "Move the arm so the camera sees the whole table: Teach survey pose here"))
+        else:
+            out.append(_item("Arm camera", "ok" if st.at_survey() else "warn",
+                             "at the survey pose" if st.at_survey() else "away from the survey pose",
+                             "" if st.at_survey() else "Arm home"))
+        out.append(_item("Room scan", "ok" if poses.get("look_joints") else "warn",
+                         "look pose taught" if poses.get("look_joints") else "no look pose",
+                         "" if poses.get("look_joints") else "Point the camera at the room by hand: Teach look pose here"))
     if lift_allowed():
         out.append(_item("Tray lift", "warn", "enabled", "Only with measured TROVA_TRAY_* values, agreed with staff"))
     if not os.getenv("TROVA_TOKEN", "").strip() and st.s.host not in ("127.0.0.1", "localhost"):
