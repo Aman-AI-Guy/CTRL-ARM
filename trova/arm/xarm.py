@@ -54,12 +54,32 @@ class XArmBackend(CartesianBackend):
             # from a taught pose that is not (e.g. a camera survey pose), plan this one move in joint space via IK.
             code, pose = self.arm.get_position()
             self._check(code, "get_position")
-            flat = code == 0 and pose and abs(abs(pose[3]) - 180) < 3 and abs(pose[4]) < 3
-            extra = {} if flat else {"motion_type": 2}
+            extra = {} if self._flat(pose) else {"motion_type": 2}
             code = self.arm.set_position(x=x, y=y, z=z, roll=180, pitch=0, yaw=self.yaw, speed=speed_mm_s,
                                          mvacc=self.accel, wait=False, **extra)
         if code != 0:
             raise RuntimeError(f"xArm set_position returned code {code} (error {self.arm.error_code})")
+
+    @staticmethod
+    def _flat(pose) -> bool:
+        return bool(pose) and len(pose) >= 5 and abs(abs(pose[3]) - 180) < 3 and abs(pose[4]) < 3
+
+    def is_level(self) -> bool:
+        with self.lock:
+            code, pose = self.arm.get_position()
+        self._check(code, "get_position")
+        return self._flat(pose)
+
+    def level_joints(self, q):
+        """Manual p. 156: the flange is parallel to the base when J4 = -(J2 + J3). The controller's own forward
+        kinematics must confirm it, otherwise this arm's joint convention differs and stage 0 is refused."""
+        ql = [float(v) for v in q]
+        ql[3] = -(ql[1] + ql[2])
+        with self.lock:
+            code, pose = self.arm.get_forward_kinematics(ql)
+        if code != 0 or not self._flat(pose):
+            raise RuntimeError(f"J4 = -(J2+J3) does not level the flange here (FK code {code}, pose {pose})")
+        return ql
 
     def move_joints(self, q, speed_deg_s):
         with self.lock:

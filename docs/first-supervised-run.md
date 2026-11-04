@@ -13,11 +13,15 @@ What the mode does (`TROVA_FIRST_RUN=1`, off by default):
 - The find never moves the arm, even with `move=true`. The UI shows the photo with the chosen box, the target in mm,
   the height, the distance from the current pose, the speed and "Collision avoidance: NOT PRESENT. Hold the physical
   E-stop."
-- **Stage 1** (one confirmation) moves the tip to `TROVA_ARM_Z_MM + TROVA_FIRST_RUN_HOVER_MM` (default +100 mm) above
-  the object. **This path is a straight line only if the flange is level at the start.** The xArm 5 moves in Cartesian
-  lines only with the flange parallel to the base (roll ±180°, pitch 0; manual p. 156). If the flange is tilted, as at a
-  camera survey pose, the driver plans this move in joint space (`motion_type=2`). The tip then follows a curve whose
-  low points the safety box does not check, and the 20 mm/s figure is not guaranteed to be the tip speed.
+- **Stage 0** (one confirmation, only if the flange is tilted at the survey pose, as with the sideways camera) levels
+  the flange **in place**. Only joint 4 turns, to J4 = −(J2 + J3) (manual p. 156), at ≤ 5°/s. The controller's own
+  forward kinematics must confirm the result is level, and the end pose must be inside the safety box; otherwise
+  stage 0 is refused. The camera dome and the tip swing on an arc around the wrist, and the panel shows where the tip
+  ends up. Stage 0 exists because the xArm 5 moves in straight lines only with the flange level (roll ±180°,
+  pitch 0). From a tilted pose, the driver would make stage 1 a joint-space curve that the safety box does not
+  check.
+- **Stage 1** (one confirmation, from the survey pose or from the levelled pose) moves the tip in a **straight line** to
+  `TROVA_ARM_Z_MM + TROVA_FIRST_RUN_HOVER_MM` (default +100 mm) above the object.
 - **Stage 2** (a new confirmation, issued only after stage 1 arrived) descends straight down to
   `TROVA_ARM_Z_MM`. Each confirmation can be used once, only for its own stage and target, within 60 s, and never
   after a STOP.
@@ -52,8 +56,8 @@ suggestions to agree with staff.
       it is OFF, the arm stays where the collision was detected (p. 93). For this run, OFF is the more predictable
       choice.
 - [ ] **Reduced mode** ON (manual p. 81). It limits the maximum linear speed, the maximum **joint speed** and the joint
-      range. Suggested: linear ≤ 50 mm/s and joint ≤ 20°/s. This is the only limit on joint-space moves (stage 1 from
-      a tilted survey pose, and Arm home), because Trova's 20 mm/s cap only applies to straight-line moves.
+      range. Suggested: linear ≤ 50 mm/s and joint ≤ 20°/s. It also limits joint-space moves (stage 0 and Arm home).
+      Trova caps those at 5°/s itself, but its 20 mm/s cap only applies to straight-line moves.
 - [ ] **Safety boundary** ON (manual p. 80), at or just outside `TROVA_ARM_LIMITS`. It must include the survey pose
       and the hover height. If the TCP leaves it, the controller stops the arm. Step 1 of the bring-up prints whether
       it is on.
@@ -145,13 +149,14 @@ curl -s -X POST "localhost:8000/api/arm/reset?token=$TROVA_TOKEN" -H "x-trova-op
       the pendant, or measure with a ruler from a marker. Compare it with the target shown in mm. If it is more than
       10 mm off, **stop here** and recalibrate.
 
-## 6. First move: stage 1 (hover) only
+## 6. First moves: stage 0 (level) and stage 1 (hover) only
 
 - [ ] Area clear. A second person watches the arm, not the screen. Your hand is **on the E-stop**. Nobody's hand is
       under the tip (it sags on an E-stop).
-- [ ] Check whether the survey pose's flange is level (the pendant / Studio shows roll ±180, pitch 0). If it is not,
-      stage 1 is a **joint-space curve** from the survey pose, not a straight line. Watch it all the way, and be
-      ready to stop the first time it heads lower than the hover height.
+- [ ] If the panel shows **Stage 0**: read the joint 4 change and where the tip ends up. Check that nothing is under
+      the dome's swing, then **Confirm stage 0**. Only the wrist turns, slowly; the rest of the arm must not move. If
+      the panel says "cannot plan the approach … does not level the flange", the levelling formula does not fit
+      this arm: stop and tell the developer. Don't work around it.
 - [ ] Read the panel: the target, the height, the distance from the current pose and the speed. Then **Confirm
       stage 1**.
 - [ ] The tip ends about 100 mm above the object. Check that the audit line `arm_approach` (stage 1) shows `reached`
@@ -185,7 +190,8 @@ The same data is in **history** (group "arm": `arm_approach`, `arm_accuracy`) an
 - in stage 2 it moves sideways instead of straight down;
 - anyone enters the area, or the second person says stop;
 - the homing move swings toward the table or the camera cable;
-- stage 1 from the survey pose curves lower than the hover height.
+- in stage 0 any joint other than the wrist (joint 4) moves, or the dome swings toward something;
+- stage 1 does not move in a straight line.
 
 **Abandon the session (no more moves today, debrief) if:**
 
