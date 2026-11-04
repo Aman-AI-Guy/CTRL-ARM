@@ -16,17 +16,29 @@ class SimArm(ArmDriver):
     def __init__(self, table_w_mm: float = 600, table_h_mm: float = 400, speed_mm_s: float = 250):
         self.home_xy = (table_w_mm / 2, table_h_mm + 60)   # parked beyond the near edge
         self.tip = list(self.home_xy)
+        self.z = 0.0
         self.speed = speed_mm_s
         self.state = "idle"
+        self.last_error: str | None = None
+        self.last_motion = None
         self.target: tuple[float, float] | None = None
         self.step: str | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        from ..motion import MotionGateway
+        self.gateway = MotionGateway.for_arm(self)
 
     def _move(self, x: float, y: float) -> bool:
         if self._stop.is_set():          # STOP latched: refuse until the server calls ready()
             with self._lock:
                 self.state = "stopped"
+            return False
+        decision = self.gateway.authorize_cartesian((x, y, self.z), self.speed, source="sim")
+        self.last_motion = decision
+        if not decision.allow_motion:
+            with self._lock:
+                self.state = "stopped" if decision.status == "stopped" else ("idle" if decision.status == "dry_run" else "refused")
+                self.last_error = None if decision.status == "dry_run" else decision.reason
             return False
         with self._lock:
             self.state, self.target = "moving", (x, y)
@@ -68,4 +80,6 @@ class SimArm(ArmDriver):
     def status(self) -> dict:
         with self._lock:
             return {"name": self.name, "state": self.state, "tip_mm": [round(v, 1) for v in self.tip],
-                    "target_mm": list(self.target) if self.target else None, "simulated": True, "step": self.step}
+                    "target_mm": list(self.target) if self.target else None, "simulated": True, "step": self.step,
+                    "error": self.last_error, "motion_mode": self.gateway.mode, "collision_avoidance": False,
+                    "software_stop_is_not_safety_rated": True}

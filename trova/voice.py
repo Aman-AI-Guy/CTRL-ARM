@@ -48,10 +48,11 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
 - check_changes: "what changed?", "is the line clear?". Say how many changes, then each one in a few words, highest risk first.
 - stop_arm: whenever they say stop, wait, fermo, basta. The app also stops the arm on its own when it hears these words.
 - arm_home: "park", "go home", "torna a casa".
+- jog_relative: a short relative move such as "move backward 3 mm" or "sposta a sinistra di 2 cm". Pass the direction and the distance in millimetres exactly as heard. You cannot set the motion mode, the speed, or the workspace. Say the tool's reason, including when the move was rejected.
 - {dog_line}
 
 # Safety
-The arm only points; it never grabs. describe_table and select_object never move it. Pointing happens only when you call point_at_found after find_object. If a tool returns an error or "blocked", say so and do not retry by yourself."""
+The arm only points; it never grabs. describe_table and select_object never move it. Pointing happens only when you call point_at_found after find_object. jog_relative is checked by the motion gateway and may be refused. You cannot turn on hardware or change a safety limit. stop_arm holds position in software; it is not the physical emergency stop. If a tool returns an error, "rejected", or "blocked", say the reason and do not retry by yourself."""
 
 
 def tools(dog: bool) -> list[dict]:
@@ -90,7 +91,14 @@ def tools(dog: bool) -> list[dict]:
         {"type": "function", "name": "watch_line",
          "description": "Start or stop watching the cleared line continuously; an alarm sounds if anything changes.",
          "parameters": {"type": "object", "properties": {"on": {"type": "boolean"}}, "required": ["on"]}},
-        {"type": "function", "name": "stop_arm", "description": "Stop the arm immediately and hold position.",
+        {"type": "function", "name": "jog_relative",
+         "description": "Request a short relative move in the robot base frame. The gateway may reject it. "
+                        "You cannot pass a mode, a speed, or a limit. Say the returned reason.",
+         "parameters": {"type": "object", "properties": {
+             "direction": {"type": "string", "enum": ["forward", "backward", "left", "right", "up", "down"]},
+             "distance_mm": {"type": "number"}}, "required": ["direction", "distance_mm"]}},
+        {"type": "function", "name": "stop_arm",
+         "description": "Hold the arm where it is. This is a software stop, not the physical emergency stop.",
          "parameters": {"type": "object", "properties": {}}},
         {"type": "function", "name": "arm_home", "description": "Park the arm out of the camera's view.",
          "parameters": {"type": "object", "properties": {}}},

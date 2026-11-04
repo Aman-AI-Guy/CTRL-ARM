@@ -19,7 +19,7 @@ GROUPS = {
     "finds": {"find", "find_all", "judge", "failure", "inventory"},
     "clearance": {"reference", "change_check", "signoff", "record_pdf", "judge_check", "labels", "batch", "zone"},
     "alarms": {"watch", "watch_alert", "watch_ack", "watch_false_alarm"},
-    "arm": {"arm_stop", "arm_home", "arm_point", "arm_tour", "arm_lift_tray", "arm_freedrive", "arm_compliant"},
+    "arm": {"arm_stop", "arm_home", "arm_point", "arm_jog", "arm_tour", "arm_lift_tray", "arm_freedrive", "arm_compliant"},
     "setup": {"background", "source", "upload_scene", "calibration", "marker_from_arm", "preflight", "metrics_reset"},
     "voice": {"voice"},
     "dog": {"dog_search", "dog_stop"},

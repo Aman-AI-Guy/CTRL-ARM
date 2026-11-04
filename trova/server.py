@@ -18,7 +18,7 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from . import changes as chg
 from .arm import CartesianArm, SimArm, TaughtGridArm, load_poses, make_arm, save_pose
@@ -123,6 +123,13 @@ class LiftReq(BaseModel):
 class WatchReq(BaseModel):
     on: bool = True
     point: bool = False       # the arm points at the problem when the alarm goes off
+
+
+class JogReq(BaseModel):
+    """Spoken or typed relative move. Mode, speed, and limits are not fields: Grok cannot set them."""
+    model_config = ConfigDict(extra="forbid")
+    direction: str
+    distance_mm: float
 
 
 class VoiceLog(BaseModel):
@@ -474,6 +481,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "override": st.override is not None, "frame_size": size, "camera_error": st.camera_error,
             "background": st.background is not None, "calibration": st.calib.as_dict() if st.calib else None,
             "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
+            "motion": st.arm.gateway.public() if hasattr(st.arm, "gateway") else None,
             "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
             "camera_on_arm": st.camera_on_arm, "at_survey": st.at_survey(), "poses": load_poses(st.s.data_dir),
             "reference": None if not st.reference else {k: st.reference[k] for k in ("time", "path", "n_objects")},
@@ -964,6 +972,38 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         st.start_arm(st.arm.home, job="home")
         st.audit.event("arm_home")
         return st.arm.status()
+
+    @app.post("/api/arm/jog")
+    def api_arm_jog(body: JogReq):
+        """Relative jog in the robot base frame. The gateway keeps the requested millimetres and says why if it refuses."""
+        gateway = getattr(st.arm, "gateway", None)
+        if gateway is None:
+            raise HTTPException(400, "this arm has no motion gateway")
+        planned = gateway.plan_relative(body.direction, body.distance_mm, execute=False)
+        if not planned.allow_motion:
+            st.audit.event("arm_jog", direction=body.direction, distance_mm=body.distance_mm,
+                           status=planned.status, ok=planned.ok, mode=planned.mode, reason=planned.reason)
+            return planned.as_dict()
+        holder: dict = {}
+
+        def go():
+            holder["decision"] = gateway.plan_relative(body.direction, body.distance_mm, execute=True)
+
+        if not st.start_arm(go, job="jog"):
+            planned.ok, planned.status, planned.allow_motion = False, "stopped", False
+            planned.reason = "STOP is latched. A software stop holds position; it is not the physical emergency stop."
+            st.audit.event("arm_jog", direction=body.direction, distance_mm=body.distance_mm,
+                           status=planned.status, ok=False, mode=planned.mode, reason=planned.reason)
+            return planned.as_dict()
+        if st.arm_thread is not None:
+            st.arm_thread.join(timeout=30)
+        decision = holder.get("decision", planned)
+        if "decision" not in holder:
+            decision.ok, decision.status, decision.allow_motion = False, "error", False
+            decision.reason = decision.reason or "the jog did not finish"
+        st.audit.event("arm_jog", direction=body.direction, distance_mm=body.distance_mm,
+                       status=decision.status, ok=decision.ok, mode=decision.mode, reason=decision.reason)
+        return decision.as_dict()
 
     @app.post("/api/arm/point")
     def api_arm_point(p: Point):

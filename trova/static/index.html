@@ -233,6 +233,12 @@ async function runSpoken(text) {
   if (S && S.pending_select && (p.cmd === 'find' || p.cmd === 'select')) return selectSpoken(p.text || text);
   if (p.cmd === 'find' && S && S.pending_question) return answer(text);   // the answer to Trova's question
   if (p.cmd === 'select') return selectSpoken(p.text);
+  if (p.cmd === 'jog') {
+    const d = await json('/api/arm/jog', {direction: p.direction, distance_mm: p.distance_mm});
+    $('pttinfo').textContent = d.reason || d.status;
+    if (speakOn()) TrovaSpeech.say(d.reason || '', $('pttlang').value);
+    return;
+  }
   if (p.cmd === 'find' || p.cmd === 'find_all') { $('q').value = p.text; return p.cmd === 'find' ? doFind() : doFindAll(); }
   if (p.cmd === 'room') { $('q').value = p.text; return lookAround(); }
   const run = {check: doCheck, labels: readLabels, reference: saveRef,
@@ -479,7 +485,7 @@ async function refresh() {
   if (!refresh.langSet && S.lang === 'it') { $('pttlang').value = 'it-IT'; } refresh.langSet = true;
   const m = $('mode'); m.textContent = S.mock ? 'MOCK Grok' : S.grok.offline ? 'OFFLINE: Grok unreachable' : 'LIVE ' + S.grok.model;
   m.className = 'badge ' + (S.mock || S.grok.offline ? 'mock' : 'live'); m.title = S.grok.last_error || '';
-  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
+  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.motion_mode ? ' · ' + S.arm.motion_mode : '') + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
   $('armst').title = S.arm_blocked || ''; $('armst').style.color = S.arm_blocked ? 'var(--warn)' : '';
   $('srcinfo').textContent = 'source: ' + S.source.kind + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
   if (S.camera_on_arm) $('srcinfo').textContent += S.at_survey ? ' · arm camera at the survey pose' : ' · arm camera: moving view';

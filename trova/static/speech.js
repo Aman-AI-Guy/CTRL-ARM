@@ -15,6 +15,20 @@ const TrovaSpeech = (() => {
     ['home', /\b(go home|park the arm|vai a casa|parcheggia)\b/],
   ];
   const ALL = /\b(all the|every|tutti i|tutte le|tutti gli)\b/;
+  // A jog needs a direction and a distance unit. "number 2" and "seleziona…" do not match.
+  const JOG = /\b(backward|back|forward|left|right|up|down|indietro|avanti|sinistra|destra|giù|giu|su)\b.{0,40}?\b(\d+(?:\.\d+)?|one|two|three|four|five|uno|due|tre|quattro|cinque)\s*(mm|millimeters|millimetres|millimeter|millimetre|cm|centimeters|centimetres|centimeter|centimetre|centimetri|centimetro)\b/;
+
+  function jogCommand(t) {
+    const m = t.match(JOG);
+    if (!m) return null;
+    const dir = {backward: 'backward', back: 'backward', forward: 'forward', left: 'left', right: 'right',
+      up: 'up', down: 'down', indietro: 'backward', avanti: 'forward', sinistra: 'left', destra: 'right',
+      su: 'up', giu: 'down', 'giù': 'down'};
+    const words = {one: 1, two: 2, three: 3, four: 4, five: 5, uno: 1, due: 2, tre: 3, quattro: 4, cinque: 5};
+    let value = Object.prototype.hasOwnProperty.call(words, m[2]) ? words[m[2]] : parseFloat(m[2]);
+    if (m[3].charAt(0) === 'c') value *= 10;
+    return {cmd: 'jog', direction: dir[m[1]], distance_mm: Math.round(value)};
+  }
   const ROOM = /\b(look around( the room)?( for)?|in the room|guarda (in giro|intorno)( per)?|nella stanza)\b/g;
 
   function parse(text, stopWords) {
@@ -27,6 +41,8 @@ const TrovaSpeech = (() => {
     const sel = q.match(/^(seleziona|select|scegli|choose)\s+(.+)$/);
     if (sel) return {cmd: 'select', text: sel[2]};
     if (/^(oggetto|object)\s+\d+$/.test(q)) return {cmd: 'select', text: q};
+    const jog = jogCommand(t);
+    if (jog) return jog;   // only a direction plus a distance unit; "number 2" stays a find
     if (!q) return {cmd: 'none'};
     return {cmd: ALL.test(t) ? 'find_all' : 'find', text: q};
   }

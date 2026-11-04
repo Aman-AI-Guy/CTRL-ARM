@@ -76,12 +76,17 @@ def main():
     finally:
         arm.disconnect()
 
-    print("\nNO MOTION SENT.")
+    print("\nNO MOTION SENT. This script does not enable motors or change the controller mode.")
+    print("A voice STOP is not a safety-rated emergency stop. Use the physical e-stop.")
     if cmd.action == "move":
-        print(f"Requested: {cmd.distance_mm} mm {cmd.direction}.")
-        print("Direction is NOT mapped to xArm base coordinates or safety-validated yet.")
+        from trova.motion import MotionGateway
+        decision = MotionGateway.standalone().plan_relative(
+            cmd.direction, cmd.distance_mm, pose=tuple(pose[:3]), execute=False)
+        print(f"Requested: {cmd.distance_mm} mm {cmd.direction} (robot base frame).")
+        print("Gateway proposal (dry-run, nothing was sent):")
+        print(json.dumps(decision.as_dict(), indent=2))
     elif cmd.action == "stop":
-        print("Voice STOP was parsed, but this read-only preview is NOT an emergency-stop controller.")
+        print("Voice STOP was parsed. This read-only preview does not stop the arm.")
 
 
 if __name__ == "__main__":

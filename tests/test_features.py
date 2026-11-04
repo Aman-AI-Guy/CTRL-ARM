@@ -539,7 +539,8 @@ def test_browser_speech_commands():
             "all the pens", "tutte le forbici", "where is the red mug", "something to write with", "save the reference",
             "look around for the red umbrella", "guarda in giro per la borsa nera",
             "fai una foto e dimmi quali oggetti vedi", "what do you see", "seleziona la seconda penna blu",
-            "oggetto 3", "number 2"]
+            "oggetto 3", "number 2", "Move backward by 3 millimeters",
+            "Sposta il braccio a sinistra di 2 cm"]
     js = ("const S = require(process.argv[1]); const [said, sw] = JSON.parse(process.argv[2]);"
           "console.log(JSON.stringify(said.map(t => S.parse(t, sw))));")
     out = subprocess.run([node, "-e", js, str(STATIC / "speech.js"), json.dumps([said, STOP_WORDS])],
@@ -562,6 +563,8 @@ def test_browser_speech_commands():
     assert got["seleziona la seconda penna blu"] == {"cmd": "select", "text": "la seconda penna blu"}
     assert got["oggetto 3"] == {"cmd": "select", "text": "oggetto 3"}
     assert got["number 2"] == {"cmd": "find", "text": "number 2"}   # a find clarification, not a new selection
+    assert got["Move backward by 3 millimeters"] == {"cmd": "jog", "direction": "backward", "distance_mm": 3}
+    assert got["Sposta il braccio a sinistra di 2 cm"] == {"cmd": "jog", "direction": "left", "distance_mm": 20}
 
 
 # ---------------------------------------------------------------- feature 13: audit trail page, tamper evidence

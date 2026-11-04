@@ -47,9 +47,13 @@ class TaughtGridArm(ArmDriver):
         self.samples: list[dict] = []   # {"x":, "y":, "q": [...]}
         self.home_q: list[float] | None = None
         self.state = "idle"
+        self.last_error: str | None = None
+        self.last_motion = None
         self.tip: list[float] | None = None
         self._stop = threading.Event()
         self.load()
+        from ..motion import MotionGateway
+        self.gateway = MotionGateway.for_arm(self)
 
     # ----- teaching
     def record(self, x_mm: float, y_mm: float) -> dict:
@@ -87,6 +91,12 @@ class TaughtGridArm(ArmDriver):
         if self._stop.is_set():          # STOP latched until the server calls ready()
             self.state = "stopped"
             return False
+        decision = self.gateway.authorize_joints(q, 20.0, source="taught_grid")
+        self.last_motion = decision
+        if not decision.allow_motion:
+            self.state = "stopped" if decision.status == "stopped" else ("idle" if decision.status == "dry_run" else "refused")
+            self.last_error = None if decision.status == "dry_run" else decision.reason
+            return False
         self.state = "moving"
         ok = self.backend.move_joints(q, self.duration_s, self._stop)
         self.state = "idle" if ok else "stopped"
@@ -108,7 +118,9 @@ class TaughtGridArm(ArmDriver):
 
     def status(self) -> dict:
         return {"name": self.name, "state": self.state, "tip_mm": self.tip, "taught_poses": len(self.samples),
-                "home_taught": self.home_q is not None, "simulated": False}
+                "home_taught": self.home_q is not None, "simulated": False,
+                "error": self.last_error, "motion_mode": self.gateway.mode, "collision_avoidance": False,
+                "software_stop_is_not_safety_rated": True}
 
 
 class FakeJointBackend(JointBackend):

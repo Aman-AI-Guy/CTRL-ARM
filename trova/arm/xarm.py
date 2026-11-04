@@ -29,7 +29,8 @@ class XArmBackend(CartesianBackend):
         self.lock = threading.Lock()
         self.accel = accel_mm_s2
         self.arm = XArmAPI(ip, is_radian=False)
-        self.clear_errors()
+        # Read-only connect: do not clear errors, enable the motors, or set the state.
+        # The operator does that from "Clear arm errors", or the voice CLI does it only after MOVE.
         tcp = os.getenv("TROVA_ARM_TCP_MM", "").strip()
         if tcp:      # the pointer / printed tool: positions then refer to its tip, not the flange
             x, y, z = (float(v) for v in tcp.split(","))
@@ -38,6 +39,10 @@ class XArmBackend(CartesianBackend):
         self.yaw = pose[5] if code == 0 and pose else 0.0
 
     def move_linear(self, x, y, z, speed_mm_s):
+        from ..motion import require_ticket
+        ticket = require_ticket()
+        speed_mm_s = min(float(speed_mm_s), ticket.max_speed_mm_s)
+        accel = min(self.accel, ticket.max_accel_mm_s2)
         with self.lock:
             if self.arm.get_is_moving():          # the SDK queues moves: flush before retargeting
                 self._halt()
@@ -47,11 +52,14 @@ class XArmBackend(CartesianBackend):
             flat = code == 0 and pose and abs(abs(pose[3]) - 180) < 3 and abs(pose[4]) < 3
             extra = {} if flat else {"motion_type": 2}
             code = self.arm.set_position(x=x, y=y, z=z, roll=180, pitch=0, yaw=self.yaw, speed=speed_mm_s,
-                                         mvacc=self.accel, wait=False, **extra)
+                                         mvacc=accel, wait=False, **extra)
         if code != 0:
             raise RuntimeError(f"xArm set_position returned code {code} (error {self.arm.error_code})")
 
     def move_joints(self, q, speed_deg_s):
+        from ..motion import require_ticket
+        ticket = require_ticket()
+        speed_deg_s = min(float(speed_deg_s), ticket.max_joint_speed_deg_s)
         with self.lock:
             if self.arm.get_is_moving():
                 self._halt()
@@ -94,6 +102,8 @@ class XArmBackend(CartesianBackend):
         return tuple(pose[:3])
 
     def freedrive(self, on: bool):
+        from ..motion import require_ticket
+        require_ticket()
         with self.lock:
             self.arm.set_mode(2 if on else 0)
             self.arm.set_state(0)
