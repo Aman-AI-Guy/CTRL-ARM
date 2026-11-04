@@ -61,6 +61,18 @@ suggestions to agree with staff.
       slightly brake and fall" (p. 20), so the tip **sags** a little. Recover by twisting the button in the arrow
       direction (the power light comes on), then enable the arm (p. 20).
 
+## 1b. The physical setup (from the photo of the team's xArm 5)
+
+- [ ] **The base is bolted or clamped** to the table, not just resting on the board under it.
+- [ ] **There is a tip to measure from.** The flange carries only the camera dome. Fit a thin pointer, or pick one
+      fixed point on the dome as the tip. Measure it from the flange centre for the TCP offset. Calibration, the
+      dry test and every ruler error are measured to this point.
+- [ ] **The camera cable is routed and secured** along the arm, with slack for a full turn of joint 1, so it cannot
+      snag during homing.
+- [ ] **The reach circle is clear** (700 mm around the base). Move out the power strip, chargers, cups, the mouse and
+      the boxes, so only the test objects remain. Keep the emergency-exit walkway outside the reach.
+- [ ] **The E-stop is within the operator's reach**: control box button, or a remote button on a cable.
+
 ## 2. Measure and set the environment (you)
 
 Put these in `.env`. Measure each value on the real arm; never copy them from an example.
@@ -98,6 +110,9 @@ curl -s -X POST "localhost:8000/api/arm/reset?token=$TROVA_TOKEN" -H "x-trova-op
 ## 3. Survey pose and calibration (you, arm in manual mode)
 
 - [ ] Move the arm by hand until the camera sees the whole table. Then Setup → **Teach survey pose here**.
+- [ ] Print the ArUco markers **flat**, taped onto the same surface the objects stand on. Don't use the raised blocks
+      or cube faces: a marker above the surface, seen at an angle, adds parallax error. All 4 must be visible
+      from the survey pose.
 - [ ] Touch the centre of each ArUco marker (0-3) with the tip. Use **Record marker from arm** for each one.
 - [ ] Return to the survey pose (**Arm home**). Then **Calibrate (ArUco)**. The result must show `source
       aruco_robot`, an error ≤ 8 mm and a `pose` equal to the survey pose.
