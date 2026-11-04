@@ -577,3 +577,52 @@ def test_find_all_and_tour(tmp_path, monkeypatch):
     r = c.post("/api/find_all", data={"text": "all the blue things", "move": "false"}).json()
     assert not r["moved"] and c.post("/api/arm/point_last").json()["targets"] == r["targets"]
     assert "find_all" in [x["name"] for x in c.get("/api/voice/config").json()["session"]["tools"]]
+
+
+def test_no_request_models_inside_create_app():
+    """FastAPI cannot resolve pydantic models defined inside create_app (postponed annotations)."""
+    import re
+    src = open("trova/server.py").read()
+    assert re.findall(r"\n    class \w+\(BaseModel\)", src) == []
+
+
+def test_voice_log_endpoint(tmp_path, monkeypatch):
+    app, c = _client(tmp_path, monkeypatch)
+    assert c.post("/api/voice/log", json={"who": "you", "text": "trova la tazza rossa"}).json()["ok"]
+    assert any(e["kind"] == "voice" for e in c.get("/api/log").json())
+
+
+# ---------------------------------------------------------------- feature 7: tray lift (experimental)
+def test_tray_lift_waypoints_safety_and_stop(tmp_path, monkeypatch):
+    import threading
+    import time
+    from trova.arm import CartesianArm, FakeCartesian, Limits
+    from trova.arm.skills import TrayParams, waypoints
+    p = TrayParams(z_slot=30, insert=40, lift=40, standoff=60, approach=(0.0, 1.0))
+    wps = waypoints((300, 0), (450, 100), 150, p)
+    assert wps[3][1:] == (300, 0, 30)              # fork fully in under the pick centre, at slot height
+    assert wps[2][1:] == (300, -40, 30)            # entered along +y
+    assert max(w[3] for w in wps) == 150 and wps[6][1:3] == (450, 100)
+    fake = FakeCartesian(start=(300, -100, 150))
+    arm = CartesianArm(fake, 150, None, Limits.parse("100,600,-300,300,20,400"), speed_mm_s=4000)
+    assert arm.run_waypoints(wps) and len(fake.history) == len(wps)
+    low = CartesianArm(FakeCartesian(), 150, None, Limits.parse("100,600,-300,300,50,400"), speed_mm_s=4000)
+    assert not low.run_waypoints(wps) and "outside" in low.last_error       # refused BEFORE moving
+    assert low.backend.history == []
+    slow = CartesianArm(FakeCartesian(start=(300, -100, 150)), 150, None, None, speed_mm_s=60)
+    th = threading.Thread(target=slow.run_waypoints, args=(wps,))
+    th.start()
+    time.sleep(0.5)
+    slow.stop()
+    th.join(timeout=3)
+    assert slow.state == "stopped" and len(slow.backend.history) < len(wps)
+
+    app, c = _client(tmp_path, monkeypatch)
+    c.post("/api/background", data={"mode": "capture"})
+    assert c.post("/api/arm/lift_tray", json={"place_u": 600, "place_v": 400}).status_code == 403   # off by default
+    monkeypatch.setenv("TROVA_ALLOW_LIFT", "1")
+    colors = [o.split()[0] for o in c.get("/api/state").json()["source"]["objects"]]
+    unique = next(col for col in colors if colors.count(col) == 1)
+    c.post("/api/find", data={"text": f"the {unique} one", "move": "false"})
+    r = c.post("/api/arm/lift_tray", json={"place_u": 600, "place_v": 400}).json()
+    assert r["ok"] and r["waypoints"] == 12

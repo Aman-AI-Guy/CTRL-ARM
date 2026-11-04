@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from . import changes as chg
 from .arm import CartesianArm, SimArm, TaughtGridArm, make_arm
+from .arm.skills import TrayParams, lift_allowed, waypoints as tray_waypoints
 from .audit import AuditLog
 from .boxes import Box
 from .calibration import Calibration, calibrate_aruco, load_marker_positions, make_marker_sheet
@@ -85,6 +86,18 @@ class Label(BaseModel):
     u: float | None = None
     v: float | None = None
     absent: bool = False
+
+
+class LiftReq(BaseModel):
+    place_u: float
+    place_v: float
+    pick_u: float | None = None     # default: the object of the last find
+    pick_v: float | None = None
+
+
+class VoiceLog(BaseModel):
+    who: str
+    text: str
 
 
 class State:
@@ -251,6 +264,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "last_check": None if not st.last_check else {k: v for k, v in st.last_check.items() if k != "objects"},
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
             "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
+            "lift_allowed": lift_allowed(),
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
             "metrics": {**{k: v for k, v in m.items() if k != "find_times"}, "find_judged": judged,
@@ -652,6 +666,32 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         st.audit.event("arm_point", x_mm=x, y_mm=y)
         return {"x_mm": round(x, 1), "y_mm": round(y, 1)}
 
+    @app.post("/api/arm/lift_tray")
+    def api_lift_tray(r: LiftReq):
+        """Feature 7 (experimental): lift the slotted tray under an object with the fork and set it down elsewhere."""
+        if not lift_allowed():
+            return JSONResponse({"error": "Tray lifting is off. Measure TROVA_TRAY_Z_SLOT_MM and TROVA_TRAY_APPROACH "
+                                          "on the real tray with staff, then set TROVA_ALLOW_LIFT=1."}, 403)
+        if not hasattr(st.arm, "run_waypoints"):
+            raise HTTPException(400, f"Arm '{st.arm.name}' has no waypoint support")
+        if st.arm_blocked():
+            return JSONResponse({"error": st.arm_blocked(), "blocked": True}, 409)
+        if r.pick_u is None:
+            lf = st.last_find
+            if not lf or not lf.get("table_mm"):
+                raise HTTPException(400, "Find the object first, or give pick_u, pick_v")
+            pick = tuple(lf["table_mm"])
+        else:
+            pick = st.calib.pixel_to_table(r.pick_u, r.pick_v)
+        place = st.calib.pixel_to_table(r.place_u, r.place_v)
+        z_hover = getattr(st.arm, "z", 150.0)
+        wps = tray_waypoints(pick, place, z_hover, TrayParams.from_env())
+        st.start_arm(st.arm.run_waypoints, wps)
+        st.audit.event("arm_lift_tray", pick=[round(v, 1) for v in pick], place=[round(v, 1) for v in place],
+                       waypoints=[[w[0]] + [round(v, 1) for v in w[1:]] for w in wps])
+        return {"ok": True, "pick_mm": [round(v, 1) for v in pick], "place_mm": [round(v, 1) for v in place],
+                "waypoints": len(wps)}
+
     @app.post("/api/arm/teach")
     def api_arm_teach(p: Point):
         if not isinstance(st.arm, TaughtGridArm):
@@ -820,10 +860,6 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             return voice_cfg.mint_token(st.s.xai_api_key)
         except Exception as e:  # noqa: BLE001
             return fail(e, "voice")
-
-    class VoiceLog(BaseModel):
-        who: str
-        text: str
 
     @app.post("/api/voice/log")
     def api_voice_log(v: VoiceLog):

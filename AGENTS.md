@@ -43,7 +43,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | 4. Full-screen jury scoreboard | Done, tested | `static/jury.html`, `GET /jury`, `POST /api/metrics/reset` | Found x/N, median find time, false alarms, checks; latest request + verdict; live camera. Reset before the demo. Link "scoreboard" in the UI header |
 | 5. Failure log (cause of each wrong find) | Done, tested | `failures.py`, `/api/label`, `/api/judge` (cause), `GET /api/failures`, `run_eval.py failures` | Causes: missed_box (P2), wrong_pick / said_not_found / picked_absent_object / asked_unnecessarily / slow (P3), arm_missed (P1). Stored in `data/cases/failures.jsonl`. Clicking outside every box now records missed_box instead of an error |
 | 6. "Point at all the X" | Done, tested (mock) | `finder.find_all`, `POST /api/find_all`, `State.run_tour`, UI "Find all", voice tool `find_all` | Grok returns every matching box; the arm visits each (1 s pause). STOP ends the tour. With move=false, `/api/arm/point_last` starts the tour after a yes |
-| 7. Tray lift with the fork (experimental) | Planned | | |
+| 7. Tray lift with the fork (experimental) | Done, tested vs fake robot; OFF by default | `arm/skills.py`, `run_waypoints` (Cartesian + sim), `POST /api/arm/lift_tray`, UI after a find | 12 straight moves: approach, slot height, fork in, lift, carry, set down, fork out, up. Whole path checked against the safety box before moving; STOP aborts. Enable with `TROVA_ALLOW_LIFT=1` only after measuring `TROVA_TRAY_Z_SLOT_MM` and `TROVA_TRAY_APPROACH` on the real tray with staff |
 
 ## Architecture (data flow)
 
@@ -66,6 +66,8 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 4. **English and Italian**: prompts answer in the language of the request; reports follow `TROVA_LANG`.
 5. **Everything is logged** to `data/events.jsonl` with saved images in `data/runs/` (traceability for the jury).
 6. `data/` and `.env` are never committed. Copy the final test set to `eval/data/` before the deadline.
+7. **Request models (pydantic) live at module level in `server.py`**, never inside `create_app`: FastAPI cannot
+   resolve them under postponed annotations (a test enforces this).
 
 ## Module map
 
@@ -101,6 +103,7 @@ Record: `GET /api/report.pdf` (PDF of the last check; copy in data/records/)
 Jury: `GET /jury` (scoreboard page) · `POST /api/metrics/reset`
 Failures: `GET /api/failures` (counts by cause, owner, next fix) · `POST /api/judge` takes `cause` (arm_missed)
 Find all: `POST /api/find_all` (text, move) · `/api/arm/point_last` also starts a pending tour
+Tray: `POST /api/arm/lift_tray` (place_u, place_v; pick defaults to the last find; 403 unless TROVA_ALLOW_LIFT=1)
 Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` · `/api/demo/hand`
 
 ## Known gaps
@@ -111,6 +114,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 7: experimental tray lift with the fork (waypoint skill, off by default). Fixed /api/voice/log (request model was inside create_app) and added a test that forbids it.
 - 2026-11-04 Feature 6: point at all matching objects (find_all + arm tour), UI button and voice tool.
 - 2026-11-04 Feature 5: failure log with automatic cause and owner per wrong find; failures report in run_eval.py; UI 'arm missed' button.
 - 2026-11-04 Feature 4: full-screen jury scoreboard at /jury; median find time in state metrics.

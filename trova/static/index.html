@@ -132,13 +132,14 @@ live.addEventListener('click', ev => {
   if (clickMode === 'teach') return json('/api/arm/teach', {u, v});
   if (clickMode === 'armcal') return json('/api/calibration/arm_click', {u, v});
   if (clickMode === 'zone') return json('/api/zones/point', {u, v});
+  if (clickMode === 'place') { setClick(null); return json('/api/arm/lift_tray', {place_u: u, place_v: v}); }
   if (clickMode === 'calib') {
     const t = prompt('Table coordinates of this point in mm, as x,y (e.g. 0,0)'); if (!t) return;
     const [x, y] = t.split(',').map(Number); return json('/api/calibration/click', {u, v, x_mm: x, y_mm: y});
   }
 });
 function setClick(m) { clickMode = clickMode === m ? null : m; const el = $('clickmode');
-  el.className = 'mode' + (clickMode ? ' on' : ''); el.textContent = clickMode ? ({point: 'Click mode: the arm points where you click.', teach: 'Teach mode: move the arm tip by hand over a point, then click that point in the image.', calib: 'Calibration: click a point you measured, then type its mm coordinates. 4 or more points.', zone: 'Zone: click the corners of the area, then press Finish zone.', armcal: 'Arm calibration: put the tip ON the table (freedrive), then click the tip in the image. Repeat at 4-6 spread-out points.'})[clickMode] + ' (click the button again to stop)' : ''; }
+  el.className = 'mode' + (clickMode ? ' on' : ''); el.textContent = clickMode ? ({point: 'Click mode: the arm points where you click.', teach: 'Teach mode: move the arm tip by hand over a point, then click that point in the image.', calib: 'Calibration: click a point you measured, then type its mm coordinates. 4 or more points.', place: 'Tray lift: click where the tray should go. STOP aborts.', zone: 'Zone: click the corners of the area, then press Finish zone.', armcal: 'Arm calibration: put the tip ON the table (freedrive), then click the tip in the image. Repeat at 4-6 spread-out points.'})[clickMode] + ' (click the button again to stop)' : ''; }
 
 function photoChosen() { photoFile = $('photo').files[0] || null; $('photoname').textContent = photoFile ? 'photo ready' : ''; }
 
@@ -154,7 +155,8 @@ function showFind(d) {
   const r = d.result, el = $('findres'); el.className = 'result show st-' + r.status;
   let h = '';
   if (r.status === 'found') h = `<div class="big">Found: ${esc(r.label)}</div><div>${esc(r.reason)}</div>` +
-      (!d.moved && !d.arm_blocked && d.table_mm ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at it</button></div>` : '');
+      (!d.moved && !d.arm_blocked && d.table_mm ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at it</button></div>` : '') +
+      (S && S.lift_allowed && d.table_mm ? `<div class="row"><button onclick="setClick('place')">Lift its tray: click where to put it</button></div>` : '');
   else if (r.status === 'clarify') {
     h = `<div class="big">${esc(r.clarifying_question)}</div><div class="row">` + r.candidate_ids.map(i => `<button onclick="answer('numero ${i}')">${i}</button>`).join('') +
         `<input type="text" id="ans" placeholder="or answer in words" onkeydown="if(event.key==='Enter')answer(this.value)"></div>`;
@@ -272,7 +274,7 @@ async function refresh() {
   try { S = await (await fetch('/api/state')).json(); } catch { return; }
   frameSize = S.frame_size;
   const m = $('mode'); m.textContent = S.mock ? 'MOCK Grok' : 'LIVE ' + S.grok.model; m.className = 'badge ' + (S.mock ? 'mock' : 'live');
-  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.error ? ' · ' + S.arm.error : '');
+  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '');
   $('srcinfo').textContent = 'source: ' + S.source.kind + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
   $('bginfo').textContent = S.background ? 'set' : 'not set';
   $('calinfo').textContent = S.calibration ? `${S.calibration.source}, err ${S.calibration.error_mm ?? '–'} mm` + (S.click_points.length ? `, ${S.click_points.length} clicks` : '') : '';

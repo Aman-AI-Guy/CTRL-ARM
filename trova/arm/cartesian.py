@@ -85,6 +85,7 @@ class CartesianArm(ArmDriver):
         self.timeout = timeout_s
         self.state = "idle"
         self.last_error: str | None = None
+        self.step: str | None = None
         self._stop = threading.Event()
 
     def _go(self, x: float, y: float, z: float) -> bool:
@@ -129,6 +130,25 @@ class CartesianArm(ArmDriver):
     def point_at(self, x_mm: float, y_mm: float) -> bool:
         return self._go(x_mm, y_mm, self.z)
 
+    def run_waypoints(self, wps: list[tuple], speed_factor: float = 0.5) -> bool:
+        """Feature 7: a fixed sequence of straight moves (label, x, y, z). Stops at the first refusal or stop.
+        All waypoints are checked against the safety box BEFORE the first move."""
+        if self.limits:
+            for label, x, y, z in wps:
+                err = self.limits.check(x, y, z)
+                if err:
+                    self.state, self.last_error = "refused", f"{label}: {err}"
+                    return False
+        speed, self.speed = self.speed, self.speed * speed_factor
+        try:
+            for label, x, y, z in wps:
+                self.step = label
+                if not self._go(x, y, z):
+                    return False
+            return True
+        finally:
+            self.speed, self.step = speed, None
+
     def home(self) -> None:
         if self.home_mm:
             self._go(*self.home_mm)
@@ -152,7 +172,7 @@ class CartesianArm(ArmDriver):
         except Exception:  # noqa: BLE001
             tcp = None
         return {"name": self.name, "state": self.state, "tip_mm": tcp[:2] if tcp else None, "tcp_mm": tcp,
-                "z_hover_mm": self.z, "error": self.last_error, "simulated": isinstance(self.backend, FakeCartesian)}
+                "z_hover_mm": self.z, "error": self.last_error, "step": self.step, "simulated": isinstance(self.backend, FakeCartesian)}
 
 
 class FakeCartesian(CartesianBackend):
@@ -164,6 +184,7 @@ class FakeCartesian(CartesianBackend):
         self.target = list(start)
         self.speed = 100.0
         self.free = False
+        self.history: list[tuple] = []
         self._t = time.time()
         self._lock = threading.Lock()
 
@@ -182,6 +203,7 @@ class FakeCartesian(CartesianBackend):
         with self._lock:
             self._advance()
             self.target, self.speed = [x, y, z], speed_mm_s
+            self.history.append((x, y, z))
 
     def is_moving(self):
         with self._lock:

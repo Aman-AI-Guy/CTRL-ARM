@@ -19,6 +19,7 @@ class SimArm(ArmDriver):
         self.speed = speed_mm_s
         self.state = "idle"
         self.target: tuple[float, float] | None = None
+        self.step: str | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
 
@@ -48,10 +49,20 @@ class SimArm(ArmDriver):
     def point_at(self, x_mm: float, y_mm: float) -> bool:
         return self._move(x_mm, y_mm)
 
+    def run_waypoints(self, wps: list[tuple], speed_factor: float = 0.5) -> bool:
+        """Feature 7 in the simulator: the tip follows the XY path (height is not drawn)."""
+        for label, x, y, z in wps:
+            self.step = label
+            if not self._move(x, y):
+                self.step = None
+                return False
+        self.step = None
+        return True
+
     def stop(self) -> None:
         self._stop.set()
 
     def status(self) -> dict:
         with self._lock:
             return {"name": self.name, "state": self.state, "tip_mm": [round(v, 1) for v in self.tip],
-                    "target_mm": list(self.target) if self.target else None, "simulated": True}
+                    "target_mm": list(self.target) if self.target else None, "simulated": True, "step": self.step}
