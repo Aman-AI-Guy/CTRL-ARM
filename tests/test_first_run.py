@@ -296,3 +296,55 @@ def test_xarm_levelling_is_checked_with_the_controller_fk():
     b.arm = SDK(False)
     with pytest.raises(RuntimeError, match="does not level"):
         b.level_joints([10, 20, -50, 0, 5])
+
+
+def test_xarm_config_script_reads_by_default_and_never_moves():
+    from trova.arm import xarm_config
+
+    class FakeController:
+        tcp_offset, tcp_load, collision_sensitivity = [0] * 6, [0, [0, 0, 0]], 3
+        is_collision_rebound, self_collision_params, is_fence_mode = True, [False], False
+
+        def __init__(self, ip, moving=False):
+            self.calls, self.moving = [], moving
+
+        def __getattr__(self, name):                 # every setter / motion call is recorded
+            return lambda *a, **k: self.calls.append((name, a)) or 0
+
+        def get_position(self):
+            return 0, [300, 0, 300, 180, 0, 0]
+
+        def get_reduced_states(self):
+            return 0, [False, [0] * 6, 0, 0, []]
+
+        def get_mount_direction(self):
+            return 0, [0, 0]
+
+        def get_state(self):
+            return 0, 1 if self.moving else 4
+    made = []
+
+    def factory(ip, **kw):
+        made.append(FakeController(ip, **kw))
+        return made[-1]
+    limits = ["--limits", "0,600,-300,300,50,500"]
+    xarm_config.main(["192.168.1.111"] + limits, api_factory=factory)
+    assert [c for c, _ in made[-1].calls] == ["disconnect"]                 # read-only by default
+    xarm_config.main(["192.168.1.111", "--apply", "--tcp", "60,0,85", "--payload-kg", "0.25"] + limits,
+                     api_factory=factory, ask=lambda q: "YES")
+    calls = dict(made[-1].calls)
+    assert calls["set_tcp_offset"] == ([60, 0, 85, 0, 0, 0],) and calls["set_tcp_load"] == (0.25, [0, 0, 0])
+    assert calls["set_reduced_tcp_boundary"] == ([600, 0, 300, -300, 500, 50],)   # SDK order: max, min
+    assert calls["set_collision_sensitivity"] == (4,) and calls["set_collision_rebound"] == (False,)
+    assert [c for c, _ in made[-1].calls][-2:] == ["save_conf", "disconnect"]
+    motion = {"set_position", "set_servo_angle", "set_state", "set_mode", "motion_enable", "move_gohome",
+              "clean_error", "set_tool_position", "vc_set_cartesian_velocity", "vc_set_joint_velocity"}
+    assert not motion & {c for c, _ in made[-1].calls}
+    for bad, why in [(["--sensitivity", "2"], "not below 3"), (["--limits", "0,600,-300,300,50,250"], "outside"),
+                     ([], "Type YES")]:
+        args = ["192.168.1.111", "--apply"] + (limits if "--limits" not in bad else []) + bad
+        with pytest.raises(SystemExit, match="not below 3|outside|not applied"):
+            xarm_config.main(args, api_factory=factory, ask=lambda q: "no")
+        assert "save_conf" not in [c for c, _ in made[-1].calls], why
+    with pytest.raises(SystemExit, match="moving"):
+        xarm_config.main(["192.168.1.111", "--apply"] + limits, api_factory=lambda ip: factory(ip, moving=True))

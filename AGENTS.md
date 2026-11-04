@@ -103,7 +103,7 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 | `trova/finder.py` | P3 | Set-of-marks selection prompt + schema, clarification, direct fallback, mocks |
 | `trova/grok.py` | P3 | xAI Responses API client (vision + JSON schema), retries, field dropping, mock mode |
 | `trova/changes.py` | P4 | Diff, persistence, Grok verification, naive baseline |
-| `trova/arm/` | P1 | `base.py` interface; `cartesian.py` safety + reached check; `ur.py`, `elite.py`, `xarm.py`, `rtde_reader.py`; `sim.py`; `taught_grid.py` |
+| `trova/arm/` | P1 | `base.py` interface; `cartesian.py` safety + reached check; `ur.py`, `elite.py`, `xarm.py`, `rtde_reader.py`; `sim.py`; `taught_grid.py`; `xarm_config.py` (controller safety settings: read-only by default, `--apply` sets + saves, never moves) |
 | `trova/voice.py`, `trova/static/voice.js` | P5 | Grok Voice session config, tools, token; browser client |
 | `trova/dog.py`, `trova/dog_go2.py` | P5 | Optional dog route search (sim), Go2 template |
 | `trova/server.py`, `trova/static/index.html` | all | API + UI |
@@ -175,6 +175,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 `python -m trova.arm.xarm_config <ip>`: reads the xArm controller's safety settings; with `--apply` sets collision sensitivity (3-5), self-collision, rebound off, reduced-mode speeds, safety boundary from TROVA_ARM_LIMITS (refused if the tool is outside it), optional TCP offset and payload, after a typed YES, then save_conf and read-back. No motion calls. 150 offline tests pass.
 - 2026-11-04 First run stage 0: from a tilted survey pose, the flange is levelled in place (J4 = -(J2+J3), checked by controller FK) before stage 1, so stage 1 is a straight line. Joint moves are capped at 5°/s in that mode. 149 offline tests pass.
 - 2026-11-04 Arm camera is a Pi Zero 2 W streaming MJPEG over Wi-Fi: a stream URL (`http://...`) is now read by the live newest-frame reader with the 2 s stale check, not the video-file reader that repeated old frames. Runbook: network, camera-delay measurement, LED ring, Pi heat mode. 146 offline tests pass.
 - 2026-11-04 First-run runbook checked against the xArm 5 user manual: mounting, payload, collision sensitivity (≥3), self-collision, rebound, reduced mode (limits joint speed), safety boundary, E-stop sag and recovery, singularity near the base, joint error codes. Documented that stage 1 from a tilted survey pose is joint-planned, not straight. Docs only; 145 tests pass.
