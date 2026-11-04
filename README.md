@@ -22,6 +22,18 @@ Grok Hackathon at the Museum, Pavia, 4–5 November 2026. Track A, CTRL+F: SEA (
 | "Stop" | Plain code: the browser halts the arm on the word in the live transcript, plus STOP button and space bar | Never waits for a model turn |
 | Optional: search other rooms with the robot dog | Fixed route (code) + **Grok vision** at each stop | The one case the arm cannot reach |
 
+## Extra features (all built, see AGENTS.md for status)
+
+| Feature | How to use it |
+|---|---|
+| What's on the table? (inventory map) | Button next to Find, or ask the voice. Saving a reference also names its objects, so changes say *which* object |
+| Line-clearance zones | "Draw a zone", click corners, Finish: rule *must be empty* or *only these items*. Checked in every "what changed" |
+| PDF clearance record | "Download PDF" after a check; a copy goes to `data/records/` |
+| Jury scoreboard | Open `/jury` on the projector; "Reset score" before the demo |
+| Failure log | After "wrong", click the right object (or "not on the table", or "arm missed"): cause and owner are recorded; `python eval/run_eval.py failures` |
+| Point at all the X | Type "all the pens" and press "Find all", or ask the voice: the arm visits each match |
+| Tray lift with the fork (experimental, off) | `TROVA_ALLOW_LIFT=1` after measuring the tray with staff; after a find, "Lift its tray" and click the destination |
+
 ## Run it
 
 ```bash
@@ -83,6 +95,7 @@ trova/
 eval/run_eval.py measurements vs baselines
 experiments/grok_bbox_test.py   15-minute test: can Grok draw boxes on its own?
 tests/           offline tests
+AGENTS.md        shared state file: features, rules, API, changelog. Update it in every commit.
 ```
 
 ## Known limitations

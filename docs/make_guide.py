@@ -232,7 +232,8 @@ s.append(table([["Time", "Who", "What"],
                 ["09:30", "P4", "Start recording test cases: ask for an object, then press correct or wrong."],
                 ["First arm slot", "P1 (+ P2)", "Connect, first slow move, test STOP, calibrate (steps below)."],
                 ["13:00 target", "Everyone", "<b>First real find:</b> real camera, live Grok, real arm pointing."],
-                ["Afternoon", "Everyone", "Measure, tune, live voice test, rehearse. Record the backup video tonight."]],
+                ["Afternoon", "Everyone", "Measure, tune, live voice test, rehearse. Record the backup video tonight. "
+                 "For the demo: open <font face='Courier'>/jury</font> on the projector and reset the score."]],
                [24, 20, 130]))
 s.append(P("The first arm slot (P1, with museum staff)", h2))
 s += numbered([
@@ -287,6 +288,8 @@ s += numbered([
     "<b>Play with the demo</b> on your laptop (demo mode is the default): type \"the red one\" and press Find; press "
     "<i>+ add</i>, <i>Save reference</i>, <i>Check now</i>; open the record.",
     "<b>Read the README</b>, sections \"What Grok does\" and \"Layout\": they map every file to what it does.",
+    "<b>AGENTS.md</b> in the repo lists every feature, its status, the safety rules and the API. Update it in the "
+    "same commit whenever you change code.",
     "<b>The full team plan</b> (roles, schedule, risks, market): <link href='https://claude.ai/artifact/Xc5nfd5Q41HmeHHwScSxmb' color='#B4009E'>claude.ai/artifact/Xc5nfd5Q41HmeHHwScSxmb</link>"])
 s.append(P("Words you will hear", h2))
 s.append(table([["Term", "Meaning"],
