@@ -88,6 +88,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
       <label class="muted"><input type="checkbox" id="speak"> speak results</label><span class="muted" id="pttinfo"></span></div>
     <div id="vlog" class="muted" style="display:none;margin-top:8px;max-height:150px;overflow:auto;font-size:14px"></div>
     <div id="findres" class="result"></div>
+    <div id="approach" class="result"></div>
     <div class="row" style="margin-top:10px"><span class="muted">Jury:</span><button onclick="judge(true)">✓ correct</button><button onclick="judge(false)">✗ wrong</button><button onclick="armMissed()">arm missed</button><button id="absentbtn" style="display:none" onclick="label({absent:true})">not on the table</button></div>
   </div>
 
@@ -177,7 +178,7 @@ function showFind(d) {
   if (S) S.pending_question = r.status === 'clarify' ? r.clarifying_question : null;   // a spoken answer may come before the next poll
   let h = '';
   if (r.status === 'found') h = `<div class="big">Found: ${esc(r.label)}</div><div>${esc(r.reason)}</div>` +
-      (!d.moved && !d.arm_blocked && d.table_mm ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at it</button></div>` : '') +
+      (!d.moved && !d.arm_blocked && d.table_mm && !d.approach ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at it</button></div>` : '') +
       (S && S.lift_allowed && d.table_mm ? `<div class="row"><button onclick="setClick('place')">Lift its tray: click where to put it</button></div>` : '');
   else if (r.status === 'clarify') {
     h = `<div class="big">${esc(r.clarifying_question)}</div><div class="row">` + r.candidate_ids.map(i => `<button onclick="answer('numero ${i}')">${i}</button>`).join('') +
@@ -188,6 +189,26 @@ function showFind(d) {
   h += `<div class="thumbs"><a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>${d.query ? `<a href="/files/${d.query}" target="_blank"><img src="/files/${d.query}"></a>` : ''}</div>`;
   el.innerHTML = h;
   if (speakOn()) TrovaSpeech.say(TrovaSpeech.phraseFind(d, TrovaSpeech.italian(d.request || '')), sayLang(d.request));
+}
+
+// first supervised run (TROVA_FIRST_RUN=1): show everything before each confirmation; one confirmation per stage
+function showApproach() {
+  const a = S.approach, el = $('approach'), key = a ? a.stage + (a.confirm || '') + (a.problems || []).join() : '';
+  if (key === showApproach.key && !(a && a.confirm)) return;          // keep a half-typed ruler error
+  showApproach.key = key;
+  if (!a) { el.className = 'result'; el.innerHTML = ''; return; }
+  const [x, y] = a.target_mm, warn = `<div class="big" style="color:var(--bad)">${esc(a.warning)}</div>`;
+  const img = a.marked ? `<div class="thumbs"><a href="/files/${a.marked}" target="_blank"><img src="/files/${a.marked}"></a></div>` : '';
+  let h = warn + img;
+  if (a.stage === 'measure') h += `<div>Arrived at ${x}, ${y} mm, height ${a.z_mm} mm (controller reports ${esc((a.tcp_mm || []).join(', '))}). Measure the tip-to-object error with a ruler:</div>` +
+    `<div class="row"><input type="number" id="errmm" min="0" step="0.5" style="max-width:90px"> mm <button onclick="sendForm('/api/arm/measured_error',{error_mm: $('errmm').value})">Record error</button></div>`;
+  else {
+    const p = a.problems || [], what = a.stage === 1 ? 'Stage 1: HOVER above' : 'Stage 2: DESCEND to pointing height at';
+    h += `<div>${what} x ${x}, y ${y} mm · height ${a.z_mm} mm · ${a.distance_mm ?? '?'} mm from the current pose · ${a.speed_mm_s} mm/s</div>` +
+      (p.length ? `<div style="color:var(--warn)">Refused: ${esc(p.join('; '))}</div>` : '') +
+      (a.confirm ? `<div class="row"><button class="primary" ${p.length ? 'disabled' : ''} onclick='json("/api/arm/point_last", ${JSON.stringify({stage: a.stage, confirm: a.confirm, x_mm: x, y_mm: y})})'>Confirm stage ${a.stage}</button></div>` : '<div class="muted">moving…</div>');
+  }
+  el.className = 'result show'; el.innerHTML = h;
 }
 
 async function armMissed() { try { await json('/api/judge', {kind: 'find', correct: false, cause: 'arm_missed'}); } catch (e) {} }
@@ -450,7 +471,7 @@ async function refresh() {
   $('absentbtn').style.display = S.label_wait ? 'inline-block' : 'none';
   if (S.label_wait) { const el = $('clickmode'); el.className = 'mode on'; el.textContent = 'Wrong find: click the object that should have been found (even if it has no box), or press "not on the table".'; }
   else if (!clickMode) $('clickmode').className = 'mode';
-  showDog(); showWatch(); showRoom();
+  showDog(); showWatch(); showRoom(); showApproach();
   $('poseinfo').textContent = S.camera_on_arm ? (S.at_survey ? 'at the survey pose ✓' : 'away from the survey pose') +
     ` · survey ${S.poses.home_joints ? '✓' : '–'} · look ${S.poses.look_joints ? '✓' : '–'}` : 'off (TROVA_CAMERA_ON_ARM=1 to use)';
   $('batchinfo').textContent = S.batch && S.batch.lot ? 'current: LOT ' + S.batch.lot : 'no batch set';

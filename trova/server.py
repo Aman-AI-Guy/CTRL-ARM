@@ -49,6 +49,9 @@ from .proposals import drop_occluders, find_blobs, is_occluded
 
 STATIC = Path(__file__).parent / "static"
 SLOW_S = float(os.getenv("TROVA_SLOW_S", "8"))
+FIRST_RUN_MAX_SPEED = 20.0      # mm/s: the first supervised run never goes faster; env may only lower it
+CONFIRM_TTL_S = 60.0            # a first-run confirmation older than this is stale: find again
+COLLISION_WARNING = "Collision avoidance: NOT PRESENT. Hold the physical E-stop."
 # Captured before route locks/model calls; remains cancelled even after an operator reset.
 MOTION_TICKET: ContextVar[threading.Event | None] = ContextVar("motion_ticket", default=None)
 
@@ -132,6 +135,15 @@ class WatchReq(BaseModel):
 class VoiceLog(BaseModel):
     who: str
     text: str
+
+
+class Approach(BaseModel):
+    """First supervised run: confirm exactly the shown stage and target."""
+    stage: int
+    confirm: str
+    x_mm: float
+    y_mm: float
+    speed_mm_s: float | None = None
 
 
 class StopReset(BaseModel):
@@ -234,6 +246,13 @@ class State:
         self.batch = json.loads(self.batch_path.read_text()) if self.batch_path.exists() else {"lot": os.getenv("TROVA_BATCH", "")}
         self.labels: dict | None = None
         self.room: dict | None = None          # feature 14: last room scan (status, views, result)
+        # first supervised run on hardware: find -> confirm -> hover -> confirm -> descend -> measure (off by default)
+        self.first_run = os.getenv("TROVA_FIRST_RUN", "0").lower() in ("1", "true", "yes")
+        self.first_run_speed = min(FIRST_RUN_MAX_SPEED, float(os.getenv("TROVA_FIRST_RUN_SPEED_MM_S", "20")))
+        self.first_run_hover = float(os.getenv("TROVA_FIRST_RUN_HOVER_MM", "100"))
+        self.miss_mm = float(os.getenv("TROVA_ARM_MISS_MM", "10"))
+        if self.first_run and isinstance(self.arm, CartesianArm):
+            self.arm.speed = min(self.arm.speed, self.first_run_speed)   # every Cartesian move, home included
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
@@ -287,6 +306,88 @@ class State:
                 return (f"Calibrated at {self.calib.size[0]}x{self.calib.size[1]} but the camera now gives "
                         f"{self.frame_size[0]}x{self.frame_size[1]}: calibrate again")
         return None
+
+    def first_run_problems(self) -> list[str]:
+        """First supervised run: every item must hold or the mode refuses to move (also listed by preflight)."""
+        if not isinstance(self.arm, CartesianArm):
+            return ["Needs a Cartesian arm: TROVA_ARM=xarm:<ip> (cartesian:fake to rehearse)"]
+        p, c = [], self.calib
+        survey = self.arm.home_joints or self.arm.home_mm
+        if not c or c.source not in ("arm", "aruco_robot"):
+            p.append("Calibration: not made with the arm (touch the ArUco markers with the tip, then Calibrate (ArUco))")
+        else:
+            if not c.size or not self.frame_size or list(c.size) != list(self.frame_size):
+                p.append(f"Calibration: made at image size {c.size}, the camera now gives {self.frame_size}: calibrate again")
+            if self.camera_on_arm and not (survey and c.pose and len(c.pose) == len(survey)
+                                           and max(abs(a - b) for a, b in zip(c.pose, survey)) <= 0.01):
+                p.append("Calibration: made at a different survey pose (or none recorded): Calibrate (ArUco) again")
+        if not self.arm.limits:
+            p.append("Safety box: TROVA_ARM_LIMITS not set")
+        if not survey:
+            p.append("Home pose: not set")
+        if not (self.operator_name and self.operator_token):
+            p.append("Operator credentials: TROVA_OPERATOR_NAME / TROVA_OPERATOR_TOKEN not configured")
+        if self.stop_latched.is_set():
+            p.append("STOP is latched: operator reset required")
+        if not 0 < self.first_run_speed <= FIRST_RUN_MAX_SPEED or self.first_run_hover <= 0:
+            p.append("TROVA_FIRST_RUN_SPEED_MM_S must be in (0, 20] and TROVA_FIRST_RUN_HOVER_MM above 0")
+        return p
+
+    def approach_view(self) -> dict | None:
+        """What the operator sees before confirming: target, height, distance from the current pose, problems."""
+        ap = (self.pending_move or {}).get("approach")
+        if not ap:
+            return None
+        out = {k: v for k, v in ap.items() if k not in ("issued", "seq")}
+        try:
+            tcp = self.arm.tcp_mm()
+            out["distance_mm"] = round(sum((a - b) ** 2 for a, b in zip(tcp, [*ap["target_mm"], ap["z_mm"]])) ** 0.5, 1)
+        except Exception:  # noqa: BLE001
+            out["distance_mm"] = None
+        if ap["stage"] in (1, 2):
+            box = self.arm.limits.check(*ap["target_mm"], ap["z_mm"]) if self.arm.limits else None
+            out["problems"] = self.first_run_problems() + ([f"Safety box: {box}"] if box else [])
+        return out | {"marked": self.pending_move.get("marked"), "warning": COLLISION_WARNING}
+
+    def new_approach(self, stage, target_mm: list[float], **extra) -> dict:
+        """A single-use confirmation for exactly this stage and target, dead after STOP or CONFIRM_TTL_S."""
+        z = self.arm.z + self.first_run_hover if stage == 1 else self.arm.z
+        return {"stage": stage, "confirm": uuid.uuid4().hex if stage in (1, 2) else None, "target_mm": target_mm,
+                "z_mm": round(z, 1), "speed_mm_s": self.first_run_speed, "issued": time.time(),
+                "seq": self.stop_sequence, **extra}
+
+    def at_hover(self, ap: dict, tol_mm: float = 5.0) -> bool:
+        try:
+            tcp = self.arm.tcp_mm()
+        except Exception:  # noqa: BLE001
+            return False
+        return sum((a - b) ** 2 for a, b in zip(tcp, [*ap["target_mm"], ap["z_mm"] + self.first_run_hover])) ** 0.5 <= tol_mm
+
+    def run_approach(self, pm: dict, ap: dict, speed: float) -> None:
+        """Worker for one first-run stage: move, record target vs the pose the controller reports, then hand out
+        the next confirmation (stage 2) or ask for the measured error."""
+        x, y = ap["target_mm"]
+        if ap["stage"] == 2 and not self.at_hover(ap):     # rechecked here: nothing else moves while this runs
+            self.arm.state, self.arm.last_error = "refused", "not at this target's hover point: stage 2 refused"
+            ok = False
+        else:
+            ok = self.arm.approach(x, y, ap["z_mm"], speed)
+        try:
+            tcp = [round(v, 1) for v in self.arm.tcp_mm()]
+        except Exception:  # noqa: BLE001
+            tcp = None
+        off = round(sum((a - b) ** 2 for a, b in zip(tcp, [x, y, ap["z_mm"]])) ** 0.5, 1) if tcp else None
+        self.audit.event("arm_approach", stage=ap["stage"], target_mm=[x, y, ap["z_mm"]], tcp_mm=tcp, offset_mm=off,
+                         reached=ok, speed_mm_s=speed, error=getattr(self.arm, "last_error", None), find=pm.get("event_id"))
+        with self.safety_lock:
+            if self.pending_move is not pm:
+                return                             # a newer find replaced this target
+            if not ok or self.stop_latched.is_set():
+                pm["approach"] = None              # STOP / refusal / miss: start again from a new find
+            elif ap["stage"] == 1:
+                pm["approach"] = self.new_approach(2, ap["target_mm"])
+            else:
+                pm["approach"] = self.new_approach("measure", ap["target_mm"], tcp_mm=tcp, offset_mm=off)
 
     def motion_ticket(self, ticket=None) -> threading.Event:
         request_ticket = MOTION_TICKET.get()
@@ -349,6 +450,8 @@ class State:
     def start_arm(self, fn, *args, since: float | None = None, job: str = "point",
                   pixels: bool = True, ticket=None, wait: bool = False, guard=None) -> bool:
         """Admit one guarded motion; blocked/cancelled commands raise ArmBusy (HTTP 409)."""
+        if self.first_run and job not in ("home", "approach"):
+            raise ArmBusy("First supervised run mode: only the two-stage approach and Arm home may move the arm")
         ticket = self.motion_ticket(ticket)
         with self.arm_lock:
             if guard is not None and not guard():
@@ -697,7 +800,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
             "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
             "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(), "batch": st.batch, "room": st.room,
-            "light": st.light.status(),
+            "light": st.light.status(), "first_run": st.first_run, "approach": st.approach_view() if st.first_run else None,
             "labels": None if not st.labels else {k: v for k, v in st.labels.items() if k != "codes"},
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
@@ -729,7 +832,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if res.status == "found" and st.calib and st.calib.ok:
                 table_mm = [round(v, 1) for v in st.calib.pixel_to_table(*res.box.center)]
                 arm_blocked = st.arm_blocked()
-                if not arm_blocked and move:
+                if not arm_blocked and move and not st.first_run:
                     try:
                         st.start_arm(st.arm.point_at, *table_mm, since=asked, ticket=ticket)
                     except ArmBusy as e:
@@ -742,9 +845,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 **paths)
             st.last_find = {"ts": time.time(), "event_id": ev["id"], "request": request, "result": res.as_dict(),
                             "table_mm": table_mm, "arm_blocked": arm_blocked, "total_s": round(total, 2), "box": res.box,
-                            "occluded": occluded, "moved": bool(table_mm and move and not arm_blocked),
+                            "occluded": occluded, "moved": bool(table_mm and move and not arm_blocked and not st.first_run),
                             "boxes": [b.as_dict() for b in boxes], **paths}
             st.pending_move = {**st.last_find, "_ticket": ticket} if res.status == "found" else None
+            if st.first_run and table_mm and st.pending_move and isinstance(st.arm, CartesianArm):
+                st.pending_move["approach"] = st.new_approach(1, table_mm)
             st.light.show({"found": "found", "not_found": "not_found"}.get(res.status, "idle"))
             st.pending = None
             if res.status == "clarify":
@@ -752,7 +857,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                               "question": res.clarifying_question, "candidates": res.candidate_ids,
                               "reuse": {"frame": frame, "boxes": boxes, "occluded": occluded}, "ticket": ticket}
             st.label_wait = None
-            return {k: v for k, v in st.last_find.items() if k != "box"}
+            return {k: v for k, v in st.last_find.items() if k != "box"} | (
+                {"approach": st.approach_view()} if st.first_run else {})
 
     @app.post("/api/find")
     def api_find(text: str = Form(""), photo: UploadFile | None = File(None), move: bool = Form(True)):
@@ -1039,6 +1145,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             st.calib = calibrate_aruco(st.frame(), pos)
             if mpath.exists() and json.loads(mpath.read_text()).get("_frame") == "robot":
                 st.calib.source = "aruco_robot"
+            if st.camera_on_arm and isinstance(st.arm, CartesianArm) and st.at_survey():
+                st.calib.pose = list(st.arm.home_joints or st.arm.home_mm)   # this mapping is only valid here
         except ValueError as e:
             return fail(e, "calibration")
         st.calib.save(st.calib_path)
@@ -1395,11 +1503,14 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     # ------------------------------------------------------------------ voice (Grok Voice realtime)
     @app.post("/api/arm/point_last")
-    def api_point_last():
-        """Move to the object of the last find (used after a spoken 'yes')."""
+    def api_point_last(a: Approach | None = None):
+        """Move to the object of the last find (used after a spoken 'yes').
+        First supervised run: stage 1 hovers above it, stage 2 descends; each needs its own shown confirmation."""
         lf = getattr(st, "pending_move", None)
         if not lf or not (lf.get("table_mm") or lf.get("targets")):
             raise HTTPException(400, "Nothing found yet to point at")
+        if st.first_run:
+            return _approach(lf, a)
         blocked = st.arm_blocked()
         if blocked:
             return JSONResponse({"error": blocked, "blocked": True}, 409)
@@ -1410,6 +1521,56 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         st.start_arm(st.arm.point_at, *lf["table_mm"], ticket=lf["_ticket"])
         st.audit.event("arm_point", x_mm=lf["table_mm"][0], y_mm=lf["table_mm"][1], after="voice confirmation")
         return {"ok": True, "label": lf["result"]["label"], "table_mm": lf["table_mm"]}
+
+    def _approach(pm: dict, a: Approach | None):
+        problems = st.first_run_problems()
+        if problems:
+            raise ArmBusy("First supervised run refused: " + "; ".join(problems))
+        if a is None:
+            raise ArmBusy("First supervised run: confirm the shown stage and target (stage, confirm, x_mm, y_mm)")
+        if a.speed_mm_s is not None and not 0 < a.speed_mm_s <= st.first_run_speed:
+            raise ArmBusy(f"Speed {a.speed_mm_s} mm/s refused: the first-run cap is {st.first_run_speed} mm/s")
+        with st.safety_lock:
+            ap = pm.get("approach")
+            if not ap or ap["stage"] not in (1, 2) or not ap["confirm"] or not hmac.compare_digest(a.confirm, ap["confirm"]):
+                raise ArmBusy(f"No valid stage-{a.stage} confirmation: use the one shown for the current stage")
+            ap["confirm"] = None                    # single use, even if a check below refuses
+            if a.stage != ap["stage"]:
+                raise ArmBusy(f"This confirmation is for stage {ap['stage']}, not stage {a.stage}: find again")
+            if [round(a.x_mm, 1), round(a.y_mm, 1)] != ap["target_mm"]:
+                raise ArmBusy("This confirmation belongs to a different target: find again")
+            if ap["seq"] != st.stop_sequence or time.time() - ap["issued"] > CONFIRM_TTL_S:
+                raise ArmBusy("Stale confirmation (STOP, or older than 60 s): find again")
+        x, y, z = *ap["target_mm"], ap["z_mm"]
+        box = st.arm.limits.check(x, y, z)
+        if box:
+            raise ArmBusy("Outside the safety box: " + box)
+        if a.stage == 2 and not st.at_hover(ap):    # descend only straight down from this target's hover point
+            raise ArmBusy("The arm is not at this target's hover point: stage 2 refused")
+        speed = a.speed_mm_s or st.first_run_speed
+        st.start_arm(st.run_approach, pm, ap, speed, job="approach", pixels=a.stage == 1, ticket=pm["_ticket"])
+        st.audit.event("arm_approach_confirmed", stage=a.stage, target_mm=[x, y, z], speed_mm_s=speed)
+        return {"ok": True, "stage": a.stage, "target_mm": [x, y, z], "speed_mm_s": speed, "warning": COLLISION_WARNING}
+
+    @app.post("/api/arm/measured_error")
+    def api_measured_error(error_mm: float = Form(...)):
+        """First supervised run: the ruler error after stage 2. Above TROVA_ARM_MISS_MM it is an arm_missed failure."""
+        pm = st.pending_move or {}
+        with st.safety_lock:
+            ap = pm.get("approach")
+            if not ap or ap["stage"] != "measure":
+                raise HTTPException(400, "Nothing to measure: finish stage 2 first")
+            if not 0 <= error_mm < 1000:
+                raise HTTPException(400, "error_mm must be between 0 and 1000")
+            pm["approach"] = None                   # one measurement per approach
+        target = [*ap["target_mm"], ap["z_mm"]]
+        missed = error_mm > st.miss_mm
+        st.audit.event("arm_accuracy", target_mm=target, tcp_mm=ap.get("tcp_mm"), offset_mm=ap.get("offset_mm"),
+                       measured_error_mm=error_mm, threshold_mm=st.miss_mm, missed=missed, find=pm.get("event_id"))
+        if missed:
+            fail_log.record(st.cases_dir / "failures.jsonl", pm, "arm_missed", SLOW_S,
+                            {"error_mm": error_mm, "target_mm": target, "tcp_mm": ap.get("tcp_mm")})
+        return {"error_mm": error_mm, "missed": missed, "threshold_mm": st.miss_mm}
 
     @app.get("/api/voice/config")
     def api_voice_config(confirm: bool = True):

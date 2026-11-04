@@ -162,6 +162,14 @@ class CartesianArm(ArmDriver):
     def point_at(self, x_mm: float, y_mm: float) -> bool:
         return self._go(x_mm, y_mm, self.z)
 
+    def approach(self, x_mm: float, y_mm: float, z_mm: float, speed_mm_s: float) -> bool:
+        """First supervised run: one straight move to (x, y, z) at most at speed_mm_s; same box, STOP and reached check."""
+        speed, self.speed = self.speed, min(self.speed, speed_mm_s)
+        try:
+            return self._go(x_mm, y_mm, z_mm)
+        finally:
+            self.speed = speed
+
     def run_waypoints(self, wps: list[tuple], speed_factor: float = 0.5) -> bool:
         """Feature 7: a fixed sequence of straight moves (label, x, y, z). Stops at the first refusal or stop.
         All waypoints are checked against the safety box BEFORE the first move."""

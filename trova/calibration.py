@@ -38,6 +38,7 @@ class Calibration:
     points: list[list[float]] = field(default_factory=list)   # [u, v, x_mm, y_mm]
     source: str = "none"                              # none | default | aruco | aruco_robot | clicks | arm
     size: list[int] | None = None                     # [w, h] of the camera image it was made on
+    pose: list[float] | None = None                   # camera on the arm: the survey pose it was made at
 
     @property
     def ok(self) -> bool:
@@ -86,11 +87,12 @@ class Calibration:
         return float(np.mean(errs))
 
     def as_dict(self) -> dict:
-        return {"source": self.source, "points": self.points, "ok": self.ok, "size": self.size,
+        return {"source": self.source, "points": self.points, "ok": self.ok, "size": self.size, "pose": self.pose,
                 "error_mm": None if not self.ok else round(self.error_mm(), 2)}
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps({"source": self.source, "points": self.points, "size": self.size}, indent=2))
+        path.write_text(json.dumps({"source": self.source, "points": self.points, "size": self.size, "pose": self.pose},
+                                   indent=2))
 
     @classmethod
     def load(cls, path: Path) -> "Calibration | None":
@@ -98,7 +100,7 @@ class Calibration:
             return None
         try:
             d = json.loads(path.read_text())
-            c = cls(points=d["points"], source=d.get("source", "clicks"), size=d.get("size"))
+            c = cls(points=d["points"], source=d.get("source", "clicks"), size=d.get("size"), pose=d.get("pose"))
             c.fit()
         except (ValueError, KeyError, TypeError):   # a bad saved file must not stop the app from starting
             return None
