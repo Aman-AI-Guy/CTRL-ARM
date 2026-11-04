@@ -26,7 +26,7 @@ class Settings:
     model: str            # vision model for finds and change checks
     effort: str           # reasoning effort; "" sends none
     mock: bool            # True when there is no key, or TROVA_MOCK=1
-    camera: str           # "demo" | webcam index "0" | video, image or folder path
+    camera: str           # "demo" | "pi" | "pi:host" | webcam index "0" | video, image or folder path
     arm: str              # "sim" | "grid:<module>:<BackendClass>"
     data_dir: Path
     table_w_mm: float     # used by the default calibration and the simulated arm

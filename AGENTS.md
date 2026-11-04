@@ -41,6 +41,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | 1. Table inventory map ("what's on the table?") | Done, tested (mock) | `inventory.py`, `/api/inventory`, UI button, voice tool `describe_table` | Saving a reference now also names its objects (one extra Grok call; `describe=false` to skip), so changes say which object moved |
 | M1 scene snapshot and select without moving | Done, tested (mock, recorded images) | `scene.py`, `POST /api/select`, inventory `snapshot`, voice tool `select_object` | Stable `track_id` across shots of the same view (reading-order `box_id` unchanged). Uncertainty, similar-object clarification, click or EN/IT phrase. Selection never starts the arm. Mock/offline names set `authoritative` false and cannot authorize motion |
 | M2 unified motion gateway | Done, tested on simulated backends | `motion.py`, `POST /api/arm/jog`, `xarm_voice_execute.py` | Every jog, Cartesian move, joint move, point, tour, room scan, and waypoint path is a proposal checked by `MotionGateway` before a driver runs. Modes: `dry_run` (default for a real controller), `simulation`, `hardware`. Hardware needs `TROVA_MOTION_MODE=hardware` and `TROVA_HARDWARE_UNLOCK=MOVE`, set by an operator; pytest cannot select it. Requested jog millimetres are kept when the gateway rejects them. No collision mesh. A software or voice STOP is not a safety-rated e-stop |
+| M3 Pi camera (IMX219 on the arm) | Client done and tested; one live read succeeded, mDNS did not | `pi_cam.py`, `camera.PiSource`, `trova_cam.py`, `trova-stream/` | Sony IMX219 on a Pi Zero 2 W, Wi-Fi port 8080, not the robot Ethernet port and not `/dev/video`. `TROVA_CAMERA=pi`, `pi:host`, or `pi:host:port`. Default host `trova-cam.local` (it did not resolve here). A previous DHCP address answered: status `streaming`, protection `normal`, 1640×1232, rotate 180, about 10 fps. `GET /snapshot.jpg` is captured after the request; use it after the arm has stopped. `GET /stream.mjpg` is for display. A failed request drops the previous buffer. The server already rotates 180; `TROVA_CAM_EXTRA_ROTATE` is the only extra rotation. HTTP 503 (thermal pause) is not retried. `trova-stream/install.sh` and the systemd units were not run |
 | 2. Line-clearance zones | Done, tested (mock) | `zones.py`, `/api/zones*`, UI "Draw a zone" | Rules: `empty` or `allowed` (list). Evaluated in every change check; a violation makes the line NOT clear. Zones are in image pixels: redraw if the camera moves |
 | 3. PDF clearance record | Done, tested | `record_pdf.py`, `GET /api/report.pdf`, UI "Download PDF" | Verdict, images, changes, zones, rejected candidates, sign-off, audit id. Copy saved in `data/records/`. Uses reportlab (now a dependency) |
 | 4. Full-screen jury scoreboard | Done, tested | `static/jury.html`, `GET /jury`, `POST /api/metrics/reset` | Found x/N, median find time, false alarms, checks; latest request + verdict; live camera. Reset before the demo. Link "scoreboard" in the UI header |
@@ -60,7 +61,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 ## Architecture (data flow)
 
 ```
-camera.py ──frame──> proposals.py (numbered boxes) ──> finder.py ──Grok (grok.py)──> box
+camera.py (demo, webcam, file, or pi:8080 /snapshot.jpg) ──frame──> proposals.py (numbered boxes) ──> finder.py ──Grok (grok.py)──> box
                                    │                                                  │
                                    └──> changes.py (reference vs now) ──Grok verify──>│
 calibration.py: pixel -> robot mm  <──────────────────────────────────────────────────┘
@@ -93,7 +94,7 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 | File | Owner (role) | What it does |
 |---|---|---|
 | `trova/proposals.py` | P2 | Empty-table difference in LAB, merge boxes, occlusion check |
-| `trova/camera.py` | P2 | Webcam / Continuity Camera / video / images / synthetic demo source |
+| `trova/camera.py`, `trova/pi_cam.py` | P2 | Webcam, files, demo, and the Pi camera (`TROVA_CAMERA=pi`). The Pi server sources live in `trova-stream/` |
 | `trova/calibration.py` | P2 | Homography pixel <-> mm, ArUco, click calibration |
 | `trova/finder.py` | P3 | Set-of-marks selection prompt + schema, clarification, direct fallback, mocks |
 | `trova/scene.py` | P3 | Snapshot track ids, uncertainty, select-without-motion |
@@ -149,6 +150,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 - Voice: `audio.input.transcription` (grok-transcribe + keyterms) is not in the public session docs; if the session
   rejects it, drop that block in `voice.py`. Browser speech fallback in Chrome needs internet (Google recognition).
 - Label OCR (feature 11) and watch explanations (feature 10) are tested in mock only; QR decoding is real (OpenCV).
+- The Pi camera client is in the app. `trova-cam.local` did not resolve on this machine. `192.168.5.160:8080` answered a read-only status and snapshot on 2026-11-04 (1640×1232, rotate 180, protection normal). That address is DHCP and is not the default. The boot service has not been installed; do not run `trova-stream/install.sh` unless an operator asks. Live Grok Vision was not run on that snapshot.
 - The arm camera: which way it looks, what the sphere's cable plugs into (USB to the Mac?), and whether the LED ring is
   controllable are read from photos, not confirmed. Check with `python -m trova.camera --list` and `ls /dev/tty.usb*`.
   Room scan pan direction and pixels/degree are measured from the photos, but only in simulation so far.
@@ -156,6 +158,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 M3 Pi camera client: `TROVA_CAMERA=pi` reads `/snapshot.jpg` after the request and drops a failed frame. The Pi server sources are kept in `trova-stream/` and were not installed. `trova-cam.local` did not resolve; one read-only check of the previous DHCP address returned a 1640×1232 JPEG.
 - 2026-11-04 M2 motion gateway: every arm move is checked before a driver runs. Hardware stays off unless an operator sets the unlock. Spoken distances are kept when a jog is rejected. A software STOP is not a safety-rated e-stop.
 - 2026-11-04 M1 scene snapshot: stable track ids, per-object uncertainty, and select by voice or click (`POST /api/select`) without moving the arm. Mock/offline recognition is not authoritative.
 - 2026-11-04 Camera on the arm (the team's xArm 5 sphere camera): taught survey pose as joints, pictures only from it, gating of pixel moves / watch / overlays, joint moves checked by forward kinematics, simulated arm camera, camera finder, bring-up --camera-on-arm, preflight items. Feature 14: look around the room and face the object. Optional LED ring driver + firmware.
