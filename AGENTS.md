@@ -46,6 +46,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | 7. Tray lift with the fork (experimental) | Done, tested vs fake robot; OFF by default | `arm/skills.py`, `run_waypoints` (Cartesian + sim), `POST /api/arm/lift_tray`, UI after a find | 12 straight moves: approach, slot height, fork in, lift, carry, set down, fork out, up. Whole path checked against the safety box before moving; STOP aborts. Enable with `TROVA_ALLOW_LIFT=1` only after measuring `TROVA_TRAY_Z_SLOT_MM` and `TROVA_TRAY_APPROACH` on the real tray with staff |
 | 8. Offline fallback (Wi-Fi or xAI down) | Done, tested | `grok.py` (`GrokUnavailable`, circuit breaker), `finder.py` (mode `offline`), header badge | Network error, timeout or 429/5xx after retries: the call is answered by the local handler and marked offline; for 30 s calls skip the network, then live is retried. 400/401/403/422 still raise. Change verification offline keeps every candidate as real (never a false 'clear'). `TROVA_OFFLINE_FALLBACK=0` disables; eval always disables it. `TROVA_GROK_TIMEOUT_S` (60), connect timeout 5 s |
 | 9. Preflight check | Done, tested | `preflight.py`, `GET /api/preflight`, header button "preflight", `python -m trova.preflight [url]` | ok / warn / fail per item with the fix: camera (frozen, resolution), light, focus, empty table, objects / occlusion, calibration (real arm), arm state, safety box, home pose, tray lift, Wi-Fi access, Grok ping (real network attempt, latency), voice token, disk. Run it each morning and before the jury; exit code 1 on any failure |
+| 10. Watch the line (live guard) | Done, tested (mock) | `watch.py`, `POST /api/watch` (on, point), `/api/watch/ack`, UI "Watch the line" + red alarm bar with beep, jury page banner, voice tool `watch_line` | Twice a second, plain code compares the live view with the reference (2-of-3 persistence) and checks 'must be empty' zones; an alarm appears in ~1.5 s, Grok explains it in the background and can close a false alarm. Hand or moving arm pauses it. Optional: the arm points at the problem (homes again on acknowledge). An alarm stays until acknowledged; the same situation does not re-alarm; a new reference resets it |
 
 ## Architecture (data flow)
 
@@ -109,6 +110,7 @@ Failures: `GET /api/failures` (counts by cause, owner, next fix) · `POST /api/j
 Find all: `POST /api/find_all` (text, move) · `/api/arm/point_last` also starts a pending tour
 Tray: `POST /api/arm/lift_tray` (place_u, place_v; pick defaults to the last find; 403 unless TROVA_ALLOW_LIFT=1)
 Preflight: `GET /api/preflight` (grok=1 pings Grok) · CLI `python -m trova.preflight [url]`
+Watch: `POST /api/watch` (on, point) · `/api/watch/ack` (who) · state field `watch`
 Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` · `/api/demo/hand`
 
 ## Known gaps
@@ -119,6 +121,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 10: watch the line (live guard with alarm, optional arm pointing, Grok explanation in the background).
 - 2026-11-04 Feature 9: preflight checklist (endpoint, UI button, CLI).
 - 2026-11-04 Review fixes, robustness: Grok drops a request field only when the error names it (an 'image format' error no longer disables the JSON schema) and answers missing required fields raise GrokError (was a KeyError/500); more than 12 change candidates skip Grok (camera probably moved) and stay NOT clear; a webcam frame older than 2 s is refused and the camera reopens itself; camera errors are 503 and /api/state keeps answering; empty uploads 400; a find or check can be judged once; voice releases the mic when the connection drops; optional TROVA_TOKEN locks the API on shared Wi-Fi; pytest no longer writes into eval/results.
 - 2026-11-04 Review fixes, arm safety: STOP latches in every driver (was lost between tour targets, lift waypoints and during a find); one motion at a time with 409 when busy; a running lift is never interrupted by a new command, an interrupted lift blocks automatic moves until Arm home; UR/Elite sends serialised and STOP re-sent if it raced a move; xArm late start tolerated; real arms need a safety box and home pose. Calibration: arm points separate from table clicks, degenerate and >15 mm fits rejected, image size stored, uploaded photo blocks the arm, bad saved file no longer blocks start-up. Clarify answers reuse the question's frame and box numbers. Keyboard: Escape = STOP always; space no longer swallowed by the search box.

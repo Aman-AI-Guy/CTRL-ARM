@@ -27,6 +27,7 @@ img{width:100%;border-radius:14px;border:1px solid var(--line);display:block;bac
 <body>
 <header><h1>Trova</h1><span class="sub">Track A · CTRL+F: SEA · live score</span>
   <span class="r"><button onclick="theme()">Light / dark</button><button onclick="resetScore()">Reset score</button></span></header>
+<div id="alarm" style="display:none;background:var(--bad);color:#fff;font-size:28px;font-weight:700;padding:14px 24px"></div>
 <section class="grid">
   <div class="k"><div class="v accent" id="found">0 / 0</div><div class="l">objects found (jury requests)</div></div>
   <div class="k"><div class="v" id="time">–</div><div class="l">median time to find (s)</div></div>
@@ -64,6 +65,10 @@ async function tick() {
   if (c) { const r = c.result; $('verdict').textContent = r.line_clear ? 'LINE CLEAR' : `NOT CLEAR · ${r.changes.length} change(s)`;
     $('verdict').style.color = r.line_clear ? 'var(--ok)' : 'var(--bad)'; $('vsum').textContent = r.summary; }
   $('arm').textContent = `${S.arm.name}: ${S.arm.state}` + (S.arm.error ? ' · ' + S.arm.error : '');
+  const w = S.watch, a = w && w.alert;      // feature 10: the watch alarm, big, for the room
+  $('alarm').style.display = a ? 'block' : (w && w.on ? 'block' : 'none');
+  $('alarm').style.background = a ? 'var(--bad)' : 'var(--ok)';
+  $('alarm').textContent = a ? `ALARM ${a.time}: ${a.summary}` : (w && w.on ? 'Watching the cleared line: ' + w.status : '');
 }
 tick(); setInterval(tick, 1000);
 </script>

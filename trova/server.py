@@ -35,6 +35,7 @@ from .inventory import describe as describe_table, draw_map
 from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
 from . import preflight
+from .watch import Watch
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
 from .marks import HIGHLIGHT, MARK, draw_marks, jpeg
@@ -115,6 +116,11 @@ class LiftReq(BaseModel):
     pick_v: float | None = None
 
 
+class WatchReq(BaseModel):
+    on: bool = True
+    point: bool = False       # the arm points at the problem when the alarm goes off
+
+
 class VoiceLog(BaseModel):
     who: str
     text: str
@@ -167,6 +173,7 @@ class State:
         self.dog_search: DogSearch | None = None
         self.dog_stop = threading.Event()
         self.dog_thread: threading.Thread | None = None
+        self.watch = Watch(self)
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
@@ -385,7 +392,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "last_check": None if not st.last_check else {k: v for k, v in st.last_check.items() if k != "objects"},
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
             "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
-            "lift_allowed": lift_allowed(),
+            "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(),
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
             "metrics": {**{k: v for k, v in m.items() if k != "find_times"}, "find_judged": judged,
@@ -508,6 +515,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "raw": st.audit.save_image("reference_raw", f), "n_objects": len(boxes), "names": names}
             st.audit.event("reference", n_objects=len(boxes), occluded=occl, path=path, raw=st.reference["raw"],
                            names=names)
+            st.watch.alert, st.watch._acked = None, None      # a new approved state: old alarms no longer apply
+            st.watch._hist.clear()
             return {"n_objects": len(boxes), "path": path, "occluded": occl, "names": names, "summary": summary}
 
     @app.post("/api/changes")
@@ -1052,6 +1061,26 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return st.audit.recent(n, kind)
 
     preflight.register(app, st)      # feature 9: GET /api/preflight
+
+    # ------------------------------------------------------------------ feature 10: watch the line
+    @app.post("/api/watch")
+    def api_watch(w: WatchReq):
+        if w.on:
+            try:
+                st.watch.start(point=w.point)
+            except ValueError as e:
+                return fail(e, "watch")
+        else:
+            st.watch.stop()
+        st.audit.event("watch", on=w.on, point=w.point)
+        return st.watch.as_dict()
+
+    @app.post("/api/watch/ack")
+    def api_watch_ack(who: str = Form("")):
+        a = st.watch.ack(who.strip())
+        if a and a.get("pointed") and not isinstance(st.arm, SimArm):
+            st.start_arm(st.arm.home, job="home")      # the arm pointed at the problem: park it again
+        return {"acknowledged": a["id"] if a else None, "watch": st.watch.as_dict()}
 
     # ------------------------------------------------------------------ demo helpers
     @app.post("/api/demo/tamper")

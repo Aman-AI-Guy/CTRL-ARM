@@ -81,6 +81,8 @@ const TrovaVoice = (() => {
       return {line_clear: r.line_clear, summary: r.summary,
               changes: r.changes.map(c => ({kind: c.kind, object: c.label, risk: c.risk, why: c.explanation}))};
     },
+    async watch_line({on}) { const d = await api('/api/watch', {on: !!on, point: false}, true); h.onRefresh && h.onRefresh();
+      return d.error ? {error: d.error} : {watching: d.on, status: d.status}; },
     async stop_arm() { await api('/api/arm/stop'); return {stopped: true}; },
     async arm_home() { await api('/api/arm/home'); return {parking: true}; },
     async search_other_rooms({description}) {

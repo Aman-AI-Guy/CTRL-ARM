@@ -385,3 +385,78 @@ def test_preflight(tmp_path, monkeypatch):
     monkeypatch.setattr("trova.voice.mint_token", lambda key, seconds=300: {"token": "t"})
     n3 = {i["name"]: i for i in c3.get("/api/preflight").json()["items"]}
     assert n3["Grok"]["status"] == "fail" and "unreachable" in n3["Grok"]["detail"] and n3["Voice"]["status"] == "ok"
+
+
+# ---------------------------------------------------------------- feature 10: watch the line
+def test_watch_alarms_on_change_and_zone_pauses_on_hand(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    w = st.watch
+    assert c.post("/api/watch", json={"on": True}).status_code == 400        # needs a reference
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/reference", data={"describe": "false"})
+    w.start(point=True)
+    w.stop()                                     # drive it step by step instead of the thread
+    w.point = True
+    for _ in range(4):
+        w.step()
+    assert w.alert is None and "clear" in w.status
+    st.source.hand = True
+    w.step()
+    assert "hand" in w.status and len(w._hist) == 0                           # no alarm on people working
+    st.source.hand = False
+    st.source.table.tamper("add")
+    for _ in range(3):
+        w.step()
+    a = w.alert
+    assert a and a["changes"][0]["kind"] == "added" and a["pointed"] and "added" in a["summary"]
+    assert _wait(lambda: a["grok"] != "pending") and "explained" in a["grok"]    # mock Grok confirms it
+    assert c.get("/api/state").json()["watch"]["alert"]["id"] == a["id"]
+    for _ in range(3):
+        w.step()
+    assert w.alerts == 1                                                         # same situation: one alarm
+    r = c.post("/api/watch/ack", data={"who": "Ana"}).json()
+    assert r["acknowledged"] == a["id"] and w.alert is None
+    for _ in range(3):
+        w.step()
+    assert w.alert is None and "acknowledged" in w.status                       # not again after the ack
+    c.post("/api/reference", data={"describe": "false"})                        # new approved state
+    for _ in range(4):
+        w.step()
+    assert w.alert is None and "clear" in w.status
+
+    from trova.zones import Zone
+    st.zones = [Zone(name="line", polygon=[[0, 0], [1280, 0], [1280, 800], [0, 800]], rule="empty")]
+    for _ in range(3):
+        w.step()
+    assert w.alert and w.alert["zone_problems"]                                 # objects inside an empty zone
+
+
+def test_watch_false_alarm_closes_itself_and_thread_runs(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    from trova import changes as chg_mod
+    from trova.grok import register_mock
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/reference", data={"describe": "false"})
+    st.source.table.tamper("add")
+    no = lambda p, i, ctx: {"changes": [{"change_id": ch.id, "is_real": False, "label": "glare", "risk": "low",  # noqa: E731
+                                         "explanation": "a reflection"} for ch in ctx["changes"]],
+                            "line_clear": True, "summary": "nothing changed"}
+    register_mock("trova_verify", no)
+    try:
+        w = st.watch
+        for _ in range(3):
+            w.step()
+        assert _wait(lambda: w.alert is None) and "false alarm" in w.status
+    finally:
+        register_mock("trova_verify", chg_mod._mock_verify)
+    r = c.post("/api/watch", json={"on": True}).json()
+    assert r["on"] and _wait(lambda: st.watch.checks >= 3)
+    assert not c.post("/api/watch", json={"on": False}).json()["on"]
+    n = st.watch.checks
+    import time
+    time.sleep(0.8)
+    assert st.watch.checks == n                                                 # the thread really stopped
