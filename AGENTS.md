@@ -48,6 +48,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | 9. Preflight check | Done, tested | `preflight.py`, `GET /api/preflight`, header button "preflight", `python -m trova.preflight [url]` | ok / warn / fail per item with the fix: camera (frozen, resolution), light, focus, empty table, objects / occlusion, calibration (real arm), arm state, safety box, home pose, tray lift, Wi-Fi access, Grok ping (real network attempt, latency), voice token, disk. Run it each morning and before the jury; exit code 1 on any failure |
 | 10. Watch the line (live guard) | Done, tested (mock) | `watch.py`, `POST /api/watch` (on, point), `/api/watch/ack`, UI "Watch the line" + red alarm bar with beep, jury page banner, voice tool `watch_line` | Twice a second, plain code compares the live view with the reference (2-of-3 persistence) and checks 'must be empty' zones; an alarm appears in ~1.5 s, Grok explains it in the background and can close a false alarm. Hand or moving arm pauses it. Optional: the arm points at the problem (homes again on acknowledge). An alarm stays until acknowledged; the same situation does not re-alarm; a new reference resets it |
 | 11. Labels, lots and batch check | Done, tested (mock) | `labels.py`, `POST /api/batch` (lot), `/api/labels`, `/api/labels/sheet`, UI batch row + "Read labels" + "Print labels", demo "+ old-lot carton", voice tool `read_labels` | QR codes and barcodes decoded locally by OpenCV (second pass per object when several codes are in view); Grok reads printed product / lot / expiry from close-ups ('?' when unreadable). Once a batch is set, every change check also reads labels: a different lot, a code that disagrees with the print, an expired date, an unreadable or missing lot make the line NOT clear. In the HTML and PDF record. Print the label sheet (3 good, 1 old lot, 1 expired, 1 mismatch) for the demo. `TROVA_BATCH` sets a default lot |
+| 12. Browser speech fallback + spoken results | Done; parser tested (node) | `static/speech.js`, UI row "Push to talk (browser)" + EN/IT + "speak results" | When Grok Voice is not available (mock, token error, Wi-Fi): the browser's speech recognition (Chrome / Edge / Safari; Chrome sends audio to Google) + a small EN/IT command parser: find, find all, check, labels, inventory, watch on/off, save reference, home, and answers to Trova's question. A stop word stops the arm on the interim transcript already. Results are spoken with speechSynthesis (off while Grok Voice runs, which speaks itself) |
 
 ## Architecture (data flow)
 
@@ -123,6 +124,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 12: browser speech fallback (push to talk, EN/IT command parser, stop on interim transcript) and spoken results.
 - 2026-11-04 Feature 11: label, lot and expiry reading with a wrong-batch check inside line clearance; printable demo label sheet.
 - 2026-11-04 Feature 10: watch the line (live guard with alarm, optional arm pointing, Grok explanation in the background).
 - 2026-11-04 Feature 9: preflight checklist (endpoint, UI button, CLI).

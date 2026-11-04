@@ -522,3 +522,33 @@ def test_batch_check_inside_line_clearance(tmp_path, monkeypatch):
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
     assert c.get("/api/state").json()["batch"]["lot"] == "A123"
     assert c.post("/api/labels/sheet").json()["file"].endswith(".png")
+
+
+# ---------------------------------------------------------------- feature 12: browser speech fallback
+def test_browser_speech_commands():
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    from trova.voice import STOP_WORDS
+    said = ["Stop!", "fermo", "stop watching", "find my watch", "watch the line", "sorveglia la linea", "check",
+            "what changed?", "check the lot", "leggi le etichette", "what's on the table", "trova la penna rossa",
+            "all the pens", "tutte le forbici", "where is the red mug", "something to write with", "save the reference"]
+    js = ("const S = require(process.argv[1]); const [said, sw] = JSON.parse(process.argv[2]);"
+          "console.log(JSON.stringify(said.map(t => S.parse(t, sw))));")
+    out = subprocess.run([node, "-e", js, str(STATIC / "speech.js"), json.dumps([said, STOP_WORDS])],
+                         capture_output=True, text=True, check=True).stdout
+    got = dict(zip(said, json.loads(out)))
+    assert got["Stop!"]["cmd"] == got["fermo"]["cmd"] == "stop"
+    assert got["stop watching"] == {"cmd": "stop", "also": "watch_off"}           # stops the arm too
+    assert got["find my watch"] == {"cmd": "find", "text": "my watch"}           # not watch mode
+    assert got["watch the line"]["cmd"] == got["sorveglia la linea"]["cmd"] == "watch_on"
+    assert got["check"]["cmd"] == got["what changed?"]["cmd"] == "check"
+    assert got["check the lot"]["cmd"] == got["leggi le etichette"]["cmd"] == "labels"
+    assert got["what's on the table"]["cmd"] == "inventory" and got["save the reference"]["cmd"] == "reference"
+    assert got["trova la penna rossa"] == {"cmd": "find", "text": "la penna rossa"}
+    assert got["all the pens"]["cmd"] == got["tutte le forbici"]["cmd"] == "find_all"
+    assert got["where is the red mug"]["text"] == "the red mug"
