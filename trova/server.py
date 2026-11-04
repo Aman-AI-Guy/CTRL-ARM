@@ -29,6 +29,7 @@ from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
 from .finder import find as grok_find
 from .inventory import describe as describe_table, draw_map
+from .record_pdf import build as build_record_pdf
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
 from .marks import HIGHLIGHT, MARK, draw_marks, jpeg
@@ -405,6 +406,20 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 <h2>Sign-off</h2>{so_html}
 <p style="color:#555">Trova assists the operator; the operator decides. Every decision above is in the audit log (data/events.jsonl).</p>
 </body></html>"""
+
+    @app.get("/api/report.pdf")
+    def api_report_pdf():
+        """Feature 3: the clearance record as a PDF; a copy is kept in data/records/."""
+        c = st.last_check
+        if not c:
+            raise HTTPException(400, "Run a check first")
+        pdf = build_record_pdf(c, st.s.data_dir)
+        out = st.s.data_dir / "records"
+        out.mkdir(exist_ok=True)
+        (out / f"clearance_{c['event_id']}.pdf").write_bytes(pdf)
+        st.audit.event("record_pdf", check=c["event_id"], signed=bool(c.get("signoff")))
+        return Response(pdf, media_type="application/pdf",
+                        headers={"Content-Disposition": f"inline; filename=clearance_{c['event_id']}.pdf"})
 
     # ------------------------------------------------------------------ setup
     @app.post("/api/background")

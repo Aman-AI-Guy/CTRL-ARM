@@ -489,3 +489,18 @@ def test_zones_endpoints_make_line_not_clear(tmp_path, monkeypatch):
     assert chk["zones"][0]["problems"] and "Zones:" in chk["summary"]
     assert "Zones" in c.get("/api/report").text
     assert c.delete("/api/zones/line area").json()["zones"] == []
+
+
+# ---------------------------------------------------------------- feature 3: PDF record
+def test_pdf_clearance_record(tmp_path, monkeypatch):
+    app, c = _client(tmp_path, monkeypatch)
+    assert c.get("/api/report.pdf").status_code == 400                       # no check yet
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/reference")
+    c.post("/api/demo/tamper", data={"kind": "add"})
+    chk = c.post("/api/changes").json()
+    c.post("/api/signoff", data={"operator": "M. Rossi", "decision": "reject"})
+    r = c.get("/api/report.pdf")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    assert r.content[:4] == b"%PDF" and len(r.content) > 5000                # images embedded
+    assert (tmp_path / "records" / f"clearance_{chk['event_id']}.pdf").exists()

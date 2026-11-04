@@ -39,7 +39,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Jury mode + eval script | Done, tested | `server.py`, `eval/run_eval.py` | |
 | 1. Table inventory map ("what's on the table?") | Done, tested (mock) | `inventory.py`, `/api/inventory`, UI button, voice tool `describe_table` | Saving a reference now also names its objects (one extra Grok call; `describe=false` to skip), so changes say which object moved |
 | 2. Line-clearance zones | Done, tested (mock) | `zones.py`, `/api/zones*`, UI "Draw a zone" | Rules: `empty` or `allowed` (list). Evaluated in every change check; a violation makes the line NOT clear. Zones are in image pixels: redraw if the camera moves |
-| 3. PDF clearance record | Planned | | |
+| 3. PDF clearance record | Done, tested | `record_pdf.py`, `GET /api/report.pdf`, UI "Download PDF" | Verdict, images, changes, zones, rejected candidates, sign-off, audit id. Copy saved in `data/records/`. Uses reportlab (now a dependency) |
 | 4. Full-screen jury scoreboard | Planned | | |
 | 5. Failure log (cause of each wrong find) | Planned | | |
 | 6. "Point at all the X" | Planned | | |
@@ -97,6 +97,7 @@ Jury: `POST /api/judge` · `/api/label`
 Voice: `GET /api/voice/config` · `POST /api/voice/session` · `/api/voice/log`
 Inventory: `POST /api/inventory` (names every object, labelled map image) · `POST /api/reference` takes `describe` (default true)
 Zones: `GET /api/zones` · `POST /api/zones/point` · `/api/zones/finish` (name, rule, allowed) · `/api/zones/cancel` · `DELETE /api/zones/{name}`
+Record: `GET /api/report.pdf` (PDF of the last check; copy in data/records/)
 Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` · `/api/demo/hand`
 
 ## Known gaps
@@ -107,6 +108,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 3: PDF line-clearance record; reportlab added to dependencies.
 - 2026-11-04 Feature 2: line-clearance zones (empty / allowed items), shown on the live view, in the check result and in the record. Fake-controller test race fixed (wait_for).
 - 2026-11-04 Feature 1: table inventory map; reference objects are named and the names reach the change-verification prompt.
 - 2026-11-04 AGENTS.md added as the shared state file; `docs/make_guide.py` added.
