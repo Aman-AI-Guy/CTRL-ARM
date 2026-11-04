@@ -139,6 +139,11 @@ class ScanBook:
             reasons.append(f"controller error code {meta.get('error_code')}")
         if meta.get("resolution_mismatch"):
             reasons.append("the JPEG size does not match the camera status")
+        received_at = meta.get("received_at")
+        finished_at = meta.get("read_finished_at")
+        skew_s = None
+        if received_at is not None and finished_at is not None:
+            skew_s = round(abs(float(received_at) - float(finished_at)), 4)
         view_id = f"v{len(session['views']) + 1:04d}"
         folder = Path(session["folder"])
         image_path = folder / f"{view_id}.jpg"
@@ -168,8 +173,12 @@ class ScanBook:
             "pose_read_finished_at": meta.get("read_finished_at"),
             "camera_pose": camera_pose, "calibration_version": meta.get("calibration_version"),
             "calibration_valid": meta.get("calibration_valid"),
-            "detection": {k: detection.get(k) for k in ("track_id", "name", "box", "association", "confidence")},
+            "detection": {k: detection.get(k) for k in (
+                "track_id", "name", "box", "association", "confidence", "label_authoritative")},
             "sync": meta.get("sync") or "unspecified", "sync_precision_claimed": False,
+            "skew_s": skew_s,
+            "pose_image_relation": None if camera_pose is None else "T_base_camera = T_base_tool @ T_tool_camera",
+            "sync_quality": "wall_clock_gap_only" if skew_s is not None else "not_measured",
             "accepted": not reasons, "reject_reason": "; ".join(reasons) if reasons else None,
             "provenance": meta.get("provenance"),
         }

@@ -210,12 +210,22 @@ def build_objects(boxes: list[Box], frame: np.ndarray, names: dict[int, dict]) -
     objects = []
     for box in boxes:
         named = names.get(box.id, {})
+        raw_name = str(named.get("name") or "").strip()
+        if not raw_name or raw_name.lower() in {"unknown", "?", "n/a", "none", "nothing"}:
+            raw_name = "unknown"
+            label_ok = False
+        else:
+            label_ok = bool(named.get("label_authoritative"))
         objects.append({
             "track_id": int(box.extra["track_id"]),
             "box_id": int(box.id),
-            "name": named.get("name", ""),
+            "name": raw_name,
             "category": named.get("category", ""),
             "note": named.get("note", ""),
+            "semantic": named.get("note", ""),
+            "geometric_detection": True,
+            "label_authoritative": label_ok,
+            "name_from_model": bool(named.get("name_from_model")),
             "box": box.to_list(),
             "center": [round(c, 1) for c in box.center],
             "color": box.extra.get("color") or color_name(crop(frame, box, pad=0)),

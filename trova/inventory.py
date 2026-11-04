@@ -92,11 +92,24 @@ def describe(grok: GrokClient, frame: np.ndarray, boxes: list[Box], lang: str = 
     r = grok.json(name="trova_inventory", prompt=PROMPT.format(n=len(boxes), lang=LANG.get(lang, LANG["en"])),
                   schema=SCHEMA, images=[draw_marks(frame, boxes), contact_sheet(frame, boxes)], mock_context=ctx)
     ids = {b.id for b in boxes}
-    for o in r.data.get("objects", []):
-        if o.get("box_id") in ids and o.get("name", "").lower() != "nothing":
-            inv.items[o["box_id"]] = {"name": o["name"], "category": o.get("category", "other"), "note": o.get("note", "")}
-    inv.summary, inv.latency_s = r.data.get("summary", ""), r.latency_s
     inv.grok_mode = _grok_mode(grok, r)
+    live = inv.grok_mode == "live"
+    for o in r.data.get("objects", []):
+        box_id = o.get("box_id")
+        if box_id not in ids:
+            continue
+        raw = str(o.get("name") or "").strip()
+        if not raw or raw.lower() in {"nothing", "unknown", "?", "n/a", "none"}:
+            inv.items[box_id] = {"name": "unknown", "category": "", "note": str(o.get("note") or ""),
+                                 "name_from_model": False, "label_authoritative": False}
+            continue
+        inv.items[box_id] = {"name": raw, "category": o.get("category") or "other", "note": str(o.get("note") or ""),
+                             "name_from_model": True, "label_authoritative": live}
+    for box in boxes:
+        if box.id not in inv.items:
+            inv.items[box.id] = {"name": "unknown", "category": "", "note": "",
+                                 "name_from_model": False, "label_authoritative": False}
+    inv.summary, inv.latency_s = r.data.get("summary", ""), r.latency_s
     return inv
 
 

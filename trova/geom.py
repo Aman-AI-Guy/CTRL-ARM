@@ -46,7 +46,18 @@ PROCEDURE = [
     "A view is stored only when the pose is still before and after the picture, the controller error is 0, the image size matches the camera, and the corners are found.",
     "Solve hand-eye and the table plane. Consistency and the held-out board origin must be within 10 mm, and the plane residual within 5 mm. Otherwise no matrix is kept.",
     "Set TROVA_ARM_LIMITS, TROVA_CAMERA_BODY_MM, TROVA_ARM_KEEP_OUT and TROVA_OBSERVE_CLEARANCE_MM from measurements. Hardware motion is a separate procedure.",
+    "Remove a bad sample from the list if its reprojection is the one above 1.5 px. The gates stay the same.",
+    "When the report is valid, type a measured point on the table and read the millimetre error. A centered image is not that check.",
 ]
+
+DOF_NOTE = (
+    "The xArm 5 has five joints. A straight observation pose keeps roll near 180 and pitch near 0, "
+    "so those two angles do not give an independent calibration rotation. "
+    "Between captures, turn joint 5 and change the shoulder while the board stays fixed in the base. "
+    "If the arm still cannot reach 15 degrees about more than one axis, stop the solve. "
+    "Measure the flange-to-lens offset with a ruler and keep that note beside the robot. "
+    "The note is not a hand-eye matrix, it is not saved as one, and it does not authorize a move."
+)
 
 FIRST_MOVE = [
     "This procedure is not run by the software. Keep the physical e-stop in reach. Software STOP is not that e-stop.",
@@ -325,8 +336,31 @@ def _image_record(meta: dict | None, image: np.ndarray) -> dict:
         "rotated_again": bool(meta.get("rotated_again")),
         "provenance": meta.get("provenance"),
         "kind": meta.get("kind"),
+        "preview": meta.get("preview"),
         "sync_precision_claimed": False,
     }
+
+
+def reference_error(predicted_mm, measured_mm, *, uncertainty_mm=None, calibration_version=None,
+                    image_time=None, pose_source=None, calibration_valid=False) -> dict:
+    """Compare a calibrated estimate with a point the operator measured. This never authorizes motion."""
+    predicted = None if not predicted_mm else [round(float(v), 2) for v in list(predicted_mm)[:3]]
+    measured = [round(float(v), 2) for v in list(measured_mm)[:3]]
+    report = {
+        "predicted_mm": predicted, "measured_mm": measured, "error_mm": None,
+        "uncertainty_mm": uncertainty_mm, "calibration_version": calibration_version,
+        "image_time": image_time, "pose_source": pose_source,
+        "calibration_valid": bool(calibration_valid),
+        "estimate_from_calibration": predicted is not None and bool(calibration_valid),
+        "centered_image_is_not_localization": True, "accepts_motion": False,
+        "moved": False,
+    }
+    if not calibration_valid or predicted is None:
+        report["reason"] = "metric localization is blocked until a validated calibration produces a plane intersection"
+        return report
+    report["error_mm"] = round(float(np.linalg.norm(np.subtract(predicted, measured))), 2)
+    report["reason"] = "difference between the calibrated ray and the operator's measured point"
+    return report
 
 
 def fit_plane(points) -> tuple[np.ndarray, np.ndarray, float] | None:
@@ -353,6 +387,7 @@ class VisionStore:
         self.created = ""
         self.intrinsic_views: list[dict] = []
         self.handeye_views: list[dict] = []
+        self.rejected: list[dict] = []
         self.intrinsics: dict | None = None
         self.hand_eye: dict | None = None
         self.table: dict | None = None
@@ -421,6 +456,117 @@ class VisionStore:
         self.table = None
         return {"ok": True, "count": len(self.handeye_views), "corners": int(len(corners)),
                 "reason": "observation stored"}
+
+    def note_rejection(self, kind: str, reason: str, image_path: str | None = None,
+                       pose_source: str | None = None) -> dict:
+        """Remember why a capture was not stored. This does not invent corners or a matrix."""
+        self.rejected.append({
+            "kind": kind, "reason": reason, "accepted": False,
+            "image": image_path, "pose_source": pose_source,
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+        del self.rejected[:-40]
+        counted = sum(1 for item in self.rejected if item["kind"] == kind)
+        return {"ok": False, "reason": reason, "rejected": counted}
+
+    def drop_sample(self, kind: str, index: int) -> dict:
+        """Remove one accepted view and clear every solved matrix. The gates are unchanged."""
+        bucket = self.intrinsic_views if kind == "intrinsics" else self.handeye_views if kind == "handeye" else None
+        if bucket is None:
+            return {"ok": False, "reason": "kind is intrinsics or handeye"}
+        if index < 0 or index >= len(bucket):
+            return {"ok": False, "reason": "no sample at that index", "count": len(bucket)}
+        bucket.pop(index)
+        self.intrinsics = None
+        self.hand_eye = None
+        self.table = None
+        return {"ok": True, "reason": "sample removed; solved matrices were cleared", "count": len(bucket),
+                "persisted_matrix": False}
+
+    def intrinsic_errors(self) -> list[dict]:
+        """Mean reprojection of each stored board. Empty until a solve has produced K."""
+        if not self.intrinsics:
+            return []
+        k = np.array(self.intrinsics["k"], float)
+        dist = np.array(self.intrinsics["dist"], float)
+        rows = []
+        for index, view in enumerate(self.intrinsic_views):
+            corners = np.array(view["corners"], np.float32).reshape(-1, 1, 2)
+            obj = _object_points(view["cols"], view["rows"], view["square_mm"])
+            ok, rvec, tvec = cv2.solvePnP(obj, corners, k, dist)
+            if not ok:
+                rows.append({"index": index, "mean_px": None, "max_px": None, "reason": "solvePnP failed"})
+                continue
+            projected, _ = cv2.projectPoints(obj, rvec, tvec, k, dist)
+            err = np.linalg.norm(projected.reshape(-1, 2) - corners.reshape(-1, 2), axis=1)
+            rows.append({"index": index, "mean_px": round(float(err.mean()), 3),
+                         "max_px": round(float(err.max()), 3), "reason": ""})
+        return rows
+
+    def next_instruction(self, spread: dict | None = None) -> str:
+        """What the operator should capture or measure next. It does not relax a gate."""
+        if spread is None:
+            spread = pose_diversity_report(self.handeye_views)
+        if len(self.intrinsic_views) < INTRINSIC_MIN:
+            missing = INTRINSIC_MIN - len(self.intrinsic_views)
+            return (f"Measure one square and capture {missing} more tilted checkerboard view"
+                    f"{'s' if missing != 1 else ''}. The Pi image is already rotated 180 degrees. "
+                    "Do not rotate it again.")
+        if self.intrinsics is None:
+            return ("Solve intrinsics. The matrix is kept only when reprojection is under "
+                    f"{MAX_RMS_PX:g} px and every image has the same size.")
+        if self.intrinsics["reprojection_rms_px"] > MAX_RMS_PX:
+            return (f"Reprojection is {self.intrinsics['reprojection_rms_px']} px, above {MAX_RMS_PX:g}. "
+                    "Remove the worst view and capture a sharper one. The gate is not relaxed.")
+        if spread.get("one_axis"):
+            return (spread.get("reason") or "the rotations stay near one axis") + " " + DOF_NOTE
+        if len(self.handeye_views) < HANDEYE_MIN + 1:
+            missing = HANDEYE_MIN + 1 - len(self.handeye_views)
+            return (f"Fix the board in the robot base. Move the arm by hand, wait until it is still, "
+                    f"and capture {missing} more telemetry pose{'s' if missing != 1 else ''}. "
+                    "Change the wrist and the shoulder, not only the base. " + DOF_NOTE)
+        if not spread.get("ready_to_solve"):
+            return (spread.get("reason") or "the poses are not diverse enough") + " " + DOF_NOTE
+        on_table = sum(1 for view in self.handeye_views if view.get("on_table"))
+        if on_table < TABLE_MIN:
+            return (f"Mark at least {TABLE_MIN} hand-eye views as flat on the table. "
+                    f"{on_table} are marked. The plane is not invented from the other views.")
+        if self.hand_eye is None or self.table is None:
+            return (f"Solve hand-eye. Consistency and the held-out error must be within {MAX_HANDEYE_MM:g} mm, "
+                    f"and the plane residual within {MAX_PLANE_MM:g} mm. Otherwise no matrix is stored.")
+        if not self.assess(self._solved_size())["valid"]:
+            return "The stored matrices failed a gate. Read the residuals. A centered image is not a calibration."
+        return ("The stored gates passed. Type a measured table point and compare it with the ray. "
+                "That comparison does not authorize a move.")
+
+    def samples(self) -> dict:
+        errors = {item["index"]: item for item in self.intrinsic_errors()}
+
+        def brief(kind: str, views: list[dict]) -> list[dict]:
+            rows = []
+            for index, view in enumerate(views):
+                image = view.get("image") or {}
+                rows.append({
+                    "kind": kind, "index": index, "accepted": True,
+                    "width": view.get("width"), "height": view.get("height"),
+                    "corners": len(view.get("corners") or []),
+                    "square_mm": view.get("square_mm"), "pose_source": view.get("pose_source"),
+                    "on_table": bool(view.get("on_table")), "time": view.get("time"),
+                    "image": image.get("preview"), "rotate_reported": image.get("rotate_reported"),
+                    "reprojection_px": None if kind != "intrinsics" else (errors.get(index) or {}).get("mean_px"),
+                })
+            return rows
+
+        spread = pose_diversity_report(self.handeye_views)
+        return {
+            "intrinsics": brief("intrinsics", self.intrinsic_views),
+            "handeye": brief("handeye", self.handeye_views),
+            "rejected": list(self.rejected[-30:]),
+            "n_rejected_intrinsics": sum(1 for item in self.rejected if item["kind"] == "intrinsics"),
+            "n_rejected_handeye": sum(1 for item in self.rejected if item["kind"] == "handeye"),
+            "spread": spread, "next_instruction": self.next_instruction(spread), "dof_note": DOF_NOTE,
+            "gates": {"rms_px": MAX_RMS_PX, "handeye_mm": MAX_HANDEYE_MM, "plane_mm": MAX_PLANE_MM},
+        }
 
     def solve(self) -> dict:
         """Solve whatever the stored observations support. Does not invent a missing matrix."""
@@ -703,6 +849,8 @@ class VisionStore:
             "n_intrinsics": len(self.intrinsic_views),
             "n_handeye": len(self.handeye_views),
             "n_on_table": sum(1 for view in self.handeye_views if view.get("on_table")),
+            "n_rejected_intrinsics": sum(1 for item in self.rejected if item["kind"] == "intrinsics"),
+            "n_rejected_handeye": sum(1 for item in self.rejected if item["kind"] == "handeye"),
             "square_mm": squares,
             "image_sizes": [list(size) for size in sizes],
             "spread": spread,
@@ -710,6 +858,9 @@ class VisionStore:
             "consistency_mm": None if not self.hand_eye else self.hand_eye.get("consistency_mm"),
             "holdout_mm": None if not self.hand_eye else self.hand_eye.get("holdout_mm"),
             "plane_residual_mm": None if not self.table else self.table.get("residual_mm"),
+            "per_view_px": self.intrinsic_errors(),
+            "next_instruction": self.next_instruction(spread),
+            "dof_note": DOF_NOTE,
             "persisted_matrix": self.hand_eye is not None and self.intrinsics is not None,
             "valid": bool(self.assess(self._solved_size())["valid"]),
         }
@@ -728,6 +879,7 @@ class VisionStore:
         payload = {
             "version": self.version, "created": self.created,
             "intrinsic_views": self.intrinsic_views, "handeye_views": self.handeye_views,
+            "rejected": self.rejected,
             "intrinsics": self.intrinsics, "hand_eye": self.hand_eye, "table": self.table,
             "rpy_convention": self.rpy_convention,
             "solved_from_observations": bool(self.intrinsics or self.hand_eye or self.table),
@@ -750,6 +902,7 @@ class VisionStore:
         store.created = str(payload.get("created") or "")
         store.intrinsic_views = list(payload.get("intrinsic_views") or [])
         store.handeye_views = list(payload.get("handeye_views") or [])
+        store.rejected = list(payload.get("rejected") or [])
         # A matrix with no observations is ignored. It cannot be checked, so it is not used.
         if store.intrinsic_views:
             store.intrinsics = payload.get("intrinsics")
