@@ -217,12 +217,13 @@ s.append(PageBreak())
 s.append(P("3. How to make it: the morning, step by step", h1))
 s.append(P("Before 09:00 (on the train): install and try the demo", h2))
 s.append(Preformatted("git clone https://github.com/Aman-AI-Guy/Grok_Hackathon && cd Grok_Hackathon\n"
-                      "python3 -m venv .venv && .venv/bin/pip install -e \".[dev,robots]\"\n"
+                      "python3 -m venv .venv && .venv/bin/pip install -e \".[dev,robots,ui]\"\n"
                       "cp .env.example .env\n"
                       ".venv/bin/python -m trova          # then open http://localhost:8000", code))
 s.append(table([["Time", "Who", "What"],
                 ["09:00", "P1 + P5", "Claim Track A. Ask for the xArm5 (or UR5e), its IP, and the arm slot calendar."],
-                ["09:00", "P3", "Put the API key in <font face='Courier'>.env</font>, restart the app: badge shows LIVE."],
+                ["09:00", "P3", "Put the API key in <font face='Courier'>.env</font>, restart the app: badge shows LIVE. "
+                 "Press <i>preflight</i> (header): fix every red item."],
                 ["09:00", "P5", "Ask Claudio Peroni the questions in section 4."],
                 ["09:15", "P2", "Mount the camera top-down; set <font face='Courier'>TROVA_CAMERA</font>; press "
                  "<i>Capture empty table</i>; tune until every object has exactly one box; record 10 minutes of station "
@@ -233,7 +234,9 @@ s.append(table([["Time", "Who", "What"],
                 ["First arm slot", "P1 (+ P2)", "Connect, first slow move, test STOP, calibrate (steps below)."],
                 ["13:00 target", "Everyone", "<b>First real find:</b> real camera, live Grok, real arm pointing."],
                 ["Afternoon", "Everyone", "Measure, tune, live voice test, rehearse. Record the backup video tonight. "
-                 "For the demo: open <font face='Courier'>/jury</font> on the projector and reset the score."]],
+                 "For the demo: <i>preflight</i>, set the batch, stick the <i>Print labels</i> sheet on cartons, open "
+                 "<font face='Courier'>/jury</font> on the projector, reset the score, and show <i>Watch the line</i> "
+                 "and <font face='Courier'>/history</font>."]],
                [24, 20, 130]))
 s.append(P("The first arm slot (P1, with museum staff)", h2))
 s += numbered([
@@ -248,10 +251,13 @@ s += numbered([
 s.append(Preformatted("TROVA_ARM=xarm:192.168.1.xxx        # or ur:<ip>  or  elite:<ip>\n"
                       "TROVA_ARM_SPEED_MM_S=50\n"
                       "TROVA_ARM_Z_MM=150                  # tip height: table surface + 3-5 cm, measure it\n"
-                      "TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax   # moves outside are refused\n"
-                      "TROVA_ARM_HOME_MM=x,y,z             # parked pose, out of the camera's view", code))
-s.append(P("A real arm refuses to move until it has been calibrated with the arm itself. If the arm misbehaves, keep "
-           "working with <font face='Courier'>TROVA_ARM=sim</font> and come back in the next slot.", muted))
+                      "TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax   # REQUIRED: moves outside are refused\n"
+                      "TROVA_ARM_HOME_MM=x,y,z             # REQUIRED: parked pose, out of the camera's view\n"
+                      "TROVA_TOKEN=some-secret             # venue Wi-Fi: open the printed ?token= link once per device", code))
+s.append(P("A real arm refuses to move without a safety box, a home pose and a calibration made with the arm itself; "
+           "<i>preflight</i> lists what is missing. STOP (button, Escape, space, \"stop\"/\"fermo\") stays latched until "
+           "the next command. If the arm misbehaves, keep working with <font face='Courier'>TROVA_ARM=sim</font> and come "
+           "back in the next slot.", muted))
 
 # ------------------------------------------------------------------ 4. who to talk to
 s.append(PageBreak())

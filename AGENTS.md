@@ -124,9 +124,16 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 - No live Grok / Grok Voice call has run yet (keys arrive at the event).
 - Arm drivers are tested against fakes, not real robots or simulators. Elite is the least certain.
 - Go2 dog driver is a template.
+- Elite: the freedrive script (`while True:` inside `def ... end`) and the `a=`/`v=` keywords of `movel` are unverified:
+  run them once on the Elite simulator or with staff. xArm start latency is handled (0.5 s grace) but not measured.
+- Voice: `audio.input.transcription` (grok-transcribe + keyterms) is not in the public session docs; if the session
+  rejects it, drop that block in `voice.py`. Browser speech fallback in Chrome needs internet (Google recognition).
+- Label OCR (feature 11) and watch explanations (feature 10) are tested in mock only; QR decoding is real (OpenCV).
+- Change verification sends at most 12 candidates to Grok; more means "the camera probably moved" (not clear).
 
 ## Changelog (newest first)
 
+- 2026-11-04 Docs: README and morning guide cover features 8-13, the required safety box and home pose, preflight, TROVA_TOKEN and the browser smoke test; known gaps list what the review could not confirm.
 - 2026-11-04 Polish: approving a NOT clear line needs a written reason (and decision must be approve/reject); a spoken answer right after Trova's question is treated as the answer (UI race fixed); spoken results opt-in (on with the first push-to-talk) and deferred, because headless Chrome stalled ~15 s while speaking; `tests/browser_smoke.py` (new `ui` extra) clicks through every feature and fails on JS errors, 5xx, unexpected 4xx or sideways scroll on phones; lint clean (ruff E,F,W,B).
 - 2026-11-04 Feature 13: audit trail page with filters, search and CSV; tamper-evident hash chain in events.jsonl with a verify endpoint.
 - 2026-11-04 Feature 12: browser speech fallback (push to talk, EN/IT command parser, stop on interim transcript) and spoken results.

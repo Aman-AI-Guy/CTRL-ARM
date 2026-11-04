@@ -33,14 +33,21 @@ Grok Hackathon at the Museum, Pavia, 4–5 November 2026. Track A, CTRL+F: SEA (
 | Failure log | After "wrong", click the right object (or "not on the table", or "arm missed"): cause and owner are recorded; `python eval/run_eval.py failures` |
 | Point at all the X | Type "all the pens" and press "Find all", or ask the voice: the arm visits each match |
 | Tray lift with the fork (experimental, off) | `TROVA_ALLOW_LIFT=1` after measuring the tray with staff; after a find, "Lift its tray" and click the destination |
+| Offline fallback | Wi-Fi or xAI down: answers come from a local colour matcher, the badge says OFFLINE, live is retried every 30 s |
+| Preflight check | "preflight" in the header (or `python -m trova.preflight`): camera, light, focus, empty table, calibration, arm, safety box, Grok ping, voice, disk; each with the fix |
+| Watch the line | After clearance press "Watch the line": anything added, removed or moved (or an object in a *must be empty* zone) raises a red alarm with a beep in ~1.5 s; optionally the arm points at it; Grok explains it; Acknowledge |
+| Labels, lots and batch | Set the current batch (e.g. A123): every check also reads QR codes and printed lot / expiry and flags old lots, expired items, code vs print mismatches. "Print labels" gives a demo sheet |
+| Browser speech fallback | "Push to talk (browser)" when Grok Voice is not available: EN/IT commands, stop word works on the half-finished sentence, answers spoken |
+| Audit trail | "history" in the header: every event with its photo, filters, search, CSV; "Verify log integrity" checks the SHA-256 chain of `data/events.jsonl` |
 
 ## Run it
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev,robots,ui]"
 cp .env.example .env          # add XAI_API_KEY; without it everything runs in MOCK mode
 .venv/bin/python -m trova     # prints http://localhost:8000 and the phone URL
 .venv/bin/pytest -q           # offline tests, no key or hardware needed
+.venv/bin/python tests/browser_smoke.py   # clicks through every feature in Chrome
 ```
 
 **Mock mode** (no key) simulates Grok with a colour-word matcher so the whole flow, UI and tests work offline. It is plumbing only; never report mock numbers.
@@ -49,18 +56,20 @@ The default `TROVA_CAMERA=demo` is a synthetic table with a "tamper" button (add
 
 ## Using it
 
+0. **Preflight** (header button) every morning and before the jury: fix every ✗.
 1. **Setup** (once per arm slot): pick the camera, press **Capture empty table** with the table empty and the arm parked, then **Calibrate (ArUco)** with the 4 printed markers (or **Calibrate by clicks**).
 2. **Find**: type or say a request, or tap **Photo of the object** on a phone. Grok answers, the arm points.
-3. **What changed**: **Save reference** → someone changes the table → **Check now** → **Sign off** → **Open record**.
+3. **What changed**: set the **Batch**, **Save reference** → someone changes the table → **Check now** → **Sign off** (approving a NOT clear line needs a reason) → **Open record** / **Download PDF**. **Watch the line** keeps checking on its own.
 4. **Jury mode**: after each find press ✓ or ✗ (on ✗, click the right object or "not on the table"). Every judged find is saved as an eval case in `data/cases/finds.jsonl`.
 5. **Voice**: on the laptop (http://localhost:8000, the browser needs it for the mic) press **Talk to Trova** and speak. With "ask before the arm moves" on, it confirms first.
-6. **STOP** (top right, or the space bar, or saying "stop" / "fermo") halts the arm and holds position. Staff e-stop stays primary.
+6. **STOP** (top right, Escape, the space bar, or saying "stop" / "fermo") halts the arm and holds position; it stays stopped until the next command. Staff e-stop stays primary.
 7. **Optional dog**: `TROVA_DOG=sim`. When a find says "not on the table", **Send the dog** walks the route in `data/dog_route/` (photos named `01_Room 2 desk.jpg`, ...) and Grok checks each stop.
 
 ## Hardware hookup
 
 - **Camera**: `TROVA_CAMERA=0|1|...` for a webcam or an iPhone via Continuity Camera (turn off Center Stage / Portrait / Studio Light in macOS Control Centre → Video Effects). Mount it rigid and top-down. A video file or a folder of photos also works (`TROVA_CAMERA=station.mp4`).
 - **Arm** (the event has UR3e, UR5e, UFactory xArm5, Elite CS63, CS66): `TROVA_ARM=ur:<ip>` | `xarm:<ip>` | `elite:<ip>`. UR and Elite use plain sockets (URScript / Elite script + RTDE/RTSI pose); xArm uses `pip install xarm-python-sdk`. On UR/Elite enable **Remote Control** on the pendant; on every arm set the **TCP offset** of the printed tool. Set `TROVA_ARM_Z_MM`, `TROVA_ARM_LIMITS` and `TROVA_ARM_HOME_MM` before the first move: without the last two a real arm refuses every move. Then **Freedrive on**, put the tip on the table at 4–6 spread points and click the tip each time (**Calibrate with arm**). A real arm refuses to move until this calibration exists. Rehearse everything with `TROVA_ARM=cartesian:fake`. Any other arm: `grid:` + taught poses ([`backend_template.py`](trova/arm/backend_template.py)).
+- **Venue Wi-Fi**: set `TROVA_TOKEN=<secret>`; open the printed link (`?token=...`) once on each laptop and phone. Without it anyone on the network could move the arm.
 - **Markers**: Setup → **Print markers** (ArUco 4x4, ids 0–3). Put their measured centres in `data/markers.json` as `{"0": [x_mm, y_mm], ...}`; the default is the 4 corners of a `TROVA_TABLE_W_MM` × `TROVA_TABLE_H_MM` area.
 
 ## Results
