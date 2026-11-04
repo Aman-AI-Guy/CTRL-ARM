@@ -34,6 +34,7 @@ from .finder import find as grok_find, find_all as grok_find_all
 from .inventory import describe as describe_table, draw_map
 from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
+from . import preflight
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
 from .marks import HIGHLIGHT, MARK, draw_marks, jpeg
@@ -1049,6 +1050,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     @app.get("/api/log")
     def api_log(n: int = 40, kind: str | None = None):
         return st.audit.recent(n, kind)
+
+    preflight.register(app, st)      # feature 9: GET /api/preflight
 
     # ------------------------------------------------------------------ demo helpers
     @app.post("/api/demo/tamper")

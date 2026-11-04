@@ -108,11 +108,16 @@ def _arm(st) -> list[dict]:
         out.append(_item("Safety box", "ok" if st.arm.limits else "fail",
                          "TROVA_ARM_LIMITS set" if st.arm.limits else "no workspace limits",
                          "" if st.arm.limits else "Set TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax with staff"))
-        out.append(_item("Home pose", "ok" if st.arm.home_mm else "warn",
-                         f"{st.arm.home_mm}" if st.arm.home_mm else "none: the arm will not park out of view",
+        out.append(_item("Home pose", "ok" if st.arm.home_mm else "fail",
+                         f"{st.arm.home_mm}" if st.arm.home_mm else "none: the arm refuses to move without one",
                          "" if st.arm.home_mm else "Set TROVA_ARM_HOME_MM=x,y,z outside the camera view"))
     if lift_allowed():
         out.append(_item("Tray lift", "warn", "enabled", "Only with measured TROVA_TRAY_* values, agreed with staff"))
+    if not os.getenv("TROVA_TOKEN", "").strip() and st.s.host not in ("127.0.0.1", "localhost"):
+        out.append(_item("Wi-Fi access", "warn" if isinstance(st.arm, CartesianArm) else "ok",
+                         "open to anyone on this network" if isinstance(st.arm, CartesianArm) else "open (simulated arm)",
+                         "Set TROVA_TOKEN=<secret> and open the printed ?token= link on each device"
+                         if isinstance(st.arm, CartesianArm) else ""))
     return out
 
 

@@ -356,3 +356,32 @@ def test_access_token(tmp_path, monkeypatch):
     assert c.get("/api/state", headers={"x-trova-token": "s3cret"}).status_code == 200
     assert c.get("/?token=s3cret").status_code == 200             # sets the cookie for this device
     assert c.get("/api/state").status_code == 200
+
+
+# ---------------------------------------------------------------- feature 9: preflight
+def test_preflight(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    d = c.get("/api/preflight").json()
+    names = {i["name"]: i for i in d["items"]}
+    assert {"Camera", "Light", "Focus", "Empty table", "Objects", "Calibration", "Arm", "Grok", "Disk"} <= set(names)
+    assert names["Grok"]["status"] == "warn" and "MOCK" in names["Grok"]["detail"]
+    assert names["Empty table"]["status"] == "warn" and d["ok"]           # warnings only: still OK to go
+    c.post("/api/background", data={"mode": "capture"})
+    assert {i["name"]: i for i in c.get("/api/preflight").json()["items"]}["Empty table"]["status"] == "ok"
+
+    app2, c2 = _client(tmp_path / "real", monkeypatch, TROVA_ARM="cartesian:fake")
+    d2 = c2.get("/api/preflight").json()
+    n2 = {i["name"]: i for i in d2["items"]}
+    assert not d2["ok"] and n2["Safety box"]["status"] == "fail" and n2["Calibration"]["status"] == "fail"
+    assert "TROVA_ARM_LIMITS" in n2["Safety box"]["fix"] and n2["Home pose"]["status"] == "fail"
+
+    from trova import grok as grok_mod
+    import requests
+    app3, c3 = _client(tmp_path / "live", monkeypatch, mock="0", XAI_API_KEY="xai-test")
+    st3 = app3.state.trova
+    monkeypatch.setattr(grok_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(st3.grok.session, "post", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("down")))
+    monkeypatch.setattr("trova.voice.mint_token", lambda key, seconds=300: {"token": "t"})
+    n3 = {i["name"]: i for i in c3.get("/api/preflight").json()["items"]}
+    assert n3["Grok"]["status"] == "fail" and "unreachable" in n3["Grok"]["detail"] and n3["Voice"]["status"] == "ok"
