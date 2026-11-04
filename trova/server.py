@@ -37,7 +37,8 @@ from .scene import (
     Decision, TrackState, assign_tracks, build_objects, decide_text, from_finder, pack, question_for,
     remember_world,
 )
-from .geom import VisionStore
+from .geom import VisionStore, annotate_checkerboard, pose_changed
+from .arm.telemetry import observation_record, open_reader
 from .acquire import ScanBook
 from . import agent as agent_mod
 from . import failures as fail_log
@@ -156,6 +157,13 @@ class HandEyeReq(BoardReq):
     on_table: bool = False
 
 
+class PreviewReq(BaseModel):
+    """Look for a checkerboard. This stores nothing and does not move the arm."""
+    model_config = ConfigDict(extra="forbid")
+    cols: int
+    rows: int
+
+
 class AgentReq(BaseModel):
     """A spoken or typed task. Mode, limits, speed and unlock are not fields."""
     model_config = ConfigDict(extra="forbid")
@@ -202,6 +210,8 @@ class State:
         self.frame_size: list[int] | None = None      # live camera frame size (not an uploaded photo)
         self.camera_error: str | None = None
         self.arm = make_arm(s.arm, s.data_dir, s.table_w_mm, s.table_h_mm)
+        # Pose reads stay off the motion driver. Empty means "use whatever the arm driver reports".
+        self.reader = open_reader(os.getenv("TROVA_ARM_READ", ""))
         # the camera is on the arm (the event's xArm 5): every picture is taken from the taught survey pose
         self.camera_on_arm = os.getenv("TROVA_CAMERA_ON_ARM", "0").lower() in ("1", "true", "yes")
         self.settle_s = float(os.getenv("TROVA_CAMERA_SETTLE_S", "0.6"))
@@ -432,8 +442,23 @@ class State:
 
     def robot_telemetry(self) -> dict:
         """Read the pose. Does not enable motors, clear errors, or send a motion command."""
+        reader = getattr(self, "reader", None)
+        if reader is not None:
+            reading = reader.read()
+            reading["arm_state"] = "read-only"
+            reading["tip_mm"] = reading.get("xyz_mm")
+            reading["status_tcp_mm"] = reading.get("xyz_mm")
+            # This connection never enables motion. process_can_move is the motion driver, separately.
+            reading["movements_enabled"] = False
+            reading["motion_sent"] = False
+            reading["process_can_move"] = self._process_can_move()
+            reading["read_only"] = not reading["process_can_move"]
+            return reading
         out = {"xyz_mm": None, "pose6": None, "joints": None, "moving": None,
-               "source": "unavailable", "simulated": None, "error": None}
+               "source": "unavailable", "simulated": None, "error": None,
+               "motion_sent": False, "movements_enabled": False, "motors_enabled_by_trova": False,
+               "tcp_changed": False, "sync_precision_claimed": False,
+               "process_can_move": False, "read_only": True}
         try:
             status = self.arm.status()
         except Exception as exc:  # noqa: BLE001 - telemetry is optional; a dead link is reported
@@ -469,7 +494,19 @@ class State:
         except Exception as exc:  # noqa: BLE001
             out["error"] = str(exc)
             out["pose6"] = None
+        # A live controller pose is telemetry, and that driver can be asked to move.
+        # A simulated pose must not be labeled as a read-only physical connection.
+        out["movements_enabled"] = out.get("source") == "telemetry" and not out.get("simulated")
+        out["process_can_move"] = self._process_can_move()
+        out["read_only"] = not out["process_can_move"]
         return out
+
+    def _process_can_move(self) -> bool:
+        """True only when this process is in hardware mode on a non-simulated driver."""
+        gateway = getattr(getattr(self, "arm", None), "gateway", None)
+        if gateway is None:
+            return False
+        return gateway.mode == "hardware" and not bool(getattr(gateway, "simulated", True))
 
     def snapshot_scene(self, *, home: bool = False) -> dict:
         """One fresh picture, proposals, names, and stable ids. home=True parks a real arm first (existing inventory).
@@ -534,6 +571,7 @@ class AgentHost:
         self.camera_kind = info.get("kind") or ""
         self.image_size = list(st.frame_size or info.get("size") or [0, 0])
         self.observe_clearance_mm = _observe_clearance()
+        self.read_only_robot = getattr(st, "reader", None) is not None
         self.frame = st.scene_frame
         self.boxes = st.scene_boxes
         self._jpeg: bytes | None = None
@@ -548,6 +586,13 @@ class AgentHost:
 
     def robot(self) -> dict:
         return self.st.robot_telemetry()
+
+    def inverse(self, pose6, ref_joints=None) -> dict:
+        reader = getattr(self.st, "reader", None)
+        if reader is None or not hasattr(reader, "inverse"):
+            return {"ok": False, "ik_verified": False, "joints": None, "motion_sent": False,
+                    "reason": "inverse kinematics was not asked of the controller"}
+        return reader.inverse(pose6, ref_joints)
 
     def read_frame(self):
         kind = self.st.source.info().get("kind")
@@ -756,6 +801,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(), "batch": st.batch, "room": st.room,
             "light": st.light.status(),
             "vision": st.vision.assess(size),
+            "vision_progress": st.vision.progress(),
             "robot": st.robot_telemetry(),
             "agent": st.last_agent,
             "scan": None if not st.scans.active else st.scans.public(st.scans.sessions[st.scans.active]),
@@ -1706,42 +1752,104 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             "sync": "local_read", "sync_precision_claimed": False,
         }
 
+    def _capture_meta(frame, meta: dict) -> dict:
+        packed = dict(meta)
+        packed["width"] = int(frame.shape[1])
+        packed["height"] = int(frame.shape[0])
+        return packed
+
+    def _reported_size(frame, meta: dict) -> str | None:
+        width, height = meta.get("width_reported"), meta.get("height_reported")
+        if not width or not height:
+            return None
+        if (int(width), int(height)) != (int(frame.shape[1]), int(frame.shape[0])):
+            return (f"decoded image is {frame.shape[1]}x{frame.shape[0]} but the camera reported "
+                    f"{width}x{height}")
+        return None
+
     @app.get("/api/vision/calibration")
     def api_vision_calibration():
         size = st.frame_size or st.source.info().get("size")
         report = st.vision.as_dict()
         report["status"] = st.vision.assess(size)
+        report["progress"] = st.vision.progress()
         report["moved"] = False
         return report
+
+    @app.post("/api/vision/preview")
+    def api_vision_preview(body: PreviewReq):
+        if body.cols < 2 or body.rows < 2:
+            raise HTTPException(400, "cols and rows are the inner corners of the checkerboard")
+        frame, _data, meta = _fresh_frame()
+        meta = _capture_meta(frame, meta)
+        robot = st.robot_telemetry()
+        drawn, info = annotate_checkerboard(frame, body.cols, body.rows)
+        path = st.audit.save_image("board", drawn)
+        return info | {
+            "image": path, "moved": False, "persisted": False,
+            "size_conflict": _reported_size(frame, meta),
+            "observation": observation_record(meta, robot, info),
+        }
 
     @app.post("/api/vision/intrinsics")
     def api_vision_intrinsics(body: BoardReq):
         if body.square_mm <= 0:
             raise HTTPException(400, "square_mm has to be the measured checkerboard square")
-        frame, _data, _meta = _fresh_frame()
-        out = st.vision.add_intrinsics(frame, body.cols, body.rows, body.square_mm)
+        frame, _data, meta = _fresh_frame()
+        meta = _capture_meta(frame, meta)
+        conflict = _reported_size(frame, meta)
+        drawn, info = annotate_checkerboard(frame, body.cols, body.rows)
+        path = st.audit.save_image("board", drawn)
+        if conflict:
+            out = {"ok": False, "reason": conflict, "count": len(st.vision.intrinsic_views), "corners": 0}
+        else:
+            out = st.vision.add_intrinsics(frame, body.cols, body.rows, body.square_mm, image_meta=meta)
         st.audit.event("vision_capture", step="intrinsics", ok=out["ok"], reason=out["reason"],
                        count=out.get("count"), moved=False)
-        return out | {"moved": False}
+        return out | {"moved": False, "image": path, "found": info["found"],
+                      "observation": observation_record(meta, st.robot_telemetry(), info),
+                      "progress": st.vision.progress()}
 
     @app.post("/api/vision/intrinsics/solve")
     def api_vision_intrinsics_solve():
         report = st.vision.solve()
         st.audit.event("vision_capture", step="solve", version=report["version"],
                        status=report["status"]["status"], moved=False)
-        return report | {"moved": False}
+        return report | {"moved": False, "progress": st.vision.progress()}
 
     @app.post("/api/vision/handeye")
     def api_vision_handeye(body: HandEyeReq):
         if body.square_mm <= 0:
             raise HTTPException(400, "square_mm has to be the measured checkerboard square")
-        robot = st.robot_telemetry()
-        frame, _data, _meta = _fresh_frame()
-        out = st.vision.add_handeye(frame, robot.get("pose6"), body.cols, body.rows, body.square_mm,
-                                    on_table=body.on_table, pose_source=robot.get("source") or "")
+        before = st.robot_telemetry()
+        frame, _data, meta = _fresh_frame()
+        meta = _capture_meta(frame, meta)
+        after = st.robot_telemetry()
+        drawn, info = annotate_checkerboard(frame, body.cols, body.rows)
+        path = st.audit.save_image("board", drawn)
+        conflict = _reported_size(frame, meta)
+        if pose_changed(before.get("pose6"), after.get("pose6")):
+            out = {"ok": False, "corners": info["corners"], "count": len(st.vision.handeye_views),
+                   "reason": "the arm moved while the picture was taken, so the pose was not stored"}
+        elif conflict:
+            out = {"ok": False, "corners": 0, "count": len(st.vision.handeye_views), "reason": conflict}
+        elif after.get("source") != "telemetry":
+            if not after.get("pose6"):
+                reason = "the controller did not report roll, pitch and yaw"
+            else:
+                reason = (f"the pose source is {after.get('source') or 'unavailable'}, not telemetry; "
+                          "the view was not stored")
+            out = {"ok": False, "corners": info["corners"], "count": len(st.vision.handeye_views), "reason": reason}
+        else:
+            out = st.vision.add_handeye(
+                frame, after.get("pose6"), body.cols, body.rows, body.square_mm,
+                on_table=body.on_table, pose_source="telemetry", robot=after, image_meta=meta,
+                moving=bool(after.get("moving")))
         st.audit.event("vision_capture", step="handeye", ok=out["ok"], reason=out["reason"],
-                       count=out.get("count"), pose_source=robot.get("source"), moved=False)
-        return out | {"moved": False, "pose_source": robot.get("source")}
+                       count=out.get("count"), pose_source=after.get("source"), moved=False)
+        return out | {"moved": False, "pose_source": after.get("source"), "image": path,
+                      "found": info["found"], "observation": observation_record(meta, after, info),
+                      "progress": st.vision.progress()}
 
     @app.post("/api/vision/handeye/solve")
     def api_vision_handeye_solve():
@@ -1782,6 +1890,10 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         packed["joints_deg"] = robot.get("joints")
         packed["pose_source"] = robot.get("source")
         packed["moving"] = bool(robot.get("moving"))
+        packed["state_code"] = robot.get("state_code")
+        packed["error_code"] = robot.get("error_code")
+        packed["warn_code"] = robot.get("warn_code")
+        packed["read_finished_at"] = robot.get("read_finished_at")
         packed["calibration_version"] = st.vision.version
         packed["calibration_valid"] = bool(st.vision.assess(st.frame_size)["valid"])
         if st.vision.hand_eye:

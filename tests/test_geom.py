@@ -7,7 +7,8 @@ import numpy as np
 
 from trova.boxes import Box
 from trova.geom import (
-    VisionStore, camera_pose_matrix, detect_checkerboard, intersect_ray_plane, pixel_ray,
+    FIRST_MOVE, PROCEDURE, VisionStore, annotate_checkerboard, camera_pose_matrix,
+    detect_checkerboard, intersect_ray_plane, pixel_ray, pose_changed, pose_diversity_report,
     project_observations, tool_pose_matrix,
 )
 from trova.scene import TrackState, assign_tracks
@@ -45,6 +46,79 @@ def _projected_board_views():
             "width": 640, "height": 480, "cols": 6, "rows": 5, "square_mm": 20.0, "time": "",
         })
     return views
+
+
+def test_camera_to_base_is_the_tool_pose_times_the_mount():
+    pose = (10.0, -20.0, 300.0, 180.0, 0.0, 25.0)
+    mount = tool_pose_matrix((0.0, 0.0, 40.0, 0.0, 0.0, 0.0))
+    camera = camera_pose_matrix(pose, mount)
+    assert np.allclose(camera, tool_pose_matrix(pose) @ mount)
+    ray = pixel_ray(320.0, 240.0, np.array([[800.0, 0, 320.0], [0, 800.0, 240.0], [0, 0, 1]]), np.zeros(5))
+    assert abs(np.linalg.norm(ray) - 1.0) < 1e-6
+
+
+def test_checkerboard_annotation_draws_only_detected_corners():
+    image = _checker()
+    drawn, info = annotate_checkerboard(image, 5, 4)
+    assert info["found"] is True and info["corners"] == 20
+    assert drawn.shape == image.shape
+    assert not np.array_equal(drawn, image)
+    blank, missing = annotate_checkerboard(np.full_like(image, 255), 5, 4)
+    assert missing["found"] is False and missing["corners"] == 0
+    assert np.array_equal(blank, np.full_like(image, 255))
+
+
+def test_pose_diversity_rejects_one_axis_and_a_short_set():
+    assert pose_changed([0, 0, 200, 180, 0, 0], [4, 0, 200, 180, 0, 0]) is False
+    assert pose_changed([0, 0, 200, 180, 0, 0], [0, 0, 200, 180, 0, 3]) is True
+    narrow = [{"pose6": [i * 40, 0, 200, roll, 0, 0], "pose_source": "telemetry"}
+              for i, roll in enumerate((0, 20, 40, 60, 80, 100))]
+    report = pose_diversity_report(narrow)
+    assert report["n_poses"] == 6 and report["one_axis"] is True
+    assert report["ready_to_solve"] is False and "one axis" in report["reason"]
+    mixed = [dict(view, pose_source="simulated") for view in narrow]
+    assert "not robot telemetry" in pose_diversity_report(mixed)["reason"]
+    short = pose_diversity_report(narrow[:2])
+    assert short["ready_to_solve"] is False and "held-out" in short["reason"]
+
+
+def test_observation_pose_keeps_the_xarm_orientation_constraint():
+    store = _fixture_store()
+    missing = store.observation_target([100.0, 50.0, 0.0], 150.0)
+    assert missing["yaw_from_telemetry"] is False and missing["ik_verified"] is False
+    assert missing["pose6"][3:] == [180.0, 0.0, 0.0]
+    assert "placeholder" in missing["reason"]
+    aimed = store.observation_target([100.0, 50.0, 0.0], 150.0, yaw_deg=25.0)
+    assert aimed["yaw_from_telemetry"] is True
+    assert aimed["pose6"] == [100.0, 50.0, 150.0, 180.0, 0.0, 25.0]
+    assert aimed["orientation_constraint"]
+    assert "never moves" in PROCEDURE[0]
+    assert any("physical e-stop" in step for step in FIRST_MOVE)
+    assert any("MotionGateway" in step for step in FIRST_MOVE)
+
+
+def test_handeye_capture_rejects_a_moving_or_faulted_controller():
+    image = _checker()
+    store = VisionStore()
+    moving = store.add_handeye(image, [0, 0, 200, 180, 0, 0], 5, 4, 25,
+                               pose_source="telemetry", moving=True)
+    assert moving["ok"] is False and store.handeye_views == []
+    fault = store.add_handeye(image, [0, 0, 200, 180, 0, 0], 5, 4, 25, pose_source="telemetry",
+                              robot={"error_code": 22, "joints": [1, 2, 3, 4, 5]})
+    assert fault["ok"] is False and "22" in fault["reason"]
+    simulated = store.add_handeye(image, [0, 0, 200, 180, 0, 0], 5, 4, 25, pose_source="simulated")
+    assert simulated["ok"] is False and "not telemetry" in simulated["reason"]
+    stored = store.add_handeye(
+        image, [0, 0, 200, 180, 0, 0], 5, 4, 25, pose_source="telemetry", on_table=True,
+        robot={"error_code": 0, "joints": [1, 2, 3, 4, 5], "state_code": 2, "read_finished_at": 3.0},
+        image_meta={"rotate_reported": 180, "extra_rotate": 0, "provenance": "raspberry_pi", "kind": "pi"})
+    assert stored["ok"] and stored["corners"] == 20
+    view = store.handeye_views[0]
+    assert view["pose_source"] == "telemetry" and view["joints"] == [1, 2, 3, 4, 5]
+    assert view["image"]["rotate_reported"] == 180 and view["sync_precision_claimed"] is False
+    progress = store.progress()
+    assert progress["n_handeye"] == 1 and progress["n_on_table"] == 1
+    assert progress["persisted_matrix"] is False and progress["valid"] is False
 
 
 def test_checkerboard_detection_and_intrinsics():

@@ -191,7 +191,7 @@ def _capped(env: dict, name: str, hard: float, default: float) -> float:
 
 def _parse_keepouts(raw: str) -> list[KeepOut]:
     raw = (raw or "").strip()
-    if not raw:
+    if not raw or raw.lower() == "none":
         return []
     boxes = []
     for part in raw.split(";"):
@@ -270,7 +270,8 @@ def backend_is_simulated(arm) -> bool:
 class MotionGateway:
     def __init__(self, arm, *, mode: str, simulated: bool, limits, jog_max_mm: float,
                  max_speed_mm_s: float, max_accel_mm_s2: float, max_joint_speed_deg_s: float,
-                 joint_limits, keepouts: list[KeepOut], camera: CameraBody | None, note: str = ""):
+                 joint_limits, keepouts: list[KeepOut], camera: CameraBody | None, note: str = "",
+                 keepout_assessed: bool = False):
         self.arm = arm
         self.simulated = simulated
         self.limits = limits
@@ -280,6 +281,7 @@ class MotionGateway:
         self.max_joint_speed_deg_s = min(float(max_joint_speed_deg_s), HARD_JOINT_SPEED_DEG_S)
         self.joint_limits = joint_limits
         self.keepouts = list(keepouts)
+        self.keepout_assessed = bool(keepout_assessed)
         self.camera = camera
         self.note = note
         if mode == "hardware" and (simulated or os.environ.get("PYTEST_CURRENT_TEST")):
@@ -311,13 +313,15 @@ class MotionGateway:
             joints = _shrink_joints(env.get("TROVA_ARM_JOINT_LIMITS", ""))
         # Pytest must not inherit a developer's keep-out or camera sphere. A test sets those on the gateway.
         testing = bool(os.environ.get("PYTEST_CURRENT_TEST")) and environ is None
+        keep_raw = "" if testing else (env.get("TROVA_ARM_KEEP_OUT") or "")
         return cls(
             arm, mode=chosen, simulated=simulated, limits=limits, jog_max_mm=_jog_max({} if testing else env),
             max_speed_mm_s=_capped({} if testing else env, "TROVA_ARM_MAX_SPEED_MM_S", HARD_SPEED_MM_S, speed),
             max_accel_mm_s2=_capped({} if testing else env, "TROVA_ARM_MAX_ACCEL_MM_S2", HARD_ACCEL_MM_S2, accel),
             max_joint_speed_deg_s=_capped(
                 {} if testing else env, "TROVA_ARM_MAX_JOINT_SPEED_DEG_S", HARD_JOINT_SPEED_DEG_S, joint_speed),
-            joint_limits=joints, keepouts=[] if testing else _parse_keepouts(env.get("TROVA_ARM_KEEP_OUT", "")),
+            joint_limits=joints, keepouts=[] if testing else _parse_keepouts(keep_raw),
+            keepout_assessed=bool(keep_raw.strip()) and not testing,
             camera=None if testing else _parse_camera(env.get("TROVA_CAMERA_BODY_MM", "")), note=note,
         )
 
@@ -326,12 +330,14 @@ class MotionGateway:
         """No robot attached. Used by the voice CLI before any connection."""
         env = os.environ if environ is None else environ
         mode, note = resolve_mode(False, environ=env)
+        keep_raw = env.get("TROVA_ARM_KEEP_OUT") or ""
         return cls(
             None, mode=mode, simulated=False, limits=None, jog_max_mm=_jog_max(env),
             max_speed_mm_s=_capped(env, "TROVA_ARM_MAX_SPEED_MM_S", HARD_SPEED_MM_S, 100),
             max_accel_mm_s2=_capped(env, "TROVA_ARM_MAX_ACCEL_MM_S2", HARD_ACCEL_MM_S2, 50),
             max_joint_speed_deg_s=_capped(env, "TROVA_ARM_MAX_JOINT_SPEED_DEG_S", HARD_JOINT_SPEED_DEG_S, 20),
-            joint_limits=XARM5_JOINT_LIMITS_DEG, keepouts=_parse_keepouts(env.get("TROVA_ARM_KEEP_OUT", "")),
+            joint_limits=XARM5_JOINT_LIMITS_DEG, keepouts=_parse_keepouts(keep_raw),
+            keepout_assessed=bool(keep_raw.strip()),
             camera=_parse_camera(env.get("TROVA_CAMERA_BODY_MM", "")), note=note,
         )
 
@@ -340,6 +346,9 @@ class MotionGateway:
             "mode": self.mode, "note": self.note, "jog_max_mm": self.jog_max_mm,
             "max_speed_mm_s": self.max_speed_mm_s, "collision_avoidance": False,
             "clearance": "camera_sphere" if self.camera else "not_configured",
+            "workspace": "configured" if self.limits is not None else "not_configured",
+            "keep_out": ("not_assessed" if not self.keepout_assessed
+                         else ("none" if not self.keepouts else f"{len(self.keepouts)} boxes")),
             "software_stop_is_not_safety_rated": True,
         }
 
@@ -379,6 +388,8 @@ class MotionGateway:
             "workspace": "configured" if self.limits is not None else "not_configured",
             "jog_max_mm": self.jog_max_mm, "max_speed_mm_s": self.max_speed_mm_s,
             "max_accel_mm_s2": self.max_accel_mm_s2, "clearance": "not_configured" if self.camera is None else "camera_sphere",
+            "keep_out": ("not_assessed" if not self.keepout_assessed
+                         else ("none" if not self.keepouts else f"{len(self.keepouts)} boxes")),
             "collision_avoidance": False, "software_stop_is_not_safety_rated": True,
             "joint_limits": "xarm5" if self.joint_limits else "not_applied", "note": self.note,
         }

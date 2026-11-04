@@ -38,14 +38,26 @@ MIN_TRANSLATION_MM = 30.0
 
 PROCEDURE = [
     "Put the physical e-stop where you can reach it. This procedure never moves the arm.",
-    "Pose the arm yourself (pendant or bring-up). Then capture. Trova only reads the pose.",
-    "Print a checkerboard. Measure one square and pass that size as square_mm. It is not assumed.",
-    "Intrinsics: hold the board in at least 3 different orientations, capture each, then solve.",
-    "Hand-eye: fix the board. Move the arm yourself to at least 6 well separated poses so one can be held out.",
-    "At each pose, capture a hand-eye view. Mark on_table when the board lies flat on the table.",
-    "Solve hand-eye, then the table plane. Read the reprojection error and the consistency.",
-    "Set TROVA_ARM_LIMITS, TROVA_CAMERA_BODY_MM and TROVA_OBSERVE_CLEARANCE_MM from measurements.",
-    "A valid report is required before an object approach can run. Hardware still needs the M2 unlock.",
+    "Start with TROVA_ARM=sim and TROVA_ARM_READ=xarm:<robot-ip>. The reader does not enable motors, clear errors, change the TCP, or move.",
+    "Confirm the Pi image. The server already rotates it 180 degrees. Do not rotate it again.",
+    "Show the checkerboard. Type the measured square in millimetres. A guess is rejected.",
+    "Intrinsics: capture at least 3 tilted views, then solve. The matrix is kept only when reprojection is under 1.5 px and the image size matches.",
+    "Hand-eye: fix the board in the robot base. Move the arm by hand between captures. Capture at least 6 telemetry poses that are not about one axis, so one can be held out.",
+    "A view is stored only when the pose is still before and after the picture, the controller error is 0, the image size matches the camera, and the corners are found.",
+    "Solve hand-eye and the table plane. Consistency and the held-out board origin must be within 10 mm, and the plane residual within 5 mm. Otherwise no matrix is kept.",
+    "Set TROVA_ARM_LIMITS, TROVA_CAMERA_BODY_MM, TROVA_ARM_KEEP_OUT and TROVA_OBSERVE_CLEARANCE_MM from measurements. Hardware motion is a separate procedure.",
+]
+
+FIRST_MOVE = [
+    "This procedure is not run by the software. Keep the physical e-stop in reach. Software STOP is not that e-stop.",
+    "Measure the workspace and set TROVA_ARM_LIMITS. Measure the table clearance and set TROVA_OBSERVE_CLEARANCE_MM.",
+    "Measure the camera and tool body and set TROVA_CAMERA_BODY_MM. The gateway has no collision mesh, so collision_avoidance stays false.",
+    "Write measured keep-out boxes into TROVA_ARM_KEEP_OUT, or set it to none only after checking the path. Empty means not assessed, and a hardware approach is refused.",
+    "Confirm the joint and speed limits. Confirm the controller error code is 0 and the arm is still.",
+    "Confirm calibration valid from real checkerboard observations: reprojection, held-out hand-eye, and the table residual.",
+    "Run the task while motion is still dry-run. Read the proposed target, the straight-line samples, and the safety status before anyone enables motion.",
+    "Only then set TROVA_MOTION_MODE=hardware and TROVA_HARDWARE_UNLOCK=MOVE on a process whose motion driver is the real arm. Motion still goes through MotionGateway.",
+    "After the move, capture another picture and compare the tool pose with the proposal. A centered image is not a verified 3D position.",
 ]
 
 
@@ -112,6 +124,87 @@ def detect_checkerboard(image: np.ndarray, cols: int, rows: int):
     refined = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1),
                                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01))
     return refined.reshape(-1, 2)
+
+
+def annotate_checkerboard(image: np.ndarray, cols: int, rows: int):
+    """Copy of the image with detected corners drawn. The original is left unchanged."""
+    corners = detect_checkerboard(image, cols, rows)
+    vis = image.copy()
+    found = corners is not None
+    if found:
+        cv2.drawChessboardCorners(vis, (int(cols), int(rows)),
+                                 np.asarray(corners, np.float32).reshape(-1, 1, 2), True)
+    return vis, {
+        "found": found,
+        "corners": 0 if corners is None else int(len(corners)),
+        "width": int(image.shape[1]),
+        "height": int(image.shape[0]),
+        "cols": int(cols),
+        "rows": int(rows),
+        "reason": "checkerboard corners found" if found else f"no {cols}x{rows} checkerboard in this image",
+    }
+
+
+def pose_changed(before, after, mm: float = 5.0, deg: float = 2.0) -> bool:
+    """True when two tool poses are far enough apart that they are not one stationary sample."""
+    if not before or not after or len(before) < 6 or len(after) < 6:
+        return False
+    if any(abs(float(before[i]) - float(after[i])) > mm for i in range(3)):
+        return True
+    return any(abs(float(before[i]) - float(after[i])) > deg for i in range(3, 6))
+
+
+def pose_diversity_report(views) -> dict:
+    """How far the stored tool poses spread. This does not solve or store a matrix."""
+    poses, sources = [], []
+    for view in views or []:
+        pose = view.get("pose6")
+        if not pose or len(pose) < 6:
+            continue
+        poses.append(tool_pose_matrix(pose))
+        sources.append(view.get("pose_source") or "unspecified")
+    count = len(poses)
+    base = {"n_poses": count, "telemetry": sources.count("telemetry"),
+            "max_rotation_deg": 0.0, "max_translation_mm": 0.0, "one_axis": None,
+            "ready_to_solve": False}
+    if count < 2:
+        return base | {"reason": (
+            f"have {count} oriented poses; the held-out check needs {HANDEYE_MIN + 1}")}
+    rotation, shift = _pose_diversity(poses)
+    moment = np.zeros((3, 3))
+    used = 0
+    for i in range(count):
+        for j in range(i + 1, count):
+            relative = _invert_pose(poses[j]) @ poses[i]
+            axis, _ = cv2.Rodrigues(relative[:3, :3])
+            axis = np.asarray(axis, float).reshape(3)
+            if np.linalg.norm(axis) < 1e-6:
+                continue
+            moment += np.outer(axis, axis)
+            used += 1
+    one_axis = False
+    if used and moment.any():
+        singular = np.linalg.svd(moment, compute_uv=False)
+        if singular[0] > 1e-9 and float(singular[-1] / singular[0]) < 1e-3:
+            one_axis = True
+    reasons = []
+    if rotation < MIN_ROTATION_DEG or shift < MIN_TRANSLATION_MM:
+        reasons.append(
+            f"rotation {round(rotation, 2)} deg and translation {round(shift, 2)} mm "
+            f"are below {MIN_ROTATION_DEG:g} deg and {MIN_TRANSLATION_MM:g} mm")
+    if one_axis:
+        reasons.append("the recorded tool rotations stay close to one axis")
+    if count < HANDEYE_MIN + 1:
+        reasons.append(f"held-out check needs {HANDEYE_MIN + 1} poses, have {count}")
+    if any(source != "telemetry" for source in sources):
+        reasons.append("at least one pose is not robot telemetry")
+    return base | {
+        "max_rotation_deg": round(rotation, 2),
+        "max_translation_mm": round(shift, 2),
+        "one_axis": one_axis,
+        "ready_to_solve": not reasons,
+        "reason": "; ".join(reasons) if reasons else "the stored poses meet the diversity gates",
+    }
 
 
 def _invert_pose(matrix: np.ndarray) -> np.ndarray:
@@ -219,6 +312,23 @@ def _holdout_mm(gripper_poses, target_poses) -> tuple[float | None, str]:
     return float(max(errors)), ""
 
 
+def _image_record(meta: dict | None, image: np.ndarray) -> dict:
+    meta = meta or {}
+    return {
+        "requested_at": meta.get("requested_at"),
+        "received_at": meta.get("received_at"),
+        "request_s": meta.get("request_s"),
+        "width": int(image.shape[1]),
+        "height": int(image.shape[0]),
+        "rotate_reported": meta.get("rotate_reported"),
+        "extra_rotate": meta.get("extra_rotate") or 0,
+        "rotated_again": bool(meta.get("rotated_again")),
+        "provenance": meta.get("provenance"),
+        "kind": meta.get("kind"),
+        "sync_precision_claimed": False,
+    }
+
+
 def fit_plane(points) -> tuple[np.ndarray, np.ndarray, float] | None:
     pts = np.asarray(points, float)
     if len(pts) < 3:
@@ -248,42 +358,69 @@ class VisionStore:
         self.table: dict | None = None
         self.rpy_convention = "Rz(yaw) @ Ry(pitch) @ Rx(roll), degrees, xArm tool pose"
 
-    def add_intrinsics(self, image: np.ndarray, cols: int, rows: int, square_mm: float) -> dict:
+    def add_intrinsics(self, image: np.ndarray, cols: int, rows: int, square_mm: float,
+                       image_meta: dict | None = None) -> dict:
         if square_mm <= 0:
-            return {"ok": False, "reason": "square_mm has to be the measured checkerboard square"}
+            return {"ok": False, "reason": "square_mm has to be the measured checkerboard square",
+                    "count": len(self.intrinsic_views), "corners": 0}
         corners = detect_checkerboard(image, cols, rows)
         if corners is None:
-            return {"ok": False, "reason": f"no {cols}x{rows} checkerboard in this image", "count": len(self.intrinsic_views)}
+            return {"ok": False, "reason": f"no {cols}x{rows} checkerboard in this image",
+                    "count": len(self.intrinsic_views), "corners": 0}
         self.intrinsic_views.append({
             "corners": np.round(corners, 3).tolist(),
             "width": int(image.shape[1]), "height": int(image.shape[0]),
             "cols": int(cols), "rows": int(rows), "square_mm": float(square_mm),
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "image": _image_record(image_meta, image),
+            "sync_precision_claimed": False,
         })
         self.intrinsics = None  # a new view invalidates a previous solve
-        return {"ok": True, "count": len(self.intrinsic_views), "reason": "observation stored"}
+        return {"ok": True, "count": len(self.intrinsic_views), "corners": int(len(corners)),
+                "reason": "observation stored"}
 
     def add_handeye(self, image: np.ndarray, pose6, cols: int, rows: int, square_mm: float,
-                    on_table: bool = False, pose_source: str = "") -> dict:
+                    on_table: bool = False, pose_source: str = "", robot: dict | None = None,
+                    image_meta: dict | None = None, moving: bool | None = None) -> dict:
+        if moving:
+            return {"ok": False, "reason": "the robot is still moving; the picture was not stored",
+                    "count": len(self.handeye_views), "corners": 0}
+        if robot and robot.get("error_code") not in (None, 0):
+            return {"ok": False, "corners": 0, "count": len(self.handeye_views),
+                    "reason": f"controller error code {robot.get('error_code')}; the pose was not stored"}
         if pose6 is None or len(pose6) < 6:
-            return {"ok": False, "reason": "the controller did not report roll, pitch and yaw"}
+            return {"ok": False, "reason": "the controller did not report roll, pitch and yaw",
+                    "count": len(self.handeye_views), "corners": 0}
+        if pose_source and pose_source != "telemetry":
+            return {"ok": False, "corners": 0, "count": len(self.handeye_views),
+                    "reason": f"the pose source is {pose_source}, not telemetry; the view was not stored"}
         if square_mm <= 0:
-            return {"ok": False, "reason": "square_mm has to be the measured checkerboard square"}
+            return {"ok": False, "reason": "square_mm has to be the measured checkerboard square",
+                    "count": len(self.handeye_views), "corners": 0}
         corners = detect_checkerboard(image, cols, rows)
         if corners is None:
             return {"ok": False, "reason": f"no {cols}x{rows} checkerboard in this image",
-                    "count": len(self.handeye_views)}
+                    "count": len(self.handeye_views), "corners": 0}
         self.handeye_views.append({
             "corners": np.round(corners, 3).tolist(),
             "pose6": [round(float(v), 4) for v in pose6[:6]],
+            "joints": None if not robot else robot.get("joints"),
+            "state_code": None if not robot else robot.get("state_code"),
+            "error_code": None if not robot else robot.get("error_code"),
+            "warn_code": None if not robot else robot.get("warn_code"),
             "width": int(image.shape[1]), "height": int(image.shape[0]),
             "cols": int(cols), "rows": int(rows), "square_mm": float(square_mm),
             "on_table": bool(on_table), "pose_source": pose_source or "unspecified",
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "image": _image_record(image_meta, image),
+            "read_started_at": None if not robot else robot.get("read_started_at"),
+            "read_finished_at": None if not robot else robot.get("read_finished_at"),
+            "sync_precision_claimed": False,
         })
         self.hand_eye = None
         self.table = None
-        return {"ok": True, "count": len(self.handeye_views), "reason": "observation stored"}
+        return {"ok": True, "count": len(self.handeye_views), "corners": int(len(corners)),
+                "reason": "observation stored"}
 
     def solve(self) -> dict:
         """Solve whatever the stored observations support. Does not invent a missing matrix."""
@@ -479,6 +616,7 @@ class VisionStore:
             "object_height_measured": False,
             "homography_not_used": True,
             "procedure": PROCEDURE,
+            "first_move": FIRST_MOVE,
         }
 
     def localize(self, pose6, u: float, v: float, image_size, box=None) -> dict:
@@ -514,32 +652,66 @@ class VisionStore:
             "reason": "intersection of the camera ray with the calibrated plane; object height was not measured",
         }
 
-    def observation_target(self, point_mm, clearance_mm: float | None) -> dict:
-        """Tool position above the plane point. Clearance must be an operator measurement."""
+    def observation_target(self, point_mm, clearance_mm: float | None, yaw_deg: float | None = None) -> dict:
+        """Tool position above the plane point. Clearance must be an operator measurement.
+
+        The orientation is the xArm 5 straight-line constraint: roll 180, pitch 0, and the
+        yaw read from telemetry when the caller has one. Inverse kinematics is not claimed here.
+        """
         if self.table is None:
-            return {"ok": False, "target_mm": None, "verified_tool_position": False,
-                    "approximate_observation_goal": False,
+            return {"ok": False, "target_mm": None, "pose6": None, "verified_tool_position": False,
+                    "approximate_observation_goal": False, "ik_verified": False,
                     "reason": "the table plane is not solved"}
         if point_mm is None:
-            return {"ok": False, "target_mm": None, "reason": "there is no plane intersection to approach",
-                    "verified_tool_position": False, "approximate_observation_goal": False}
+            return {"ok": False, "target_mm": None, "pose6": None,
+                    "reason": "there is no plane intersection to approach",
+                    "verified_tool_position": False, "approximate_observation_goal": False,
+                    "ik_verified": False}
         if clearance_mm is None or float(clearance_mm) <= 0:
-            return {"ok": False, "target_mm": None, "verified_tool_position": False,
-                    "approximate_observation_goal": False,
+            return {"ok": False, "target_mm": None, "pose6": None, "verified_tool_position": False,
+                    "approximate_observation_goal": False, "ik_verified": False,
                     "reason": "object height is unknown and TROVA_OBSERVE_CLEARANCE_MM is not set"}
         normal = np.array(self.table["normal"], float)
         normal = normal / np.linalg.norm(normal)
         target = np.array(point_mm, float) + normal * float(clearance_mm)
         reach = float(np.linalg.norm(target))
+        yaw = 0.0 if yaw_deg is None else float(yaw_deg)
+        pose6 = [round(float(v), 2) for v in target] + [180.0, 0.0, round(yaw, 2)]
+        reason = "observation pose above the plane by the measured clearance; not a contact pose"
+        if yaw_deg is None:
+            reason += "; yaw was not read, so 0 is a placeholder until telemetry reports it"
         return {
-            "ok": True, "target_mm": [round(float(v), 2) for v in target],
+            "ok": True, "target_mm": [round(float(v), 2) for v in target], "pose6": pose6,
             "clearance_mm": float(clearance_mm), "verified_tool_position": False,
             "approximate_observation_goal": True, "object_height_measured": False,
-            "orientation": {"roll": 180, "pitch": 0, "yaw": "kept from the controller"},
+            "orientation": {"roll": 180.0, "pitch": 0.0, "yaw_deg": round(yaw, 2)},
+            "orientation_constraint": "xArm 5 straight line keeps roll near 180 and pitch near 0",
+            "yaw_from_telemetry": yaw_deg is not None,
             "dof": 5, "ik_verified": False,
             "reach_from_base_mm": round(reach, 1),
             "within_nominal_700mm": reach <= 700.0,
-            "reason": "observation pose above the plane by the measured clearance; not a contact pose",
+            "reason": reason,
+        }
+
+    def progress(self) -> dict:
+        """Counts, diversity, and residuals already measured. A failed gate leaves the matrix empty."""
+        views = list(self.intrinsic_views) + list(self.handeye_views)
+        squares = sorted({float(view["square_mm"]) for view in views if view.get("square_mm")})
+        sizes = sorted({(view.get("width"), view.get("height")) for view in views if view.get("width")})
+        spread = pose_diversity_report(self.handeye_views)
+        return {
+            "n_intrinsics": len(self.intrinsic_views),
+            "n_handeye": len(self.handeye_views),
+            "n_on_table": sum(1 for view in self.handeye_views if view.get("on_table")),
+            "square_mm": squares,
+            "image_sizes": [list(size) for size in sizes],
+            "spread": spread,
+            "intrinsics_rms_px": None if not self.intrinsics else self.intrinsics.get("reprojection_rms_px"),
+            "consistency_mm": None if not self.hand_eye else self.hand_eye.get("consistency_mm"),
+            "holdout_mm": None if not self.hand_eye else self.hand_eye.get("holdout_mm"),
+            "plane_residual_mm": None if not self.table else self.table.get("residual_mm"),
+            "persisted_matrix": self.hand_eye is not None and self.intrinsics is not None,
+            "valid": bool(self.assess(self._solved_size())["valid"]),
         }
 
     def as_dict(self) -> dict:

@@ -119,12 +119,15 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <div id="agentres" class="result"></div>
     <div class="muted" id="motioninfo"></div>
     <div class="muted" id="visioninfo"></div>
-    <div class="row"><span class="muted">checker inner corners</span><input type="number" id="boardcols" value="9" style="max-width:70px"><input type="number" id="boardrows" value="6" style="max-width:70px">
-      <input type="number" id="boardsquare" placeholder="square mm" style="max-width:110px"></div>
-    <div class="row"><button onclick="captureBoard('intrinsics')">Capture checkerboard</button><button onclick="post('/api/vision/intrinsics/solve')">Solve intrinsics</button>
-      <label class="muted"><input type="checkbox" id="ontable"> board is on the table</label>
+    <div class="muted">Calibration does not move the arm. Pose it yourself, with the physical e-stop in reach. The checkerboard stays fixed in the robot base during hand-eye captures. The Pi image is already rotated 180 degrees.</div>
+    <div class="row"><span class="muted">inner corners</span><input type="number" id="boardcols" value="9" style="max-width:70px"><input type="number" id="boardrows" value="6" style="max-width:70px">
+      <input type="number" id="boardsquare" placeholder="measured square mm" style="max-width:160px"></div>
+    <div class="row"><button onclick="previewBoard()">Show checkerboard</button>
+      <button onclick="captureBoard('intrinsics')">Capture intrinsics</button><button onclick="post('/api/vision/intrinsics/solve')">Solve intrinsics</button></div>
+    <div class="row"><label class="muted"><input type="checkbox" id="ontable"> board is flat on the table</label>
       <button onclick="captureBoard('handeye')">Capture hand-eye view</button><button onclick="post('/api/vision/handeye/solve')">Solve hand-eye</button></div>
-    <div class="muted">These buttons take a picture and read the pose. They do not move the arm. Pose the robot yourself first.</div>
+    <div class="muted" id="calibinfo">no calibration samples yet</div>
+    <img id="boardview" alt="Checkerboard detection" style="display:none;width:100%;margin-top:8px;border-radius:8px;border:1px solid var(--line)">
   </div>
 
   <div class="panel">
@@ -528,25 +531,49 @@ function showAgent(d) {
   const el = $('agentres');
   el.className = 'result show st-' + (d.goal_achieved ? 'found' : d.status === 'clarify' ? 'clarify' : 'not_found');
   const steps = (d.steps || []).map(s => `<li><b>${esc(s.skill)}</b> ${esc(s.reason || '')}</li>`).join('');
-  const prop = d.proposal && d.proposal.proposal ? d.proposal.proposal.target_mm : null;
+  const prop = d.proposal && d.proposal.proposal ? d.proposal.proposal.target_mm : (d.planned_target || null);
+  const traj = (d.proposal && d.proposal.trajectory_mm) || [];
   const blocks = (d.blockers || []).map(b => `<li>${esc(b)}</li>`).join('');
+  const safety = d.proposal && d.proposal.safety;
   const camState = (typeof S !== 'undefined' && S && S.source) ? (S.source.online ? 'camera online' : (S.source.kind === 'pi' ? 'camera offline' : 'camera ' + S.source.kind)) : 'camera';
   el.innerHTML = `<div class="big">${esc(d.status)} · ${esc(d.phase || '')}</div><div>${esc(d.reason || '')}</div>` +
     (d.question ? `<div class="big">${esc(d.question)}</div>` : '') +
     `<div class="muted">${esc(camState)} · Grok ${esc(d.grok_mode || (d.authoritative ? 'live' : 'not live'))} · calibration ${d.calibration_valid ? 'valid' : 'not valid'} · motion ${prop ? 'proposed' : 'not proposed'} · movement ${d.hardware_moved ? 'executed' : 'not executed'}</div>` +
     (d.motion_lock ? `<div style="color:var(--warn)">${esc(d.motion_lock)}</div>` : '') +
     (blocks ? `<ul class="changes">${blocks}</ul>` : '') +
-    (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm (not a verified contact pose)</div>` : '') +
+    (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm · geometry ${esc((d.proposal && d.proposal.geometry_source) || 'unknown')} · IK ${d.proposal && d.proposal.ik_verified ? 'confirmed by the controller' : 'not confirmed'} · collision avoidance: no</div>` : '') +
+    (traj.length ? `<div class="muted">straight-line samples ${esc(traj.map(p => p.join(', ')).join(' → '))} mm</div>` : '') +
+    (safety ? `<div class="muted">gateway ${esc(d.proposal.status || '')}: workspace ${esc(safety.workspace || '')} · clearance ${esc(safety.clearance || '')} · keep-out ${esc(safety.keep_out || 'not_assessed')} · motion ${d.proposal.allow_motion ? 'allowed' : 'not sent'} · collision avoidance: no</div>` : '') +
     (steps ? `<ul class="changes">${steps}</ul>` : '');
+}
+function showBoard(d) {
+  if (d && d.image) {
+    $('boardview').style.display = 'block';
+    $('boardview').src = '/files/' + d.image + '?t=' + Date.now();
+  }
+  const bits = [d && d.reason, d && d.moved ? '' : 'arm not moved', d && d.pose_source ? 'pose ' + d.pose_source : ''];
+  window._boardNote = bits.filter(Boolean).join(' · ');
+  $('visioninfo').textContent = window._boardNote;
+}
+async function previewBoard() {
+  try { showBoard(await json('/api/vision/preview', {cols: +$('boardcols').value, rows: +$('boardrows').value})); }
+  catch (e) {}
 }
 async function captureBoard(which) {
   if (!$('boardsquare').value) return alert('Measure one checkerboard square and type it in millimetres.');
   const body = {cols: +$('boardcols').value, rows: +$('boardrows').value, square_mm: +$('boardsquare').value};
   if (which === 'handeye') body.on_table = $('ontable').checked;
-  try {
-    const d = await json('/api/vision/' + which, body);
-    $('visioninfo').textContent = (d.reason || '') + (d.moved ? '' : ' · arm not moved');
-  } catch (e) {}
+  try { showBoard(await json('/api/vision/' + which, body)); } catch (e) {}
+}
+function showCalib() {
+  const p = S && S.vision_progress;
+  if (!p) return;
+  const sp = p.spread || {};
+  const rms = p.intrinsics_rms_px == null ? 'not solved' : p.intrinsics_rms_px + ' px';
+  const hold = p.holdout_mm == null ? 'not solved' : p.holdout_mm + ' mm';
+  const plane = p.plane_residual_mm == null ? 'not solved' : p.plane_residual_mm + ' mm';
+  const axis = sp.one_axis ? ' · rotations stay near one axis' : '';
+  $('calibinfo').textContent = `intrinsics ${p.n_intrinsics} · hand-eye ${p.n_handeye} · on table ${p.n_on_table} · rotation ${sp.max_rotation_deg || 0} deg · translation ${sp.max_translation_mm || 0} mm${axis} · rms ${rms} · held-out ${hold} · plane ${plane} · ${sp.reason || ''}`;
 }
 async function startScan() {
   try { await json('/api/scan/start', {object_id: $('scanobj').value}); } catch (e) {}
@@ -581,7 +608,8 @@ async function refresh() {
   if (!refresh.langSet && S.lang === 'it') { $('pttlang').value = 'it-IT'; } refresh.langSet = true;
   const m = $('mode'); m.textContent = S.mock ? 'Grok mock' : S.grok.offline ? 'Grok offline' : 'Grok online ' + S.grok.model;
   m.className = 'badge ' + (S.mock || S.grok.offline ? 'mock' : 'live'); m.title = S.grok.last_error || '';
-  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.motion_mode ? ' · ' + S.arm.motion_mode : '') + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
+  const readOnly = S.robot && S.robot.source === 'telemetry' && !S.robot.process_can_move;
+  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.motion_mode ? ' · ' + S.arm.motion_mode : '') + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (readOnly ? ' · telemetry read-only' : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
   $('armst').title = S.arm_blocked || ''; $('armst').style.color = S.arm_blocked ? 'var(--warn)' : '';
   const src = S.source || {};
   let srcLabel = 'source: ' + src.kind + (src.provenance ? ' · ' + src.provenance : '');
@@ -605,8 +633,13 @@ async function refresh() {
   const moved = $('movedbadge');
   moved.textContent = agent.hardware_moved ? 'movement executed' : 'movement not executed';
   moved.className = 'badge ' + (agent.hardware_moved ? 'live' : '');
-  if (S.motion) $('motioninfo').textContent = `motion ${S.motion.mode} · clearance ${S.motion.clearance} · collision avoidance: no · software stop is not the physical e-stop`;
-  if (S.robot) $('visioninfo').textContent = `robot pose: ${S.robot.source || 'unavailable'}` + (S.robot.pose6 ? '' : ' · no roll/pitch/yaw') + (vis.reasons && vis.reasons.length ? ' · ' + vis.reasons[0] : '');
+  if (S.robot) {
+    let line = `robot pose: ${S.robot.source || 'unavailable'}` + (S.robot.pose6 ? '' : ' · no roll/pitch/yaw') + (S.robot.error_code ? ' · error ' + S.robot.error_code : '') + (S.robot.state_code == null ? '' : ' · state ' + S.robot.state_code) + (vis.reasons && vis.reasons.length ? ' · ' + vis.reasons[0] : '') + ' · sync not claimed';
+    if (window._boardNote) line += ' · ' + window._boardNote;
+    $('visioninfo').textContent = line;
+  }
+  showCalib();
+  if (S.motion) $('motioninfo').textContent = `motion ${S.motion.mode} · workspace ${S.motion.workspace || 'unknown'} · clearance ${S.motion.clearance} · keep-out ${S.motion.keep_out || 'not_assessed'} · collision avoidance: no · software stop is not the physical e-stop`;
   if (S.agent && document.activeElement !== $('agentq')) showAgent(S.agent);
   if (S.scan) showScan(S.scan);
   if (S.camera_on_arm) $('srcinfo').textContent += S.at_survey ? ' · arm camera at the survey pose' : ' · arm camera: moving view';

@@ -14,8 +14,9 @@ import re
 import time
 
 from .finder import find as grok_find
-from .geom import VisionStore
+from .geom import VisionStore, pose_changed
 from .grok import GrokError, register_mock
+from .motion import sample_segment
 from .scene import decide_text, from_finder, question_for
 
 MAX_STEPS = 8
@@ -174,6 +175,16 @@ def qualification_blockers(host, task) -> list[str]:
         reasons.append("the robot did not report a tool pose with roll, pitch and yaw")
     if robot.get("moving"):
         reasons.append("the robot is still moving")
+    if robot.get("error_code"):
+        reasons.append(f"controller error code {robot.get('error_code')}")
+    if gateway is not None and gateway.mode == "hardware" and not task.get("ik_verified"):
+        reasons.append("controller inverse kinematics has not confirmed the observation pose")
+    if gateway is not None and gateway.mode == "hardware" and not getattr(gateway, "keepout_assessed", False):
+        reasons.append("keep-out regions are not assessed; set TROVA_ARM_KEEP_OUT to measured boxes, "
+                       "or to none after checking the path")
+    if getattr(host, "read_only_robot", False) and (gateway is None or gateway.simulated):
+        reasons.append("robot telemetry is read-only and the motion driver is simulated, "
+                       "so this process will not command the physical arm")
     return reasons
 
 
@@ -183,22 +194,58 @@ def execution_block(host, task) -> str | None:
     return "; ".join(reasons) if reasons else None
 
 
+def _robot(host) -> dict:
+    try:
+        return host.robot() or {}
+    except Exception as exc:  # noqa: BLE001
+        return {"source": "unavailable", "error": str(exc), "pose6": None, "xyz_mm": None}
+
+
 def _target_from_location(host, task) -> tuple[dict, str | None]:
     location = task.get("location") or {}
     if not location.get("ok"):
         return {}, location.get("reason") or "the object has no plane intersection"
-    goal = host.vision.observation_target(location.get("point_mm"), host.observe_clearance_mm)
+    robot = task.get("_robot") or _robot(host)
+    pose = robot.get("pose6")
+    yaw = None if not pose or len(pose) < 6 else float(pose[5])
+    goal = host.vision.observation_target(location.get("point_mm"), host.observe_clearance_mm, yaw_deg=yaw)
     if not goal.get("ok"):
         return goal, goal.get("reason")
     return goal, None
 
 
-def _authorize(host, task, target: list, skill: str):
+def _authorize(host, task, target: list, skill: str, start=None):
     speed = min(APPROACH_SPEED_MM_S, float(host.gateway.max_speed_mm_s))
     requested = {"source": "vision_approach", "skill": skill, "goal": task.get("goal"),
                  "track_id": None if not task.get("selected") else task["selected"].get("track_id"),
                  "verified_tool_position": False, "approximate_observation_goal": True}
-    return host.gateway.authorize_cartesian(target, speed, source="vision_approach", requested=requested)
+    return host.gateway.authorize_cartesian(target, speed, source="vision_approach", requested=requested,
+                                            start=start)
+
+
+def _thin_points(points, limit: int = 8) -> list:
+    if len(points) <= limit:
+        return [[round(float(v), 1) for v in point] for point in points]
+    indexes = [round(i * (len(points) - 1) / (limit - 1)) for i in range(limit)]
+    return [[round(float(v), 1) for v in points[i]] for i in indexes]
+
+
+def _pack_proposal(decision, goal, robot, start) -> dict:
+    packed = decision.as_dict()
+    packed["trajectory_mm"] = []
+    proposal = packed.get("proposal") or {}
+    begin = proposal.get("start_mm")
+    end = proposal.get("target_mm")
+    if begin and end:
+        packed["trajectory_mm"] = _thin_points(sample_segment(begin, end))
+    packed["ik_verified"] = bool(goal.get("ik_verified"))
+    packed["ik_joints_deg"] = None if not goal.get("ik") else goal["ik"].get("joints")
+    packed["ik_reason"] = None if not goal.get("ik") else goal["ik"].get("reason")
+    packed["geometry_source"] = "telemetry" if start is not None else (robot.get("source") or "unavailable")
+    packed["collision_avoidance"] = False
+    packed["pose6"] = goal.get("pose6")
+    packed["straight_line_samples_are_not_a_joint_path"] = not packed["ik_verified"]
+    return packed
 
 
 def skill_inspect(host, task, argument: str) -> dict:
@@ -211,6 +258,7 @@ def skill_inspect(host, task, argument: str) -> dict:
     task["grok_mode"] = snap.get("grok_mode")
     task["authoritative"] = snap.get("grok_mode") == "live"
     task["snapshot_id"] = snap.get("id")
+    task["snapshot_pose"] = snap.get("pose")
     task["summary"] = snap.get("summary")
     host.image_size = [snap.get("width") or host.image_size[0], snap.get("height") or host.image_size[1]]
     _calibration_flag(host, task)
@@ -265,7 +313,16 @@ def skill_locate(host, task, argument: str) -> dict:
         task["phase"] = "blocked"
         return _result("locate_object", False, "no object is selected", task, terminal=True)
     _calibration_flag(host, task)
-    robot = host.robot()
+    robot = _robot(host)
+    snap = task.get("snapshot_pose") or {}
+    if snap.get("moving") or robot.get("moving"):
+        task["phase"] = "blocked"
+        task["motion_lock"] = "the picture and the pose are not from a stationary arm"
+        return _result("locate_object", False, task["motion_lock"], task, rejection=task["motion_lock"])
+    if pose_changed(snap.get("pose6"), robot.get("pose6")):
+        task["phase"] = "blocked"
+        task["motion_lock"] = "the robot pose changed after the picture; take another picture before localizing"
+        return _result("locate_object", False, task["motion_lock"], task, rejection=task["motion_lock"])
     box = chosen.get("box")
     location = host.vision.localize(robot.get("pose6"), chosen["center"][0], chosen["center"][1],
                                     host.image_size, box=box)
@@ -333,22 +390,47 @@ def skill_plan(host, task, argument: str) -> dict:
         task["planned_target"] = None
         task["phase"] = "blocked"
         return _result("plan_approach", False, reason, task, rejection=reason, executed=False, blockers=blockers)
+    robot = _robot(host)
+    task["_robot"] = robot
     goal, err = _target_from_location(host, task)
     if err:
         task["motion_lock"] = err
         task["phase"] = "blocked"
-        return _result("plan_approach", False, err, task, rejection=err, target=goal)
-    decision = _authorize(host, task, goal["target_mm"], "plan_approach")
-    task["planned_target"] = list(goal["target_mm"])
-    task["proposal"] = decision.as_dict()
-    if decision.status == "rejected":
-        task["motion_lock"] = decision.reason
+        return _result("plan_approach", False, err, task, rejection=err, target=goal, executed=False)
+    ask = getattr(host, "inverse", None)
+    if ask is not None and goal.get("pose6"):
+        ik = ask(goal["pose6"], robot.get("joints"))
+    else:
+        ik = {"ok": False, "ik_verified": False, "joints": None, "motion_sent": False,
+              "reason": "inverse kinematics was not asked of the controller"}
+    goal["ik"] = ik
+    goal["ik_verified"] = bool(ik.get("ik_verified"))
+    task["ik_verified"] = goal["ik_verified"]
+    if getattr(host, "gateway", None) is None:
+        task["motion_lock"] = "this arm has no motion gateway"
         task["phase"] = "blocked"
-        return _result("plan_approach", False, decision.reason, task, rejection=decision.reason,
-                       motion=decision.as_dict(), target=goal, executed=False)
+        return _result("plan_approach", False, task["motion_lock"], task, rejection=task["motion_lock"],
+                       target=goal, executed=False)
+    start = None
+    if robot.get("source") == "telemetry" and robot.get("xyz_mm") and len(robot["xyz_mm"]) >= 3:
+        start = tuple(float(v) for v in robot["xyz_mm"][:3])
+    decision = _authorize(host, task, goal["target_mm"], "plan_approach", start=start)
+    packed = _pack_proposal(decision, goal, robot, start)
+    task["planned_target"] = list(goal["target_mm"])
+    task["proposal"] = packed
+    refusals = []
+    if host.gateway.camera is None:
+        refusals.append("set TROVA_CAMERA_BODY_MM to the measured camera offset and radius; "
+                        "the approach is refused because clearance cannot be established")
+    if decision.status == "rejected":
+        refusals.append(decision.reason)
+    if refusals:
+        task["motion_lock"] = "; ".join(refusals)
+        task["phase"] = "blocked"
+        return _result("plan_approach", False, task["motion_lock"], task, rejection=task["motion_lock"],
+                       motion=packed, target=goal, executed=False)
     task["phase"] = "planned"
-    return _result("plan_approach", True, decision.reason, task, motion=decision.as_dict(), target=goal,
-                   executed=False)
+    return _result("plan_approach", True, decision.reason, task, motion=packed, target=goal, executed=False)
 
 
 def _move(host, task, skill: str) -> dict:
@@ -364,7 +446,11 @@ def _move(host, task, skill: str) -> dict:
         return _result(skill, False, err, task, rejection=err, executed=False)
     target = list(task["planned_target"]) if task.get("planned_target") else list(goal["target_mm"])
     # Keep the already planned point. A new number from the caller is not applied.
-    decision = _authorize(host, task, target, skill)
+    robot = task.get("_robot") or _robot(host)
+    start = None
+    if robot.get("source") == "telemetry" and robot.get("xyz_mm") and len(robot["xyz_mm"]) >= 3:
+        start = tuple(float(v) for v in robot["xyz_mm"][:3])
+    decision = _authorize(host, task, target, skill, start=start)
     task["proposal"] = decision.as_dict()
     if decision.status in ("rejected", "stopped", "fault"):
         task["motion_lock"] = decision.reason

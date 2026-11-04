@@ -145,6 +145,13 @@ def test_scan_session_keeps_metadata_and_does_not_reconstruct(tmp_path):
                                     "joints_deg": [1, 2, 3, 4, 5], "calibration_version": 2})
     assert simulated["accepted"] is False and simulated["camera_pose"] is None
     assert "telemetry" in simulated["reject_reason"]
+    faulted = book.capture(jpeg, {"pose6": [10, 20, 200, 180, 0, 0], "robot_tcp_mm": [10, 20, 200],
+                                  "pose_source": "telemetry", "requested_at": 40.0, "stopped_at": 39.0,
+                                  "width": 8, "height": 8, "tool_camera": np.eye(4).tolist(),
+                                  "error_code": 22, "calibration_version": 2})
+    assert faulted["accepted"] is False and faulted["camera_pose"] is None
+    assert "error code 22" in faulted["reject_reason"]
+    assert faulted["sync_precision_claimed"] is False
     assert simulated["object_id"] == "pen" and simulated["joints_deg"] == [1, 2, 3, 4, 5]
     book.sessions[book.active]["intrinsics"] = {"k": [[800, 0, 4], [0, 800, 4], [0, 0, 1]], "width": 8, "height": 8}
     ranked = book.candidates([10, 20, 0], 100)
@@ -254,6 +261,106 @@ def test_a_repeated_skill_stops_and_names_the_blockers():
     assert len(result["steps"]) == 2
     assert "TROVA_OBSERVE_CLEARANCE_MM" in result["reason"]
     assert "intrinsics" in result["reason"]
+
+
+def test_cancel_stops_before_a_skill_and_a_stale_pose_blocks_localization():
+    import threading
+
+    from trova.agent import run, skill_locate
+    from trova.geom import VisionStore
+
+    host = _Host(_arm(), VisionStore())
+    host.cancel = threading.Event()
+    host.cancel.set()
+    host.grok = None
+    stopped = run(host, "Grok, trova l'evidenziatore rosa e posizionati sopra.")
+    assert stopped["status"] == "stopped" and stopped["steps"] == []
+    assert stopped["hardware_moved"] is False and stopped["verified_tool_position"] is False
+
+    host.cancel = type("E", (), {"is_set": staticmethod(lambda: False)})()
+    task = _task()
+    task["location"] = None
+    task["snapshot_pose"] = {"pose6": [0, 0, 200, 180, 0, 0], "moving": False}
+    host.robot = lambda: {"xyz_mm": [30, 0, 200], "pose6": [30, 0, 200, 180, 0, 0],
+                          "moving": False, "source": "telemetry"}
+    stale = skill_locate(host, task, "")
+    assert stale["ok"] is False and "changed" in stale["reason"]
+    assert task["location"] is None
+
+    task["motion_lock"] = None
+    task["snapshot_pose"] = {"pose6": [0, 0, 200, 180, 0, 0], "moving": True}
+    host.robot = lambda: {"xyz_mm": [0, 0, 200], "pose6": [0, 0, 200, 180, 0, 0],
+                          "moving": False, "source": "telemetry"}
+    moving = skill_locate(host, task, "")
+    assert "stationary" in moving["reason"]
+
+    task["motion_lock"] = None
+    task["snapshot_pose"] = {"pose6": [0, 0, 200, 180, 0, 0], "moving": False}
+    missed = skill_locate(host, task, "")
+    assert missed["ok"] is False and "intrinsics" in missed["reason"]
+    assert (missed.get("location") or {}).get("point_mm") is None
+
+
+def test_approach_uses_telemetry_and_refuses_unestablished_clearance():
+    from test_geom import _fixture_store
+    arm = _arm()
+    host = _Host(arm, _fixture_store())
+    host.robot = lambda: {"xyz_mm": [400.0, 10.0, 250.0], "pose6": [400.0, 10.0, 250.0, 180.0, 0.0, 25.0],
+                          "joints": [1, 2, 3, 4, 5], "moving": False, "source": "telemetry", "error_code": 0}
+    before = list(arm.tcp_mm())
+    task = _task()
+    planned = skill_plan(host, task, "")
+    assert planned["ok"] and planned["executed"] is False
+    assert np.allclose(planned["motion"]["proposal"]["start_mm"], [400, 10, 250])
+    assert np.allclose(planned["motion"]["proposal"]["target_mm"], [100, 50, 150], atol=1)
+    assert planned["motion"]["trajectory_mm"][0] == planned["motion"]["proposal"]["start_mm"]
+    assert planned["motion"]["pose6"][3:] == [180.0, 0.0, 25.0]
+    assert planned["motion"]["collision_avoidance"] is False
+    assert planned["motion"]["ik_verified"] is False
+    assert planned["target"]["yaw_from_telemetry"] is True
+    assert np.allclose(arm.tcp_mm(), before)
+
+    host.inverse = lambda pose, joints=None: {
+        "ok": True, "ik_verified": True, "joints": [0, 10, -20, 30, 40], "motion_sent": False, "reason": "ok"}
+    confirmed = skill_plan(host, _task(), "")
+    assert confirmed["motion"]["ik_verified"] is True
+    assert confirmed["motion"]["ik_joints_deg"] == [0, 10, -20, 30, 40]
+    assert np.allclose(arm.tcp_mm(), before)
+
+    bare_arm = _arm()
+    bare = _Host(bare_arm, _fixture_store())
+    bare.robot = host.robot
+    bare.gateway.camera = None
+    refused = skill_plan(bare, _task(), "")
+    assert refused["executed"] is False and refused["ok"] is False
+    assert "clearance cannot be established" in refused["reason"]
+    assert np.allclose(refused["motion"]["proposal"]["target_mm"], [100, 50, 150], atol=1)
+    assert np.allclose(bare_arm.tcp_mm(), before)
+
+    locked_arm = _arm()
+    locked = _Host(locked_arm, _fixture_store())
+    locked.robot = host.robot
+    locked.inverse = host.inverse
+    locked.read_only_robot = True
+    proposal = skill_plan(locked, _task(), "")
+    assert proposal["ok"] and proposal["executed"] is False
+    locked.gateway.mode = "hardware"
+    held = skill_move_above(locked, locked_task(proposal), "")
+    assert held["executed"] is False
+    assert "keep-out" in held["reason"]
+    assert "read-only" in held["reason"]
+    assert np.allclose(locked_arm.tcp_mm(), before)
+
+
+def locked_task(planned):
+    task = _task()
+    task["planned_target"] = planned["motion"]["proposal"]["target_mm"]
+    task["proposal"] = planned["motion"]
+    task["ik_verified"] = True
+    task["location"] = {"ok": True, "point_mm": [100.0, 50.0, 0.0]}
+    task["_robot"] = {"xyz_mm": [400.0, 10.0, 250.0], "pose6": [400.0, 10.0, 250.0, 180.0, 0.0, 25.0],
+                      "source": "telemetry", "moving": False, "error_code": 0}
+    return task
 
 
 def test_state_does_not_snapshot_the_pi(tmp_path, monkeypatch):

@@ -135,6 +135,8 @@ class ScanBook:
             reasons.append(f"robot pose source is {pose_source or 'unspecified'}, not telemetry")
         if not meta.get("width") or not meta.get("height"):
             reasons.append("the frame has no image size")
+        if meta.get("error_code"):
+            reasons.append(f"controller error code {meta.get('error_code')}")
         if meta.get("resolution_mismatch"):
             reasons.append("the JPEG size does not match the camera status")
         view_id = f"v{len(session['views']) + 1:04d}"
@@ -146,7 +148,7 @@ class ScanBook:
         matrix = meta.get("tool_camera")
         pose6 = meta.get("pose6")
         trust_pose = pose_source is None or pose_source == "telemetry"
-        if trust_pose and matrix is not None and pose6 is not None and len(pose6) >= 6:
+        if not reasons and trust_pose and matrix is not None and pose6 is not None and len(pose6) >= 6:
             camera_pose = np.round(camera_pose_matrix(pose6, matrix), 5).tolist()
         record = {
             "viewpoint_id": view_id, "session_id": session["id"], "object_id": session["object_id"],
@@ -161,6 +163,9 @@ class ScanBook:
             "pose_source": pose_source, "robot_tcp_mm": meta.get("robot_tcp_mm"),
             "robot_rpy_deg": meta.get("robot_rpy_deg"),
             "joints_deg": meta.get("joints_deg"), "moving": meta.get("moving"),
+            "state_code": meta.get("state_code"), "error_code": meta.get("error_code"),
+            "warn_code": meta.get("warn_code"),
+            "pose_read_finished_at": meta.get("read_finished_at"),
             "camera_pose": camera_pose, "calibration_version": meta.get("calibration_version"),
             "calibration_valid": meta.get("calibration_valid"),
             "detection": {k: detection.get(k) for k in ("track_id", "name", "box", "association", "confidence")},
