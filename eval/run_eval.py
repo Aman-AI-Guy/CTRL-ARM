@@ -196,7 +196,7 @@ def main():
     ap.add_argument("--modes", default="", help="finds: comma list of som,direct,largest")
     args = ap.parse_args()
     s = load_settings()
-    grok = GrokClient(s.xai_api_key, s.model, s.effort, s.mock)
+    grok = GrokClient(s.xai_api_key, s.model, s.effort, s.mock, offline_fallback=False)   # never measure the stand-in
     label = "MOCK Grok (plumbing only)" if grok.mock else f"live {s.model}, effort {s.effort or 'default'}"
     if args.what == "failures":
         from trova.failures import summary

@@ -105,7 +105,9 @@ class State:
         self.s = s
         self.audit = AuditLog(s.data_dir)
         self.grok = GrokClient(s.xai_api_key, s.model, s.effort, s.mock,
-                               on_call=lambda e: self.audit.event("grok_call", **e))
+                               on_call=lambda e: self.audit.event("grok_call", **e),
+                               timeout=float(os.getenv("TROVA_GROK_TIMEOUT_S", "60")),
+                               offline_fallback=os.getenv("TROVA_OFFLINE_FALLBACK", "1").lower() not in ("0", "false", "no"))
         self.source = open_source(s.camera)
         self.override: np.ndarray | None = None
         self.background: np.ndarray | None = None

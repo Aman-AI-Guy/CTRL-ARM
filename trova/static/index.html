@@ -166,7 +166,7 @@ function showFind(d) {
         `<input type="text" id="ans" placeholder="or answer in words" onkeydown="if(event.key==='Enter')answer(this.value)"></div>`;
   } else h = `<div class="big">Not found on the table</div><div>${esc(r.reason)}</div>` +
       (S && S.dog ? `<div class="row"><button onclick="sendDog()">Send the dog to look in the other rooms</button></div>` : '');
-  h += `<div class="muted">${r.mode === 'direct' ? 'Grok direct box · ' : ''}${r.n_candidates} candidates · confidence ${r.confidence} · Grok ${r.grok_latency_s}s · total ${d.total_s}s${d.table_mm ? ' · arm → ' + d.table_mm.join(', ') + ' mm' : ''}</div>` + (d.arm_blocked ? `<div style="color:var(--warn)">Arm not moved: ${esc(d.arm_blocked)}</div>` : '');
+  h += `<div class="muted">${r.mode === 'direct' ? 'Grok direct box · ' : r.mode === 'offline' ? '<b style="color:var(--warn)">offline: local colour match</b> · ' : ''}${r.n_candidates} candidates · confidence ${r.confidence} · Grok ${r.grok_latency_s}s · total ${d.total_s}s${d.table_mm ? ' · arm → ' + d.table_mm.join(', ') + ' mm' : ''}</div>` + (d.arm_blocked ? `<div style="color:var(--warn)">Arm not moved: ${esc(d.arm_blocked)}</div>` : '');
   h += `<div class="thumbs"><a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>${d.query ? `<a href="/files/${d.query}" target="_blank"><img src="/files/${d.query}"></a>` : ''}</div>`;
   el.innerHTML = h;
 }
@@ -277,7 +277,8 @@ async function tune() { await json('/api/tune', {thresh: +$('thresh').value, min
 async function refresh() {
   try { S = await (await fetch('/api/state')).json(); } catch { return; }
   frameSize = S.frame_size;
-  const m = $('mode'); m.textContent = S.mock ? 'MOCK Grok' : 'LIVE ' + S.grok.model; m.className = 'badge ' + (S.mock ? 'mock' : 'live');
+  const m = $('mode'); m.textContent = S.mock ? 'MOCK Grok' : S.grok.offline ? 'OFFLINE: Grok unreachable' : 'LIVE ' + S.grok.model;
+  m.className = 'badge ' + (S.mock || S.grok.offline ? 'mock' : 'live'); m.title = S.grok.last_error || '';
   $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '');
   $('srcinfo').textContent = 'source: ' + S.source.kind + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
   $('bginfo').textContent = S.background ? 'set' : 'not set';

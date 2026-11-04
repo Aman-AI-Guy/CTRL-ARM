@@ -44,6 +44,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | 5. Failure log (cause of each wrong find) | Done, tested | `failures.py`, `/api/label`, `/api/judge` (cause), `GET /api/failures`, `run_eval.py failures` | Causes: missed_box (P2), wrong_pick / said_not_found / picked_absent_object / asked_unnecessarily / slow (P3), arm_missed (P1). Stored in `data/cases/failures.jsonl`. Clicking outside every box now records missed_box instead of an error |
 | 6. "Point at all the X" | Done, tested (mock) | `finder.find_all`, `POST /api/find_all`, `State.run_tour`, UI "Find all", voice tool `find_all` | Grok returns every matching box; the arm visits each (1 s pause). STOP ends the tour. With move=false, `/api/arm/point_last` starts the tour after a yes |
 | 7. Tray lift with the fork (experimental) | Done, tested vs fake robot; OFF by default | `arm/skills.py`, `run_waypoints` (Cartesian + sim), `POST /api/arm/lift_tray`, UI after a find | 12 straight moves: approach, slot height, fork in, lift, carry, set down, fork out, up. Whole path checked against the safety box before moving; STOP aborts. Enable with `TROVA_ALLOW_LIFT=1` only after measuring `TROVA_TRAY_Z_SLOT_MM` and `TROVA_TRAY_APPROACH` on the real tray with staff |
+| 8. Offline fallback (Wi-Fi or xAI down) | Done, tested | `grok.py` (`GrokUnavailable`, circuit breaker), `finder.py` (mode `offline`), header badge | Network error, timeout or 429/5xx after retries: the call is answered by the local handler and marked offline; for 30 s calls skip the network, then live is retried. 400/401/403/422 still raise. Change verification offline keeps every candidate as real (never a false 'clear'). `TROVA_OFFLINE_FALLBACK=0` disables; eval always disables it. `TROVA_GROK_TIMEOUT_S` (60), connect timeout 5 s |
 
 ## Architecture (data flow)
 
@@ -114,6 +115,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 8: offline fallback when Wi-Fi or xAI is down (local colour match, OFFLINE badge, 30 s circuit breaker); eval never falls back.
 - 2026-11-04 Fix: UI buttons calling `form()` from inline onclick did nothing (the name resolves to `button.form`): helper renamed `sendForm`; test forbids shadowed names in inline handlers. Header wraps on phones; favicon 404 gone; already-shown errors no longer reported as uncaught.
 - 2026-11-04 README and morning guide list the extra features; guide mentions /jury and AGENTS.md.
 - 2026-11-04 Feature 7: experimental tray lift with the fork (waypoint skill, off by default). Fixed /api/voice/log (request model was inside create_app) and added a test that forbids it.

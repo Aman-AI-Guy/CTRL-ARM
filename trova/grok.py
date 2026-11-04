@@ -7,6 +7,13 @@ is reported, so the system keeps working while you fix the config.
 
 Mock mode (no XAI_API_KEY, or TROVA_MOCK=1) answers from registered handlers, so the whole
 app runs offline tonight. Every module that calls Grok registers its own mock handler.
+
+Offline fallback (feature 8, TROVA_OFFLINE_FALLBACK=1 by default): when the network or xAI is down
+(connection error, timeout, 429/5xx after retries), a call is answered by the same local handler and
+marked `offline`, so a demo on bad Wi-Fi degrades to colour matching instead of failing. For the next
+OFFLINE_HOLD_S seconds calls go straight to the local handler (no waiting on timeouts), then live is
+tried again. Configuration errors (400/401/403/422) still raise: those must be fixed, not hidden.
+The local handlers are conservative: change verification keeps every candidate as real.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ import requests
 
 API_URL = "https://api.x.ai/v1/responses"
 MAX_SIDE = 1600
+OFFLINE_HOLD_S = 30.0
 
 MockHandler = Callable[[str, list, dict], dict]
 _MOCK_HANDLERS: dict[str, MockHandler] = {}
@@ -36,6 +44,10 @@ class GrokError(RuntimeError):
     pass
 
 
+class GrokUnavailable(GrokError):
+    """Network down, timeout, or xAI overloaded (429/5xx after retries): worth falling back."""
+
+
 @dataclass
 class GrokResult:
     data: dict
@@ -45,6 +57,7 @@ class GrokResult:
     usage: dict | None = None
     dropped: list[str] = field(default_factory=list)
     raw_text: str = ""
+    offline: bool = False     # answered locally because Grok was unreachable
 
 
 def encode_image(img: Any, max_side: int = MAX_SIDE) -> str:
@@ -88,16 +101,22 @@ def _parse_json(text: str) -> dict:
 class GrokClient:
     def __init__(self, api_key: str = "", model: str = "grok-4.7", effort: str = "low",
                  mock: bool = False, timeout: float = 90.0,
-                 on_call: Callable[[dict], None] | None = None):
+                 on_call: Callable[[dict], None] | None = None, offline_fallback: bool = True,
+                 connect_timeout: float = 5.0):
         self.api_key = api_key
         self.model = model
         self.effort = effort
         self.mock = mock or not api_key
         self.timeout = timeout
+        self.connect_timeout = connect_timeout
         self.on_call = on_call
+        self.offline_fallback = offline_fallback
         self.session = requests.Session()
         self.calls = 0
         self.total_latency = 0.0
+        self.offline_calls = 0
+        self.offline_until = 0.0          # circuit breaker: answer locally until this time
+        self.last_error: str | None = None
         self._dropped: set[str] = set()   # fields the API rejected once; never resent
 
     def json(self, *, name: str, prompt: str, schema: dict, images: list | tuple = (),
@@ -108,20 +127,40 @@ class GrokClient:
         effort = self.effort if effort is None else effort
         t0 = time.perf_counter()
         if self.mock:
-            handler = _MOCK_HANDLERS.get(name)
-            if handler is None:
-                raise GrokError(f"No mock handler registered for '{name}'")
-            data = handler(prompt, list(images), mock_context or {})
-            result = GrokResult(data=data, latency_s=time.perf_counter() - t0, model=f"mock:{model}", mock=True)
+            result = self._local(name, prompt, images, mock_context, f"mock:{model}", t0)
+        elif self.offline_fallback and name in _MOCK_HANDLERS and time.time() < self.offline_until:
+            result = self._local(name, prompt, images, mock_context, f"offline:{model}", t0, offline=True)
         else:
-            result = self._call_api(name, prompt, schema, images, effort, model)
+            try:
+                result = self._call_api(name, prompt, schema, images, effort, model)
+                self.offline_until, self.last_error = 0.0, None
+            except GrokUnavailable as e:
+                self.last_error = str(e)
+                if not (self.offline_fallback and name in _MOCK_HANDLERS):
+                    raise
+                self.offline_until = time.time() + OFFLINE_HOLD_S
+                result = self._local(name, prompt, images, mock_context, f"offline:{model}", t0, offline=True)
         self.calls += 1
         self.total_latency += result.latency_s
         if self.on_call:
             self.on_call({"name": name, "model": result.model, "latency_s": round(result.latency_s, 3),
-                          "mock": result.mock, "dropped": result.dropped, "usage": result.usage,
-                          "output": result.data})
+                          "mock": result.mock, "offline": result.offline, "dropped": result.dropped,
+                          "usage": result.usage, "output": result.data})
         return result
+
+    def _local(self, name, prompt, images, ctx, model, t0, offline=False) -> GrokResult:
+        handler = _MOCK_HANDLERS.get(name)
+        if handler is None:
+            raise GrokError(f"No mock handler registered for '{name}'")
+        data = handler(prompt, list(images), ctx or {})
+        if offline:
+            self.offline_calls += 1
+        return GrokResult(data=data, latency_s=time.perf_counter() - t0, model=model, mock=not offline,
+                          offline=offline)
+
+    @property
+    def offline(self) -> bool:
+        return not self.mock and time.time() < self.offline_until
 
     def _call_api(self, name, prompt, schema, images, effort, model) -> GrokResult:
         content = [{"type": "input_image", "image_url": encode_image(img), "detail": "high"} for img in images]
@@ -142,11 +181,13 @@ class GrokClient:
         for attempt in range(6):
             t0 = time.perf_counter()
             try:
-                r = self.session.post(API_URL, json=body, timeout=self.timeout,
+                r = self.session.post(API_URL, json=body, timeout=(self.connect_timeout, self.timeout),
                                       headers={"Authorization": f"Bearer {self.api_key}"})
+            except requests.Timeout as e:     # a slow answer will not get faster on retry: fall back now
+                raise GrokUnavailable(f"Grok timed out: {e}") from e
             except requests.RequestException as e:
-                if attempt >= 2:
-                    raise GrokError(f"Network error calling Grok: {e}") from e
+                if attempt >= 1:
+                    raise GrokUnavailable(f"Network error calling Grok: {e}") from e
                 time.sleep(backoff)
                 backoff *= 2
                 continue
@@ -157,7 +198,9 @@ class GrokClient:
                 return GrokResult(data=_parse_json(text), latency_s=latency, model=model, mock=False,
                                   usage=resp.get("usage"), dropped=dropped, raw_text=text)
             err = r.text.lower()
-            if r.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+            if r.status_code in (429, 500, 502, 503, 504):
+                if attempt >= 2:
+                    raise GrokUnavailable(f"Grok HTTP {r.status_code} after retries: {r.text[:300]}")
                 time.sleep(backoff)
                 backoff *= 2
                 continue
@@ -188,4 +231,5 @@ class GrokClient:
     def stats(self) -> dict:
         return {"mock": self.mock, "model": self.model, "effort": self.effort, "calls": self.calls,
                 "avg_latency_s": round(self.total_latency / self.calls, 3) if self.calls else None,
-                "dropped_fields": sorted(self._dropped)}
+                "dropped_fields": sorted(self._dropped), "offline": self.offline,
+                "offline_calls": self.offline_calls, "last_error": self.last_error}

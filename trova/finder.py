@@ -69,6 +69,9 @@ Return a tight box. If it is not visible, found = false and box_2d = null. Never
 Write label and reason in the language of the request."""
 
 
+OFFLINE_NOTE = "Grok unreachable: matched colour words locally. "
+
+
 @dataclass
 class FindResult:
     status: str                       # found | not_found | clarify | error
@@ -79,7 +82,7 @@ class FindResult:
     confidence: float = 0.0
     clarifying_question: str | None = None
     candidate_ids: list[int] = field(default_factory=list)
-    mode: str = "som"                 # som | direct
+    mode: str = "som"                 # som | direct | offline (Grok unreachable: local colour match)
     grok_latency_s: float = 0.0
     total_s: float = 0.0
     grok_calls: int = 0
@@ -122,6 +125,9 @@ def find(grok: GrokClient, frame: np.ndarray, boxes: list[Box], request: str = "
         d = r.data
         res.marked, res.grok_calls, res.grok_latency_s = marked, 1, r.latency_s
         res.label, res.reason = d.get("label", ""), d.get("reason", "")
+        if r.offline:
+            res.mode, res.reason = "offline", OFFLINE_NOTE + res.reason
+            direct_fallback = False      # the local stand-in cannot draw boxes
         res.confidence = float(d.get("confidence") or 0)
         ids = {b.id: b for b in boxes}
         res.candidate_ids = [i for i in d.get("candidate_ids", []) if i in ids]
@@ -244,9 +250,10 @@ class FindAllResult:
     label: str = ""
     reason: str = ""
     grok_latency_s: float = 0.0
+    offline: bool = False
 
     def as_dict(self) -> dict:
-        return {"status": "found" if self.boxes else "not_found", "count": len(self.boxes),
+        return {"status": "found" if self.boxes else "not_found", "count": len(self.boxes), "offline": self.offline,
                 "boxes": [b.as_dict() for b in self.boxes], "label": self.label, "reason": self.reason,
                 "grok_latency_s": round(self.grok_latency_s, 2), "n_candidates": len(self.candidates)}
 
@@ -265,6 +272,8 @@ def find_all(grok: GrokClient, frame: np.ndarray, boxes: list[Box], request: str
             seen.append(i)
     res.boxes = [ids[i] for i in seen]
     res.label, res.reason, res.grok_latency_s = r.data.get("label", ""), r.data.get("reason", ""), r.latency_s
+    if r.offline:
+        res.offline, res.reason = True, OFFLINE_NOTE + res.reason
     return res
 
 
