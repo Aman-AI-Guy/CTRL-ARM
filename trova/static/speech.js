@@ -43,6 +43,8 @@ const TrovaSpeech = (() => {
     if (/^(oggetto|object)\s+\d+$/.test(q)) return {cmd: 'select', text: q};
     const jog = jogCommand(t);
     if (jog) return jog;   // only a direction plus a distance unit; "number 2" stays a find
+    if (/\b(posizionati|mettiti|vai sopra|move above|hover over|position yourself|position above)\b/.test(t))
+      return {cmd: 'agent', text: t.trim()};
     if (!q) return {cmd: 'none'};
     return {cmd: ALL.test(t) ? 'find_all' : 'find', text: q};
   }

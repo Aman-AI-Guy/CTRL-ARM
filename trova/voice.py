@@ -49,10 +49,11 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
 - stop_arm: whenever they say stop, wait, fermo, basta. The app also stops the arm on its own when it hears these words.
 - arm_home: "park", "go home", "torna a casa".
 - jog_relative: a short relative move such as "move backward 3 mm" or "sposta a sinistra di 2 cm". Pass the direction and the distance in millimetres exactly as heard. You cannot set the motion mode, the speed, or the workspace. Say the tool's reason, including when the move was rejected.
+- run_vision_task: "find the blue pen and move above it", "trova la penna blu e posizionati sopra". Pass the person's words as text. The tool chooses a skill and may ask a clarifying question. If it returns held, blocked, or rejected, say the reason. Do not retry a rejected move with a different distance or direction. This tool cannot set the motion mode or a safety limit.
 - {dog_line}
 
 # Safety
-The arm only points; it never grabs. describe_table and select_object never move it. Pointing happens only when you call point_at_found after find_object. jog_relative is checked by the motion gateway and may be refused. You cannot turn on hardware or change a safety limit. stop_arm holds position in software; it is not the physical emergency stop. If a tool returns an error, "rejected", or "blocked", say the reason and do not retry by yourself."""
+The arm only points; it never grabs. describe_table and select_object never move it. Pointing happens only when you call point_at_found after find_object. jog_relative and run_vision_task are checked by the motion gateway and may be refused. You cannot turn on hardware or change a safety limit. stop_arm holds position in software; it is not the physical emergency stop. If a tool returns an error, "rejected", "held", or "blocked", say the reason and do not retry by yourself."""
 
 
 def tools(dog: bool) -> list[dict]:
@@ -91,6 +92,10 @@ def tools(dog: bool) -> list[dict]:
         {"type": "function", "name": "watch_line",
          "description": "Start or stop watching the cleared line continuously; an alarm sounds if anything changes.",
          "parameters": {"type": "object", "properties": {"on": {"type": "boolean"}}, "required": ["on"]}},
+        {"type": "function", "name": "run_vision_task",
+         "description": "Run an object-directed task from the person's words, such as finding an object and moving above it. "
+                        "A rejected move is not retried. You cannot pass a mode, a speed, or a limit.",
+         "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
         {"type": "function", "name": "jog_relative",
          "description": "Request a short relative move in the robot base frame. The gateway may reject it. "
                         "You cannot pass a mode, a speed, or a limit. Say the returned reason.",

@@ -111,6 +111,14 @@ const TrovaVoice = (() => {
       return {batch: d.lot, ok: d.ok, problems: d.problems.map(p => p.text), labels: d.items.map(i => ({object: i.box_id, lot: i.lot, expiry: i.expiry}))}; },
     async watch_line({on}) { const d = await api('/api/watch', {on: !!on, point: false}, true); h.onRefresh && h.onRefresh();
       return d.error ? {error: d.error} : {watching: d.on, status: d.status}; },
+    async run_vision_task({text}) {
+      const d = await api('/api/agent/task', {text}, true);
+      h.onAgent && h.onAgent(d);
+      return {status: d.status, phase: d.phase, reason: d.reason || d.error, question: d.question,
+              goal_achieved: !!d.goal_achieved, hardware_moved: !!d.hardware_moved,
+              motion_lock: d.motion_lock, verified_tool_position: false,
+              calibration_valid: !!d.calibration_valid};
+    },
     async jog_relative({direction, distance_mm}) {
       const d = await api('/api/arm/jog', {direction, distance_mm: Number(distance_mm)}, true);
       h.onRefresh && h.onRefresh();
