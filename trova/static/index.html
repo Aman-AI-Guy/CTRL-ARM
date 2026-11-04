@@ -204,7 +204,8 @@ function showApproach() {
     `<div class="row"><input type="number" id="errmm" min="0" step="0.5" style="max-width:90px"> mm <button onclick="sendForm('/api/arm/measured_error',{error_mm: $('errmm').value})">Record error</button></div>`;
   else {
     const p = a.problems || [], what = a.stage === 1 ? 'Stage 1: HOVER above' : 'Stage 2: DESCEND to pointing height at';
-    h += `<div>${what} x ${x}, y ${y} mm · height ${a.z_mm} mm · ${a.distance_mm ?? '?'} mm from the current pose · ${a.speed_mm_s} mm/s</div>` +
+    h += (a.stage === 0 ? `<div>Stage 0: LEVEL the flange in place (joint 4: ${a.q_from[3]}° → ${a.q_level[3].toFixed(1)}°, slow joint move). The tip moves to ${a.to_mm.join(', ')} mm · ${a.distance_mm ?? '?'} mm from the current pose. Then stage 1 hovers above x ${x}, y ${y} in a straight line.</div>`
+      : `<div>${what} x ${x}, y ${y} mm · height ${a.z_mm} mm · ${a.distance_mm ?? '?'} mm from the current pose · ${a.speed_mm_s} mm/s</div>`) +
       (p.length ? `<div style="color:var(--warn)">Refused: ${esc(p.join('; '))}</div>` : '') +
       (a.confirm ? `<div class="row"><button class="primary" ${p.length ? 'disabled' : ''} onclick='json("/api/arm/point_last", ${JSON.stringify({stage: a.stage, confirm: a.confirm, x_mm: x, y_mm: y})})'>Confirm stage ${a.stage}</button></div>` : '<div class="muted">moving…</div>');
   }

@@ -55,6 +55,14 @@ class CartesianBackend(ABC):
         """Where the tool would be at these joint angles: lets the safety box check joint moves too."""
         raise NotImplementedError
 
+    def is_level(self) -> bool:
+        """Can straight-line moves start from here? Only the 5-axis xArm needs a level flange (manual p. 156)."""
+        return True
+
+    def level_joints(self, q: list[float]) -> list[float]:
+        """The same pose with the flange levelled in place (first supervised run, stage 0)."""
+        raise NotImplementedError(f"{self.name}: no flange levelling")
+
     def clear_errors(self) -> None:
         pass
 
@@ -338,6 +346,13 @@ class FakeCartesian(CartesianBackend):
 
     def fk_mm(self, q):
         return tuple(self.fk(q))
+
+    def is_level(self):     # toy model: level when J4 = -(J2 + J3), as on the xArm 5
+        q = self.joints()
+        return abs(q[3] + q[1] + q[2]) < 0.5
+
+    def level_joints(self, q):
+        return [q[0], q[1], q[2], -(q[1] + q[2]), *q[4:]]
 
     def is_moving(self):
         with self._lock:

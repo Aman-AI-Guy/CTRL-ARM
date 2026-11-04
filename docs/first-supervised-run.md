@@ -13,11 +13,15 @@ What the mode does (`TROVA_FIRST_RUN=1`, off by default):
 - The find never moves the arm, even with `move=true`. The UI shows the photo with the chosen box, the target in mm,
   the height, the distance from the current pose, the speed and "Collision avoidance: NOT PRESENT. Hold the physical
   E-stop."
-- **Stage 1** (one confirmation) moves the tip to `TROVA_ARM_Z_MM + TROVA_FIRST_RUN_HOVER_MM` (default +100 mm) above
-  the object. **This path is a straight line only if the flange is level at the start.** The xArm 5 moves in Cartesian
-  lines only with the flange parallel to the base (roll ±180°, pitch 0; manual p. 156). If the flange is tilted, as at a
-  camera survey pose, the driver plans this move in joint space (`motion_type=2`). The tip then follows a curve whose
-  low points the safety box does not check, and the 20 mm/s figure is not guaranteed to be the tip speed.
+- **Stage 0** (one confirmation, only if the flange is tilted at the survey pose, as with the sideways camera) levels
+  the flange **in place**. Only joint 4 turns, to J4 = −(J2 + J3) (manual p. 156), at ≤ 5°/s. The controller's own
+  forward kinematics must confirm the result is level, and the end pose must be inside the safety box; otherwise
+  stage 0 is refused. The camera dome and the tip swing on an arc around the wrist, and the panel shows where the tip
+  ends up. Stage 0 exists because the xArm 5 moves in straight lines only with the flange level (roll ±180°,
+  pitch 0). From a tilted pose, the driver would make stage 1 a joint-space curve that the safety box does not
+  check.
+- **Stage 1** (one confirmation, from the survey pose or from the levelled pose) moves the tip in a **straight line** to
+  `TROVA_ARM_Z_MM + TROVA_FIRST_RUN_HOVER_MM` (default +100 mm) above the object.
 - **Stage 2** (a new confirmation, issued only after stage 1 arrived) descends straight down to
   `TROVA_ARM_Z_MM`. Each confirmation can be used once, only for its own stage and target, within 60 s, and never
   after a STOP.
@@ -52,14 +56,39 @@ suggestions to agree with staff.
       it is OFF, the arm stays where the collision was detected (p. 93). For this run, OFF is the more predictable
       choice.
 - [ ] **Reduced mode** ON (manual p. 81). It limits the maximum linear speed, the maximum **joint speed** and the joint
-      range. Suggested: linear ≤ 50 mm/s and joint ≤ 20°/s. This is the only limit on joint-space moves (stage 1 from
-      a tilted survey pose, and Arm home), because Trova's 20 mm/s cap only applies to straight-line moves.
+      range. Suggested: linear ≤ 50 mm/s and joint ≤ 20°/s. It also limits joint-space moves (stage 0 and Arm home).
+      Trova caps those at 5°/s itself, but its 20 mm/s cap only applies to straight-line moves.
 - [ ] **Safety boundary** ON (manual p. 80), at or just outside `TROVA_ARM_LIMITS`. It must include the survey pose
       and the hover height. If the TCP leaves it, the controller stops the arm. Step 1 of the bring-up prints whether
       it is on.
 - [ ] **Test the E-stop**: press it, then recover. It cuts arm power within 300 ms, and the manual says the arm "will
       slightly brake and fall" (p. 20), so the tip **sags** a little. Recover by twisting the button in the arrow
       direction (the power light comes on), then enable the arm (p. 20).
+
+## 1b. The physical setup (from the photo of the team's xArm 5)
+
+- [ ] **The base is bolted or clamped** to the table, not just resting on the board under it.
+- [ ] **There is a tip to measure from.** The flange carries only the camera dome. Fit a thin pointer, or pick one
+      fixed point on the dome as the tip. Measure it from the flange centre for the TCP offset. Calibration, the
+      dry test and every ruler error are measured to this point.
+- [ ] **The camera's power cable is routed and secured** along the arm, with slack for a full turn of joint 1, so it
+      cannot snag during homing. The camera is a Raspberry Pi Zero 2 W (IMX219). It sends pictures over **Wi-Fi**
+      (`http://trova-cam.local:8080`), so this cable only powers it.
+- [ ] **Network**: the Mac is cabled to the arm's control box **and** on the same Wi-Fi as the Pi. Check both:
+      `ping trova-cam.local` and open `http://trova-cam.local:8080` (the live page). If the venue Wi-Fi blocks
+      devices from seeing each other, use your own router or a phone hotspot for the Mac and the Pi.
+- [ ] **Measure the camera delay.** Hold a phone running a stopwatch in front of the camera. Photograph the phone and
+      the live page on the Mac together, and read the difference between the two times. Set
+      `TROVA_CAMERA_SETTLE_S` = delay + 0.5 s (the default 0.6 s is probably too short over Wi-Fi). Then a find right
+      after homing can never use a frame taken while the arm was still moving.
+- [ ] **LED ring**: Trova cannot drive it (the Pi's GPIO drives it). Leave `TROVA_LED` empty. During the run, keep
+      it either off or steady white from the Pi. Changing colours change the picture.
+- [ ] **Nobody uses the Pi page's "scan" or settings during the run.** They change resolution and exposure. If the
+      Pi gets hot it drops to 640×480. Trova then refuses to move the arm (the calibration image size no longer
+      matches). Let it cool: check `http://trova-cam.local:8080/status.json` → `temp`, `protection`.
+- [ ] **The reach circle is clear** (700 mm around the base). Move out the power strip, chargers, cups, the mouse and
+      the boxes, so only the test objects remain. Keep the emergency-exit walkway outside the reach.
+- [ ] **The E-stop is within the operator's reach**: control box button, or a remote button on a cable.
 
 ## 2. Measure and set the environment (you)
 
@@ -71,7 +100,8 @@ TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax     # from the bring-up; zmax mus
 TROVA_ARM_Z_MM=                                     # pointing height: tip >= 50 mm above the tallest object (E-stop sag)
 TROVA_ARM_TCP_MM=0,0,<pointer length>
 TROVA_CAMERA_ON_ARM=1
-TROVA_CAMERA=<index from python -m trova.camera --list>
+TROVA_CAMERA=http://trova-cam.local:8080/stream.mjpg   # the Pi on the arm, over Wi-Fi (1640x1232)
+TROVA_CAMERA_SETTLE_S=                              # measured camera delay + 0.5 s
 TROVA_ARM_JOINT_SPEED_DEG_S=5                       # slow homing for the first run
 TROVA_OPERATOR_NAME=<your name>
 TROVA_OPERATOR_TOKEN=<a long random secret>
@@ -98,6 +128,9 @@ curl -s -X POST "localhost:8000/api/arm/reset?token=$TROVA_TOKEN" -H "x-trova-op
 ## 3. Survey pose and calibration (you, arm in manual mode)
 
 - [ ] Move the arm by hand until the camera sees the whole table. Then Setup → **Teach survey pose here**.
+- [ ] Print the ArUco markers **flat**, taped onto the same surface the objects stand on. Don't use the raised blocks
+      or cube faces: a marker above the surface, seen at an angle, adds parallax error. All 4 must be visible
+      from the survey pose.
 - [ ] Touch the centre of each ArUco marker (0-3) with the tip. Use **Record marker from arm** for each one.
 - [ ] Return to the survey pose (**Arm home**). Then **Calibrate (ArUco)**. The result must show `source
       aruco_robot`, an error ≤ 8 mm and a `pose` equal to the survey pose.
@@ -116,13 +149,14 @@ curl -s -X POST "localhost:8000/api/arm/reset?token=$TROVA_TOKEN" -H "x-trova-op
       the pendant, or measure with a ruler from a marker. Compare it with the target shown in mm. If it is more than
       10 mm off, **stop here** and recalibrate.
 
-## 6. First move: stage 1 (hover) only
+## 6. First moves: stage 0 (level) and stage 1 (hover) only
 
 - [ ] Area clear. A second person watches the arm, not the screen. Your hand is **on the E-stop**. Nobody's hand is
       under the tip (it sags on an E-stop).
-- [ ] Check whether the survey pose's flange is level (the pendant / Studio shows roll ±180, pitch 0). If it is not,
-      stage 1 is a **joint-space curve** from the survey pose, not a straight line. Watch it all the way, and be
-      ready to stop the first time it heads lower than the hover height.
+- [ ] If the panel shows **Stage 0**: read the joint 4 change and where the tip ends up. Check that nothing is under
+      the dome's swing, then **Confirm stage 0**. Only the wrist turns, slowly; the rest of the arm must not move. If
+      the panel says "cannot plan the approach … does not level the flange", the levelling formula does not fit
+      this arm: stop and tell the developer. Don't work around it.
 - [ ] Read the panel: the target, the height, the distance from the current pose and the speed. Then **Confirm
       stage 1**.
 - [ ] The tip ends about 100 mm above the object. Check that the audit line `arm_approach` (stage 1) shows `reached`
@@ -156,7 +190,8 @@ The same data is in **history** (group "arm": `arm_approach`, `arm_accuracy`) an
 - in stage 2 it moves sideways instead of straight down;
 - anyone enters the area, or the second person says stop;
 - the homing move swings toward the table or the camera cable;
-- stage 1 from the survey pose curves lower than the hover height.
+- in stage 0 any joint other than the wrist (joint 4) moves, or the dome swings toward something;
+- stage 1 does not move in a straight line.
 
 **Abandon the session (no more moves today, debrief) if:**
 

@@ -15,7 +15,7 @@ from trova.calibration import Calibration
 WARNING = "Collision avoidance: NOT PRESENT. Hold the physical E-stop."
 
 
-def first_run_client(tmp_path, monkeypatch, **extra):
+def first_run_client(tmp_path, monkeypatch, survey=None, **extra):
     def fake_aruco(frame, pos):        # the simulated table has no printed markers: a known pixel -> robot mapping
         c = Calibration.default(frame.shape[1], frame.shape[0], 600, 400)
         c.size = [frame.shape[1], frame.shape[0]]
@@ -35,10 +35,19 @@ def first_run_client(tmp_path, monkeypatch, **extra):
         st.speeds.append(speed)
         move(x, y, z, speed * st.fast)
     st.arm.backend.move_linear = recorded
+    move_j = st.arm.backend.move_joints
+    st.joint_speeds = []
+
+    def recorded_j(q, speed):
+        st.joint_speeds.append(speed)
+        move_j(q, speed * st.fast)
+    st.arm.backend.move_joints = recorded_j
+    if survey:                                      # e.g. a tilted flange, as with the sideways camera
+        assert st.arm.go_joints(survey)
     assert c.post("/api/arm/teach_pose", data={"name": "home_joints"}).status_code == 200   # survey pose
     (tmp_path / "markers.json").write_text(json.dumps({"_frame": "robot", "0": [0, 0], "1": [600, 0],
                                                        "2": [600, 400], "3": [0, 400]}))
-    assert c.post("/api/calibration/aruco").json()["pose"] == [0.0] * 5        # recorded at this survey pose
+    assert c.post("/api/calibration/aruco").json()["pose"] == (survey or [0.0] * 5)  # recorded at this survey pose
     c.post("/api/background", data={"mode": "capture"})
     return st, c
 
@@ -231,3 +240,59 @@ def test_stage_two_worker_rechecks_the_hover_point(tmp_path, monkeypatch):
     n = len(st.speeds)
     st.run_approach(st.pending_move, dict(ap2, confirm=None), 20)
     assert len(st.speeds) == n and st.arm.state == "refused" and approach(c) is None
+
+
+def test_tilted_survey_pose_is_levelled_first_then_straight_lines(tmp_path, monkeypatch):
+    st, c = first_run_client(tmp_path, monkeypatch, survey=[0.0, 0.0, 0.0, 30.0, 0.0])
+    assert st.arm.joint_speed == 5                                          # first-run joint cap
+    assert not st.arm.backend.is_level()
+    ap = find(c)
+    assert ap["stage"] == 0 and ap["q_from"][3] == 30 and ap["q_level"][3] == 0 and ap["problems"] == []
+    assert ap["warning"] == WARNING and ap["to_mm"] == [300.0, 0.0, 200.0]   # toy FK: where the tip ends up
+    assert confirm(c, ap, stage=1).status_code == 409                       # cannot skip levelling
+    ap = find(c)
+    assert confirm(c, ap).status_code == 200 and stage_is(c, 1)
+    assert st.arm.backend.is_level() and st.joint_speeds and max(st.joint_speeds) <= 5
+    ap1 = approach(c)
+    assert ap1["q_level"] == ap["q_level"] and ap1["z_mm"] == 250
+    assert st.speeds == []                                                  # no straight-line move yet
+    assert confirm(c, ap1).status_code == 200 and stage_is(c, 2)
+    assert confirm(c, approach(c)).status_code == 200 and stage_is(c, "measure")
+    stages = [e["stage"] for e in events(tmp_path, "arm_approach")]
+    assert stages == [0, 1, 2]
+
+
+def test_stage_one_after_levelling_must_start_from_the_levelled_pose(tmp_path, monkeypatch):
+    st, c = first_run_client(tmp_path, monkeypatch, survey=[0.0, 0.0, 0.0, 30.0, 0.0])
+    ap = find(c)
+    assert confirm(c, ap).status_code == 200 and stage_is(c, 1)
+    ap1 = approach(c)
+    assert c.post("/api/arm/home").status_code == 200 and _wait(st.at_survey)   # back to the tilted survey pose
+    r = confirm(c, ap1)
+    assert r.status_code == 409 and "levelled pose" in r.json()["error"] and st.speeds == []
+    ap = find(c)                                                            # a STOP kills a stage-1 confirmation too
+    assert confirm(c, ap).status_code == 200 and stage_is(c, 1)
+    ap1 = approach(c)
+    c.post("/api/arm/stop")
+    assert c.post("/api/arm/reset", json=confirmation(c)).status_code == 200
+    assert confirm(c, ap1).status_code == 409 and st.speeds == []
+
+
+def test_xarm_levelling_is_checked_with_the_controller_fk():
+    import threading
+
+    from trova.arm.xarm import XArmBackend
+
+    class SDK:
+        def __init__(self, flat):
+            self.flat = flat
+
+        def get_forward_kinematics(self, q):
+            return 0, [300, 0, 200, 180 if self.flat else 150, 0 if self.flat else 30, 0]
+    b = XArmBackend.__new__(XArmBackend)
+    b.lock = threading.Lock()
+    b.arm = SDK(True)
+    assert b.level_joints([10, 20, -50, 0, 5]) == [10.0, 20.0, -50.0, 30.0, 5.0]   # J4 = -(J2 + J3)
+    b.arm = SDK(False)
+    with pytest.raises(RuntimeError, match="does not level"):
+        b.level_joints([10, 20, -50, 0, 5])

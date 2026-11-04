@@ -50,6 +50,7 @@ from .proposals import drop_occluders, find_blobs, is_occluded
 STATIC = Path(__file__).parent / "static"
 SLOW_S = float(os.getenv("TROVA_SLOW_S", "8"))
 FIRST_RUN_MAX_SPEED = 20.0      # mm/s: the first supervised run never goes faster; env may only lower it
+FIRST_RUN_MAX_JOINT_SPEED = 5.0  # deg/s for joint moves in that mode (stage 0, homing)
 CONFIRM_TTL_S = 60.0            # a first-run confirmation older than this is stale: find again
 COLLISION_WARNING = "Collision avoidance: NOT PRESENT. Hold the physical E-stop."
 # Captured before route locks/model calls; remains cancelled even after an operator reset.
@@ -253,6 +254,7 @@ class State:
         self.miss_mm = float(os.getenv("TROVA_ARM_MISS_MM", "10"))
         if self.first_run and isinstance(self.arm, CartesianArm):
             self.arm.speed = min(self.arm.speed, self.first_run_speed)   # every Cartesian move, home included
+            self.arm.joint_speed = min(self.arm.joint_speed, FIRST_RUN_MAX_JOINT_SPEED)
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
@@ -341,20 +343,39 @@ class State:
         out = {k: v for k, v in ap.items() if k not in ("issued", "seq")}
         try:
             tcp = self.arm.tcp_mm()
-            out["distance_mm"] = round(sum((a - b) ** 2 for a, b in zip(tcp, [*ap["target_mm"], ap["z_mm"]])) ** 0.5, 1)
+            out["distance_mm"] = round(sum((a - b) ** 2 for a, b in zip(tcp, ap["to_mm"])) ** 0.5, 1)
         except Exception:  # noqa: BLE001
             out["distance_mm"] = None
-        if ap["stage"] in (1, 2):
-            box = self.arm.limits.check(*ap["target_mm"], ap["z_mm"]) if self.arm.limits else None
+        if ap["stage"] in (0, 1, 2):
+            box = self.arm.limits.check(*ap["to_mm"]) if self.arm.limits else None
             out["problems"] = self.first_run_problems() + ([f"Safety box: {box}"] if box else [])
         return out | {"marked": self.pending_move.get("marked"), "warning": COLLISION_WARNING}
 
     def new_approach(self, stage, target_mm: list[float], **extra) -> dict:
-        """A single-use confirmation for exactly this stage and target, dead after STOP or CONFIRM_TTL_S."""
-        z = self.arm.z + self.first_run_hover if stage == 1 else self.arm.z
-        return {"stage": stage, "confirm": uuid.uuid4().hex if stage in (1, 2) else None, "target_mm": target_mm,
-                "z_mm": round(z, 1), "speed_mm_s": self.first_run_speed, "issued": time.time(),
-                "seq": self.stop_sequence, **extra}
+        """A single-use confirmation for exactly this stage and target, dead after STOP or CONFIRM_TTL_S.
+        to_mm: where the tip goes in this stage (stage 0: levelled pose by forward kinematics)."""
+        z = round(self.arm.z + self.first_run_hover if stage in (0, 1) else self.arm.z, 1)
+        out = {"stage": stage, "confirm": uuid.uuid4().hex if stage in (0, 1, 2) else None, "target_mm": target_mm,
+               "z_mm": z, "to_mm": [*target_mm, z], "speed_mm_s": self.first_run_speed, "issued": time.time(),
+               "seq": self.stop_sequence}
+        return out | extra
+
+    def first_approach(self, target_mm: list[float]) -> dict:
+        """Stage 0 only when the xArm 5 flange is tilted (camera survey pose): it moves in straight lines only with
+        the flange level (manual p. 156), so level it in place first, then stage 1 is a straight line."""
+        b = self.arm.backend
+        if b.is_level():
+            return self.new_approach(1, target_mm)
+        q = b.joints()
+        ql = b.level_joints(q)
+        return self.new_approach(0, target_mm, q_from=[round(v, 2) for v in q], q_level=ql,
+                                 to_mm=[round(v, 1) for v in b.fk_mm(ql)])
+
+    def at_joints(self, q: list[float], tol_deg: float = 1.0) -> bool:
+        try:
+            return max(abs(a - b) for a, b in zip(self.arm.backend.joints(), q)) <= tol_deg
+        except Exception:  # noqa: BLE001
+            return False
 
     def at_hover(self, ap: dict, tol_mm: float = 5.0) -> bool:
         try:
@@ -367,23 +388,31 @@ class State:
         """Worker for one first-run stage: move, record target vs the pose the controller reports, then hand out
         the next confirmation (stage 2) or ask for the measured error."""
         x, y = ap["target_mm"]
-        if ap["stage"] == 2 and not self.at_hover(ap):     # rechecked here: nothing else moves while this runs
+        # start poses are rechecked here, right before moving: nothing else moves while this worker runs
+        if ap["stage"] == 2 and not self.at_hover(ap):
             self.arm.state, self.arm.last_error = "refused", "not at this target's hover point: stage 2 refused"
             ok = False
+        elif ap["stage"] == 1 and ap.get("q_level") and not self.at_joints(ap["q_level"]):
+            self.arm.state, self.arm.last_error = "refused", "not at the levelled pose: stage 1 refused"
+            ok = False
+        elif ap["stage"] == 0:
+            ok = self.arm.go_joints(ap["q_level"])         # safety box via FK, STOP latch, reached check
         else:
             ok = self.arm.approach(x, y, ap["z_mm"], speed)
         try:
             tcp = [round(v, 1) for v in self.arm.tcp_mm()]
         except Exception:  # noqa: BLE001
             tcp = None
-        off = round(sum((a - b) ** 2 for a, b in zip(tcp, [x, y, ap["z_mm"]])) ** 0.5, 1) if tcp else None
-        self.audit.event("arm_approach", stage=ap["stage"], target_mm=[x, y, ap["z_mm"]], tcp_mm=tcp, offset_mm=off,
+        off = round(sum((a - b) ** 2 for a, b in zip(tcp, ap["to_mm"])) ** 0.5, 1) if tcp else None
+        self.audit.event("arm_approach", stage=ap["stage"], target_mm=ap["to_mm"], tcp_mm=tcp, offset_mm=off,
                          reached=ok, speed_mm_s=speed, error=getattr(self.arm, "last_error", None), find=pm.get("event_id"))
         with self.safety_lock:
             if self.pending_move is not pm:
                 return                             # a newer find replaced this target
             if not ok or self.stop_latched.is_set():
                 pm["approach"] = None              # STOP / refusal / miss: start again from a new find
+            elif ap["stage"] == 0:
+                pm["approach"] = self.new_approach(1, ap["target_mm"], q_level=ap["q_level"])
             elif ap["stage"] == 1:
                 pm["approach"] = self.new_approach(2, ap["target_mm"])
             else:
@@ -849,7 +878,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "boxes": [b.as_dict() for b in boxes], **paths}
             st.pending_move = {**st.last_find, "_ticket": ticket} if res.status == "found" else None
             if st.first_run and table_mm and st.pending_move and isinstance(st.arm, CartesianArm):
-                st.pending_move["approach"] = st.new_approach(1, table_mm)
+                try:
+                    st.pending_move["approach"] = st.first_approach(table_mm)
+                except Exception as e:  # noqa: BLE001 - no plan, no confirmation: the arm cannot be moved
+                    st.last_find["arm_blocked"] = f"First run: cannot plan the approach: {e}"
+                    st.audit.event("error", where="first_run_plan", error=str(e))
             st.light.show({"found": "found", "not_found": "not_found"}.get(res.status, "idle"))
             st.pending = None
             if res.status == "clarify":
@@ -1532,7 +1565,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             raise ArmBusy(f"Speed {a.speed_mm_s} mm/s refused: the first-run cap is {st.first_run_speed} mm/s")
         with st.safety_lock:
             ap = pm.get("approach")
-            if not ap or ap["stage"] not in (1, 2) or not ap["confirm"] or not hmac.compare_digest(a.confirm, ap["confirm"]):
+            if not ap or ap["stage"] not in (0, 1, 2) or not ap["confirm"] or not hmac.compare_digest(a.confirm, ap["confirm"]):
                 raise ArmBusy(f"No valid stage-{a.stage} confirmation: use the one shown for the current stage")
             ap["confirm"] = None                    # single use, even if a check below refuses
             if a.stage != ap["stage"]:
@@ -1541,14 +1574,18 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 raise ArmBusy("This confirmation belongs to a different target: find again")
             if ap["seq"] != st.stop_sequence or time.time() - ap["issued"] > CONFIRM_TTL_S:
                 raise ArmBusy("Stale confirmation (STOP, or older than 60 s): find again")
-        x, y, z = *ap["target_mm"], ap["z_mm"]
+        x, y, z = ap["to_mm"]
         box = st.arm.limits.check(x, y, z)
         if box:
             raise ArmBusy("Outside the safety box: " + box)
         if a.stage == 2 and not st.at_hover(ap):    # descend only straight down from this target's hover point
             raise ArmBusy("The arm is not at this target's hover point: stage 2 refused")
+        if a.stage == 1 and ap.get("q_level") and not st.at_joints(ap["q_level"]):
+            raise ArmBusy("The arm is not at the levelled pose from stage 0: stage 1 refused")
         speed = a.speed_mm_s or st.first_run_speed
-        st.start_arm(st.run_approach, pm, ap, speed, job="approach", pixels=a.stage == 1, ticket=pm["_ticket"])
+        # the picture (and so the target) is only valid at the survey pose: the first stage must start there
+        first = a.stage == 0 or (a.stage == 1 and not ap.get("q_level"))
+        st.start_arm(st.run_approach, pm, ap, speed, job="approach", pixels=first, ticket=pm["_ticket"])
         st.audit.event("arm_approach_confirmed", stage=a.stage, target_mm=[x, y, z], speed_mm_s=speed)
         return {"ok": True, "stage": a.stage, "target_mm": [x, y, z], "speed_mm_s": speed, "warning": COLLISION_WARNING}
 
