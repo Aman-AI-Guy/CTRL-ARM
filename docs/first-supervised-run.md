@@ -38,7 +38,21 @@ What the mode does (`TROVA_FIRST_RUN=1`, off by default):
 .venv/bin/python -m trova.arm.bringup <xarm ip> --camera-on-arm
 ```
 
-Follow its steps with staff at the E-stop. Then, in xArm Studio → Settings, **with staff**, set the items below and
+**Faster, and repeatable: set them with the script.** It never moves the arm. Without `--apply` it only prints the
+current settings; with `--apply` it shows the changes, asks you to type YES, saves them on the controller and reads
+them back:
+
+```bash
+.venv/bin/python -m trova.arm.xarm_config 192.168.1.111                        # read only
+.venv/bin/python -m trova.arm.xarm_config 192.168.1.111 --apply \
+    --limits <xmin,xmax,ymin,ymax,zmin,zmax from the bring-up> --payload-kg <weighed> --payload-cog <x,y,z> \
+    [--tcp <x,y,z after the yaw test>]
+```
+
+It sets collision sensitivity 4, self-collision on, rebound off, reduced mode 50 mm/s and 20°/s, and the safety
+boundary = the limits. The script does not cover mounting direction (check it is Floor), the TCP offset
+measurement and yaw test, or the E-stop test: do those in Studio. Otherwise, follow the bring-up's steps with staff
+at the E-stop, then in xArm Studio → Settings, **with staff**, set the items below and
 write down each value. The manual gives no numeric values for the reduced-mode limits, so the numbers here are
 suggestions to agree with staff.
 
