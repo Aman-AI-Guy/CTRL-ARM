@@ -33,7 +33,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Find by words / photo, clarifying question, direct-box fallback | Done, tested (mock + request format) | `finder.py` | Needs live key to verify accuracy |
 | What changed (match + 2-of-3 persistence + Grok verify + naive baseline) | Done, tested | `changes.py` | |
 | Line-clearance record + sign-off (HTML) | Done | `server.py` `/api/report` | |
-| Cobot drivers UR / Elite (sockets), xArm (SDK), safety box, stop-and-hold | Done, tested vs fakes | `arm/` | Not yet run on real hardware. STOP latches (drivers refuse until the server calls `ready()` for a new command); one motion at a time (`State.start_arm` under `arm_lock`); STOP during a find cancels its move; a real arm needs `TROVA_ARM_LIMITS` and `TROVA_ARM_HOME_MM` or it refuses to move |
+| Cobot drivers UR / Elite (sockets), xArm (SDK), safety box, stop-and-hold | Done, tested vs fakes | `arm/` | **The team has the xArm 5 (XF1203, 700 mm reach, 3 kg).** First connection: `python -m trova.arm.bringup <ip>` (`arm/bringup.py`: reads state and errors, hand-guided ready / park / corner poses, 30 mm test move, STOP test, prints the .env lines). `TROVA_ARM_TCP_MM` sets the pointer length; UI "Clear arm errors" after a collision stop. Not yet run on real hardware. STOP latches (drivers refuse until the server calls `ready()` for a new command); one motion at a time (`State.start_arm` under `arm_lock`); STOP during a find cancels its move; a real arm needs `TROVA_ARM_LIMITS` and `TROVA_ARM_HOME_MM` or it refuses to move |
 | Calibration (ArUco, clicks, arm-tip clicks) | Done, tested | `calibration.py`, `server.py` | Real arm refuses to move until calibrated with the arm. Arm points (`st.arm_points`) are never mixed with table clicks; duplicate / collinear points and fits worse than 15 mm are rejected (the bad point is dropped); the image size is stored and an uploaded photo or another resolution blocks the arm |
 | Grok Voice (realtime, confirm-before-move, stop word) | Done; config/token tested | `voice.py`, `static/voice.js` | Not yet heard live |
 | Optional dog room search (sim) | Done, tested | `dog.py` | Go2 driver is a template |
@@ -103,7 +103,7 @@ Find: `POST /api/find` (text, photo, move) · `POST /api/clarify` · `POST /api/
 Changes: `POST /api/reference` · `POST /api/changes` · `POST /api/signoff` · `GET /api/report`
 Setup: `POST /api/background` · `/api/source` · `/api/source/step` · `/api/upload_scene` · `/api/upload_scene/clear` · `/api/tune`
 Calibration: `POST /api/calibration/aruco` · `/click` · `/arm_click` · `/marker_from_arm` · `/reset` · `/markers`
-Arm: `POST /api/arm/stop` · `/home` · `/point` · `/freedrive` · `/teach` · `/teach_home` · `/compliant`
+Arm: `POST /api/arm/stop` · `/home` · `/point` · `/freedrive` · `/clear_errors` · `/teach` · `/teach_home` · `/compliant`
 Jury: `POST /api/judge` · `/api/label`
 Voice: `GET /api/voice/config` · `POST /api/voice/session` · `/api/voice/log`
 Inventory: `POST /api/inventory` (names every object, labelled map image) · `POST /api/reference` takes `describe` (default true)
@@ -133,6 +133,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 xArm 5 on site: guided bring-up script (`python -m trova.arm.bringup <ip>`), `TROVA_ARM_TCP_MM` pointer offset, `/api/arm/clear_errors` + UI button; guide's arm-slot steps use the bring-up.
 - 2026-11-04 Docs: README and morning guide cover features 8-13, the required safety box and home pose, preflight, TROVA_TOKEN and the browser smoke test; known gaps list what the review could not confirm.
 - 2026-11-04 Polish: approving a NOT clear line needs a written reason (and decision must be approve/reject); a spoken answer right after Trova's question is treated as the answer (UI race fixed); spoken results opt-in (on with the first push-to-talk) and deferred, because headless Chrome stalled ~15 s while speaking; `tests/browser_smoke.py` (new `ui` extra) clicks through every feature and fails on JS errors, 5xx, unexpected 4xx or sideways scroll on phones; lint clean (ruff E,F,W,B).
 - 2026-11-04 Feature 13: audit trail page with filters, search and CSV; tamper-evident hash chain in events.jsonl with a verify endpoint.

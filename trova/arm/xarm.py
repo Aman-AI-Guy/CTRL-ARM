@@ -4,11 +4,13 @@ No pendant: release the e-stop, power the box, put the Mac on its subnet (often 
 xArm5 is 5-axis: Cartesian moves need roll=180, pitch=0; we keep the yaw we read at connect.
 Units: mm and degrees. set_position is non-blocking with wait=False and QUEUES commands, so we stop the
 queue before every new target. Stop = set_state(4) then re-enable (holds position, not a power cut).
-Set the tool tip with set_tcp_offset (or in UFACTORY Studio) before calibrating.
+Set the tool tip with set_tcp_offset (or in UFACTORY Studio) before calibrating: TROVA_ARM_TCP_MM=0,0,<length>
+applies it at connect (not saved on the controller). First connection: python -m trova.arm.bringup <ip>.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 
 from .cartesian import CartesianBackend
@@ -28,6 +30,10 @@ class XArmBackend(CartesianBackend):
         self.accel = accel_mm_s2
         self.arm = XArmAPI(ip, is_radian=False)
         self.clear_errors()
+        tcp = os.getenv("TROVA_ARM_TCP_MM", "").strip()
+        if tcp:      # the pointer / printed tool: positions then refer to its tip, not the flange
+            x, y, z = (float(v) for v in tcp.split(","))
+            self.arm.set_tcp_offset([x, y, z, 0, 0, 0], wait=True)
         code, pose = self.arm.get_position()
         self.yaw = pose[5] if code == 0 and pose else 0.0
 

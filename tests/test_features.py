@@ -607,3 +607,156 @@ def test_approving_a_not_clear_line_needs_a_reason(tmp_path, monkeypatch):
     assert c.post("/api/signoff", data={"operator": "Ana", "decision": "reject"}).status_code == 200
     so = c.post("/api/signoff", data={"operator": "Ana", "decision": "approve", "note": "spare pen, QA informed"}).json()
     assert so["note"] == "spare pen, QA informed" and "spare pen" in c.get("/api/report").text
+
+
+# ---------------------------------------------------------------- xArm 5 bring-up (the arm the team got)
+class SimXArm:
+    """Enough of xarm.wrapper.XArmAPI to rehearse the bring-up: moves over (fake) time, stops on set_state(4),
+    goes soft in mode 2 so a 'hand' can move it."""
+
+    def __init__(self, clock, err=0, ignore_stop=False):
+        self.clock, self.err, self.ignore_stop = clock, err, ignore_stop
+        self.pos, self.target, self.speed, self.t = [200.0, 0.0, 420.0, 90.0, 0.0, 0.0], None, 0.0, 0.0
+        self.mode, self.state, self.tcp_offset, self.moves = 0, 2, [0.0] * 6, []
+
+    def _adv(self):
+        now = self.clock[0]
+        if self.target:
+            d = [b - a for a, b in zip(self.pos[:3], self.target[:3])]
+            dist = sum(v * v for v in d) ** 0.5
+            step = self.speed * (now - self.t)
+            if dist <= step:
+                self.pos, self.target = list(self.target), None
+            else:
+                self.pos[:3] = [a + v / dist * step for a, v in zip(self.pos[:3], d)]
+        self.t = now
+
+    def get_position(self):
+        self._adv()
+        return 0, list(self.pos)
+
+    def set_position(self, x, y, z, roll, pitch, yaw, speed, mvacc, wait, timeout):
+        assert self.mode == 0 and not self.err, "moved while soft or in error"
+        self._adv()
+        self.moves.append((x, y, z, speed))
+        self.target, self.speed = [x, y, z, roll, pitch, yaw], speed
+        if wait:
+            self.pos, self.target = list(self.target), None
+        return 0
+
+    def set_state(self, s):
+        self._adv()
+        if s == 4 and not self.ignore_stop:
+            self.target = None
+        self.state = s
+        return 0
+
+    def set_mode(self, m):
+        self.mode = m
+        return 0
+
+    def get_err_warn_code(self):
+        return 0, [self.err, 0]
+
+    def clean_error(self):
+        self.err = 0
+        return 0
+
+    def get_version(self):
+        return 0, "v2.6.0"
+
+    def get_state(self):
+        return 0, self.state
+
+    def get_servo_angle(self):
+        return 0, [0.0] * 5
+
+    def get_reduced_states(self):
+        return 0, [0, [0] * 6, 0, 0, 0, 0]
+
+    def __getattr__(self, name):            # clean_warn, motion_enable, disconnect, ...
+        return lambda *a, **k: 0
+
+
+def _bringup(sim, clock, answers_no=()):
+    from trova.arm.bringup import Bringup
+    hand = {"15 cm above": [300, 0, 160, 180, 0, 0], "PARK pose": [150, -250, 300, 180, 0, 0],
+            "far left": [450, 200, 10, 180, 0, 0], "far right": [450, -200, 10, 180, 0, 0],
+            "near right": [250, -200, 10, 180, 0, 0], "near left": [250, 200, 10, 180, 0, 0],
+            "Lift the arm": [350, 0, 150, 180, 0, 0], "again": [350, 0, 150, 180, 0, 0]}
+    said = []
+
+    def ask(q):
+        for key, p in hand.items():
+            if key in q:
+                assert sim.mode == 2, "asked to move by hand while the arm is stiff"
+                sim.pos = [float(v) for v in p]
+                return ""
+        return "n" if any(k in q for k in answers_no) else "y"
+
+    def sleep(s):
+        clock[0] += s
+    return Bringup(sim, ask=ask, say=said.append, sleep=sleep), said
+
+
+def test_xarm_bringup_full_run(tmp_path):
+    import json
+    clock = [0.0]
+    sim = SimXArm(clock, err=24)                       # an old error left on the controller
+    b, said = _bringup(sim, clock)
+    res = b.run("192.168.1.185", tmp_path / "xarm_bringup.json")
+    env = res["settings"]["env"]
+    assert env["TROVA_ARM"] == "xarm:192.168.1.185" and env["TROVA_ARM_Z_MM"] == "110"
+    assert env["TROVA_ARM_HOME_MM"] == "150,-250,300"
+    assert env["TROVA_ARM_LIMITS"] == "130,490,-270,240,25,380"          # widened to include the park pose
+    assert res["stop_test"]["ok"] and 5 < res["stop_test"]["moved_mm"] < 60
+    assert all(m[3] <= 30 for m in sim.moves)                             # never faster than 30 mm/s
+    assert json.loads((tmp_path / "xarm_bringup.json").read_text())["settings"]["env"] == env
+    assert any("TROVA_ARM_LIMITS=" in line for line in said)
+
+
+def test_xarm_bringup_refuses_without_yes_and_flags_a_bad_stop():
+    from trova.arm.bringup import Abort
+    clock = [0.0]
+    sim = SimXArm(clock)
+    b, _ = _bringup(sim, clock, answers_no=("Staff at the e-stop",))
+    with pytest.raises(Abort, match="skipped"):
+        b.run("ip", None)
+    assert sim.moves == []                                                 # "no" means no motion at all
+    clock = [0.0]
+    bad = SimXArm(clock, ignore_stop=True)
+    b, _ = _bringup(bad, clock)
+    with pytest.raises(Abort, match="did not stop"):
+        b.run("ip", None)
+
+
+def test_xarm_tcp_offset_from_env_and_clear_errors_endpoint(tmp_path, monkeypatch):
+    import sys
+
+    calls = []
+
+    class FakeXArm:
+        def __init__(self, ip, is_radian=False):
+            pass
+
+        def get_position(self):
+            return 0, [300.0, 0.0, 200.0, 180.0, 0.0, 0.0]
+
+        def __getattr__(self, name):
+            return lambda *a, **k: calls.append((name, a, k)) or 0
+    mod = types.ModuleType("xarm.wrapper")
+    mod.XArmAPI = FakeXArm
+    monkeypatch.setitem(sys.modules, "xarm", types.ModuleType("xarm"))
+    monkeypatch.setitem(sys.modules, "xarm.wrapper", mod)
+    monkeypatch.setenv("TROVA_ARM_TCP_MM", "0,0,120")
+    from trova.arm.xarm import XArmBackend
+    XArmBackend("192.168.1.185")
+    assert ("set_tcp_offset", ([0.0, 0.0, 120.0, 0, 0, 0],), {"wait": True}) in calls
+
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch, TROVA_ARM="cartesian:fake")
+    app.state.trova.arm.last_error = "C31 collision"
+    r = c.post("/api/arm/clear_errors").json()
+    assert r["error"] is None and r["state"] == "idle"
+    app2, c2 = _client(tmp_path / "sim", monkeypatch, TROVA_ARM="sim")
+    assert c2.post("/api/arm/clear_errors").status_code == 400            # the simulated arm has no controller

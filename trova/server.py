@@ -804,6 +804,18 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         st.audit.event("marker_from_arm", marker=marker_id, x_mm=x, y_mm=y)
         return {"markers": {k: v for k, v in d.items() if k != "_frame"}}
 
+    @app.post("/api/arm/clear_errors")
+    def api_arm_clear_errors():
+        """After a collision stop or a protective stop: clear the controller error and enable motion again."""
+        arm = _need_cartesian()
+        try:
+            arm.backend.clear_errors()
+        except Exception as e:  # noqa: BLE001 - show the SDK message
+            return fail(e, "clear_errors")
+        arm.state, arm.last_error = "idle", None
+        st.audit.event("arm_clear_errors")
+        return arm.status()
+
     @app.post("/api/arm/freedrive")
     def api_arm_freedrive(on: bool = Form(...)):
         arm = _need_cartesian()

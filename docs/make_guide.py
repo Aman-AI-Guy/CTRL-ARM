@@ -244,8 +244,9 @@ s += numbered([
     "192.168.1.50, mask 255.255.255.0, and <b>no router</b>, so the internet stays on Wi-Fi. Ping the arm.",
     "UR or Elite only: staff enable <i>Remote Control</i> on the pendant. On every arm: set the TCP offset of the "
     "printed tool, otherwise positions refer to the flange, not the tip.",
-    "Fill in <font face='Courier'>.env</font> (below), restart the app, make the first move at low speed, and press STOP "
-    "in the middle of a move to check that it halts and holds.",
+    "xArm: run <font face='Courier'>.venv/bin/python -m trova.arm.bringup &lt;ip&gt;</font>. It reads the arm, lets you set "
+    "the ready pose, park pose and work-area corners BY HAND, does a 30 mm test move and a STOP test, and prints the "
+    "<font face='Courier'>.env</font> lines below. Other arms: fill them in by hand, first move at low speed, test STOP.",
     "<i>Freedrive on</i>, put the tip on the table at 4-6 spread-out spots and click the tip each time "
     "(<i>Calibrate with arm</i>). Then touch each ArUco marker and record it, so later recalibration takes seconds."])
 s.append(Preformatted("TROVA_ARM=xarm:192.168.1.xxx        # or ur:<ip>  or  elite:<ip>\n"
