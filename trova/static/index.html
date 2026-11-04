@@ -114,12 +114,18 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
   <div class="panel">
     <h2>Vision task</h2>
     <div class="muted">Grok picks a skill. A move is a proposal until the motion gateway accepts it and calibration, clearance, and the operator unlock are all in place. A synthetic picture cannot authorize motion.</div>
-    <div class="row" style="margin-top:8px"><input type="text" id="agentq" placeholder="trova la penna blu e posizionati sopra" onkeydown="if(event.key==='Enter')runAgent()">
-      <button onclick="runAgent()">Run task</button><button onclick="post('/api/agent/cancel')">Cancel task</button></div>
+    <div class="row" style="margin-top:8px"><input type="text" id="agentq" placeholder="trova l'evidenziatore rosa e posizionati sopra" onkeydown="if(event.key==='Enter')runAgent()">
+      <button onclick="runAgent(true)">Step</button><button onclick="runAgent()">Run task</button><button onclick="post('/api/agent/cancel')">Cancel task</button></div>
     <div id="agentres" class="result"></div>
     <div class="muted" id="motioninfo"></div>
     <div class="muted" id="visioninfo"></div>
-    <div class="muted">Calibration does not move the arm. Pose it yourself, with the physical e-stop in reach. The checkerboard stays fixed in the robot base during hand-eye captures. The Pi image is already rotated 180 degrees.</div>
+    <div class="muted" id="timeread"></div>
+  </div>
+
+  <div class="panel" id="calibpanel">
+    <h2>Camera calibration</h2>
+    <div class="muted">Calibration does not move the arm. Pose it yourself, with the physical e-stop in reach. The checkerboard stays fixed in the robot base during hand-eye captures. The Pi image is already rotated 180 degrees. A matrix is stored only when the gates pass: 1.5 px, 10 mm, 10 mm, and 5 mm.</div>
+    <div class="muted" id="robotread">robot telemetry …</div>
     <div class="row"><span class="muted">inner corners</span><input type="number" id="boardcols" value="9" style="max-width:70px"><input type="number" id="boardrows" value="6" style="max-width:70px">
       <input type="number" id="boardsquare" placeholder="measured square mm" style="max-width:160px"></div>
     <div class="row"><button onclick="previewBoard()">Show checkerboard</button>
@@ -127,7 +133,30 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <div class="row"><label class="muted"><input type="checkbox" id="ontable"> board is flat on the table</label>
       <button onclick="captureBoard('handeye')">Capture hand-eye view</button><button onclick="post('/api/vision/handeye/solve')">Solve hand-eye</button></div>
     <div class="muted" id="calibinfo">no calibration samples yet</div>
+    <div class="muted" id="calibnext"></div>
+    <div class="muted" id="dofnote"></div>
+    <div id="reprobars"></div>
+    <div id="calibsamples"></div>
     <img id="boardview" alt="Checkerboard detection" style="display:none;width:100%;margin-top:8px;border-radius:8px;border:1px solid var(--line)">
+    <div class="row" style="margin-top:8px"><span class="muted">measured reference mm</span>
+      <input type="number" id="refx" placeholder="x" style="max-width:80px"><input type="number" id="refy" placeholder="y" style="max-width:80px"><input type="number" id="refz" placeholder="z" style="max-width:80px">
+      <input type="number" id="reftrack" placeholder="track" style="max-width:80px"><button onclick="compareReference()">Compare point</button></div>
+    <div class="muted" id="locinfo"></div>
+  </div>
+
+  <div class="panel" id="safetypanel">
+    <h2>Safety measurements</h2>
+    <div class="muted">Type values you measured. Empty fields are left unchanged. This form cannot set hardware mode or the unlock. Collision avoidance stays off. The physical e-stop is independent of this page.</div>
+    <div class="row"><input type="text" id="safelimits" placeholder="workspace xmin,xmax,ymin,ymax,zmin,zmax" style="flex:1"></div>
+    <div class="row"><input type="text" id="safekeep" placeholder="keep-out boxes, or none" style="flex:1"></div>
+    <div class="row"><input type="text" id="safecamera" placeholder="camera body x,y,z,radius" style="flex:1"></div>
+    <div class="row"><input type="number" id="safespeed" placeholder="speed mm/s" style="max-width:120px">
+      <input type="number" id="safejog" placeholder="jog max mm" style="max-width:120px">
+      <input type="number" id="safeclear" placeholder="clearance mm" style="max-width:130px"></div>
+    <div class="row"><input type="text" id="safejoints" placeholder="joint min,max × 5, inside the xArm ranges" style="flex:1"></div>
+    <div class="row"><button onclick="saveSafety()">Store measured values</button></div>
+    <div class="muted" id="safetyinfo"></div>
+    <div class="muted" id="safetyextra"></div>
   </div>
 
   <div class="panel">
@@ -520,11 +549,13 @@ async function markerFromArm() { const id = prompt('Touch the centre of an ArUco
 async function markers() { const d = await call('/api/calibration/markers', {method: 'POST'}); d.files.forEach(u => window.open(u)); }
 async function tune() { await json('/api/tune', {thresh: +$('thresh').value, min_area_frac: +$('minarea').value}); }
 
-async function runAgent() {
+async function runAgent(step) {
   const text = $('agentq').value.trim();
-  if (!text) return alert('Type the task, for example: trova la penna blu e posizionati sopra');
-  const el = $('agentres'); el.className = 'result show'; el.innerHTML = 'Running the task…';
-  try { showAgent(await json('/api/agent/task', {text})); } catch (e) {}
+  if (!text) return alert('Type the task, for example: trova l\'evidenziatore rosa e posizionati sopra');
+  const el = $('agentres'); el.className = 'result show'; el.innerHTML = step === true ? 'One skill…' : 'Running the task…';
+  const body = {text};
+  if (step === true) body.step = true;
+  try { showAgent(await json('/api/agent/task', body)); } catch (e) {}
 }
 function showAgent(d) {
   if (!d || !d.status) return;
@@ -541,7 +572,9 @@ function showAgent(d) {
     `<div class="muted">${esc(camState)} · Grok ${esc(d.grok_mode || (d.authoritative ? 'live' : 'not live'))} · calibration ${d.calibration_valid ? 'valid' : 'not valid'} · motion ${prop ? 'proposed' : 'not proposed'} · movement ${d.hardware_moved ? 'executed' : 'not executed'}</div>` +
     (d.motion_lock ? `<div style="color:var(--warn)">${esc(d.motion_lock)}</div>` : '') +
     (blocks ? `<ul class="changes">${blocks}</ul>` : '') +
-    (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm · geometry ${esc((d.proposal && d.proposal.geometry_source) || 'unknown')} · IK ${d.proposal && d.proposal.ik_verified ? 'confirmed by the controller' : 'not confirmed'} · collision avoidance: no</div>` : '') +
+    (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm · geometry ${esc((d.proposal && d.proposal.geometry_source) || 'unknown')} · IK ${d.proposal && d.proposal.ik_verified ? 'confirmed by the controller' : 'not confirmed'} · authorized ${d.proposal && d.proposal.execution_authorized ? 'yes' : 'no'} · collision avoidance: no</div>` : '') +
+    (d.proposal && d.proposal.duration_s != null ? `<div class="muted">straight-line estimate ${esc(d.proposal.duration_s)} s${d.proposal.duration_is_straight_line_estimate ? '' : ''}</div>` : '') +
+    (d.timings ? `<div class="muted">stage times ${esc(Object.keys(d.timings).filter(k => d.timings[k] && d.timings[k].last_s != null).map(k => k + ' ' + d.timings[k].last_s + 's').join(' · '))} · realtime not claimed</div>` : '') +
     (traj.length ? `<div class="muted">straight-line samples ${esc(traj.map(p => p.join(', ')).join(' → '))} mm</div>` : '') +
     (safety ? `<div class="muted">gateway ${esc(d.proposal.status || '')}: workspace ${esc(safety.workspace || '')} · clearance ${esc(safety.clearance || '')} · keep-out ${esc(safety.keep_out || 'not_assessed')} · motion ${d.proposal.allow_motion ? 'allowed' : 'not sent'} · collision avoidance: no</div>` : '') +
     (steps ? `<ul class="changes">${steps}</ul>` : '');
@@ -573,7 +606,58 @@ function showCalib() {
   const hold = p.holdout_mm == null ? 'not solved' : p.holdout_mm + ' mm';
   const plane = p.plane_residual_mm == null ? 'not solved' : p.plane_residual_mm + ' mm';
   const axis = sp.one_axis ? ' · rotations stay near one axis' : '';
-  $('calibinfo').textContent = `intrinsics ${p.n_intrinsics} · hand-eye ${p.n_handeye} · on table ${p.n_on_table} · rotation ${sp.max_rotation_deg || 0} deg · translation ${sp.max_translation_mm || 0} mm${axis} · rms ${rms} · held-out ${hold} · plane ${plane} · ${sp.reason || ''}`;
+  const rejected = ` · rejected intrinsics ${p.n_rejected_intrinsics || 0} · rejected hand-eye ${p.n_rejected_handeye || 0}`;
+  $('calibinfo').textContent = `intrinsics ${p.n_intrinsics} · hand-eye ${p.n_handeye} · on table ${p.n_on_table}${rejected} · rotation ${sp.max_rotation_deg || 0} deg · translation ${sp.max_translation_mm || 0} mm${axis} · rms ${rms} · held-out ${hold} · plane ${plane} · ${sp.reason || ''}`;
+  if ($('calibnext')) $('calibnext').textContent = p.next_instruction || '';
+  if ($('dofnote')) $('dofnote').textContent = p.dof_note || '';
+  const bars = $('reprobars');
+  if (bars) {
+    const views = p.per_view_px || [];
+    bars.innerHTML = views.map(v => {
+      const px = v.mean_px == null ? 0 : v.mean_px;
+      const width = Math.min(100, px / 1.5 * 100);
+      return `<div class="muted">view ${v.index} ${v.mean_px == null ? 'no error' : v.mean_px + ' px'} <span style="display:inline-block;height:8px;width:${width}px;background:${px > 1.5 ? 'var(--bad)' : 'var(--ok)'}"></span></div>`;
+    }).join('');
+  }
+}
+async function compareReference() {
+  if ($('refx').value === '' || $('refy').value === '' || $('refz').value === '') return alert('Type the measured x, y and z in millimetres.');
+  if ($('reftrack').value === '') return alert('Type the track id of the object you measured.');
+  const body = {x_mm: +$('refx').value, y_mm: +$('refy').value, z_mm: +$('refz').value, track_id: +$('reftrack').value};
+  try {
+    const d = await json('/api/vision/reference', body);
+    $('locinfo').textContent = d.estimate_from_calibration
+      ? `predicted ${d.predicted_mm.join(', ')} mm · measured ${d.measured_mm.join(', ')} mm · error ${d.error_mm} mm · version ${d.calibration_version} · pose ${d.pose_source} · uncertainty ${d.uncertainty_mm} · motion not authorized`
+      : (d.reason || 'localization blocked');
+  } catch (e) {}
+}
+async function saveSafety() {
+  const body = {confirm: true};
+  if ($('safelimits').value.trim()) body.limits = $('safelimits').value.trim();
+  if ($('safekeep').value.trim()) body.keep_out = $('safekeep').value.trim();
+  if ($('safecamera').value.trim()) body.camera_body_mm = $('safecamera').value.trim();
+  if ($('safespeed').value !== '') body.speed_mm_s = +$('safespeed').value;
+  if ($('safejog').value !== '') body.jog_max_mm = +$('safejog').value;
+  if ($('safeclear').value !== '') body.observe_clearance_mm = +$('safeclear').value;
+  if ($('safejoints').value.trim()) body.joint_limits = $('safejoints').value.trim();
+  try {
+    const d = await json('/api/safety', body);
+    $('safetyinfo').textContent = (d.ok ? 'stored ' + (d.applied || []).join(', ') : d.reason) + ' · collision avoidance: no · mode unchanged';
+  } catch (e) {}
+}
+async function dropSample(kind, index) {
+  try { await json('/api/vision/sample/drop', {kind, index}); } catch (e) {}
+}
+async function loadSamples() {
+  if (!$('calibsamples')) return;
+  try {
+    const d = await (await fetch('/api/vision/samples')).json();
+    const rows = (d.intrinsics || []).concat(d.handeye || []);
+    $('calibsamples').innerHTML = rows.map(s => {
+      const thumb = s.image ? `<img src="/files/${esc(s.image)}" alt="" style="width:96px;height:auto;border-radius:6px;border:1px solid var(--line)">` : '';
+      return `<div class="row">${thumb}<span class="muted">${esc(s.kind)} ${s.index} · ${s.width || '?'}×${s.height || '?'} · ${s.corners} corners${s.reprojection_px == null ? '' : ' · ' + s.reprojection_px + ' px'}</span><button onclick="dropSample('${esc(s.kind)}', ${Number(s.index)})">Remove</button></div>`;
+    }).join('') + (d.rejected || []).slice(-6).map(s => `<div class="muted">rejected ${esc(s.kind)}: ${esc(s.reason)}</div>`).join('');
+  } catch (e) {}
 }
 async function startScan() {
   try { await json('/api/scan/start', {object_id: $('scanobj').value}); } catch (e) {}
@@ -634,11 +718,33 @@ async function refresh() {
   moved.textContent = agent.hardware_moved ? 'movement executed' : 'movement not executed';
   moved.className = 'badge ' + (agent.hardware_moved ? 'live' : '');
   if (S.robot) {
-    let line = `robot pose: ${S.robot.source || 'unavailable'}` + (S.robot.pose6 ? '' : ' · no roll/pitch/yaw') + (S.robot.error_code ? ' · error ' + S.robot.error_code : '') + (S.robot.state_code == null ? '' : ' · state ' + S.robot.state_code) + (vis.reasons && vis.reasons.length ? ' · ' + vis.reasons[0] : '') + ' · sync not claimed';
+    const joints = (S.robot.joints || []).map(v => Number(v).toFixed(1)).join(', ');
+    const pose = S.robot.pose6 ? S.robot.pose6.map(v => Number(v).toFixed(1)).join(', ') : 'no roll/pitch/yaw';
+    let line = `robot pose: ${S.robot.source || 'unavailable'} · tcp ${pose} · joints ${joints || '–'} · moving ${S.robot.moving} · error ${S.robot.error_code ?? '–'} · warn ${S.robot.warn_code ?? '–'} · state ${S.robot.state_code ?? '–'}` + (vis.reasons && vis.reasons.length ? ' · ' + vis.reasons[0] : '') + ' · sync not claimed';
     if (window._boardNote) line += ' · ' + window._boardNote;
     $('visioninfo').textContent = line;
+    if ($('robotread')) $('robotread').textContent = line + (S.robot.motors_enabled_by_trova ? ' · motors enabled by Trova' : ' · motors not enabled by Trova') + (S.robot.read_finished_at ? ' · pose read ' + S.robot.read_finished_at : '');
   }
   showCalib();
+  loadSamples();
+  if (S.safety && $('safetyinfo')) {
+    const current = $('safetyinfo').textContent || '';
+    if (!current || current.startsWith('missing')) {
+      const missing = (S.safety.missing || []).join(', ') || 'none';
+      $('safetyinfo').textContent = `missing ${missing} · workspace ${S.safety.workspace} · keep-out ${S.safety.keep_out} · camera ${S.safety.camera} · collision avoidance: no`;
+    }
+  }
+  if (S.reference_check && $('locinfo') && !['refx', 'refy', 'refz', 'reftrack'].includes(document.activeElement && document.activeElement.id)) {
+    const r = S.reference_check;
+    $('locinfo').textContent = r.estimate_from_calibration
+      ? `predicted ${(r.predicted_mm || []).join(', ')} mm · measured ${(r.measured_mm || []).join(', ')} mm · error ${r.error_mm} mm · version ${r.calibration_version} · image ${r.image_time || '–'} · pose ${r.pose_source} · uncertainty ${r.uncertainty_mm} · motion not authorized`
+      : (r.reason || 'localization blocked');
+  }
+  if (S.safety && $('safetyextra')) $('safetyextra').textContent = (S.safety.unchecked || []).join(' ');
+  if (S.latency && $('timeread')) {
+    const parts = Object.keys(S.latency).filter(k => S.latency[k] && S.latency[k].mean_s != null).map(k => `${k} mean ${S.latency[k].mean_s}s n=${S.latency[k].n}`);
+    $('timeread').textContent = (parts.join(' · ') || 'no stage times yet') + ' · realtime not claimed';
+  }
   if (S.motion) $('motioninfo').textContent = `motion ${S.motion.mode} · workspace ${S.motion.workspace || 'unknown'} · clearance ${S.motion.clearance} · keep-out ${S.motion.keep_out || 'not_assessed'} · collision avoidance: no · software stop is not the physical e-stop`;
   if (S.agent && document.activeElement !== $('agentq')) showAgent(S.agent);
   if (S.scan) showScan(S.scan);

@@ -228,6 +228,146 @@ def _shrink_joints(raw: str) -> tuple[tuple[float, float], ...] | None:
     return tuple(out)
 
 
+UNCHECKED_OBSTACLES = (
+    "The robot links, the dress pack, and the camera cable are not in the model.",
+    "Objects on the table are not treated as obstacles.",
+    "The table edge beyond the measured plane is not checked.",
+    "People in the workspace are not detected.",
+    "collision_avoidance stays false. A path whose clearance cannot be checked is refused.",
+)
+
+_SAFETY_FIELDS = {"confirm", "limits", "keep_out", "speed_mm_s", "jog_max_mm",
+                  "observe_clearance_mm", "camera_body_mm", "joint_limits"}
+
+
+def safety_report(gateway, observe_clearance_mm) -> dict:
+    """What is still missing. This does not invent a measurement."""
+    missing = []
+    if gateway is None:
+        missing.append("motion gateway")
+    else:
+        if gateway.limits is None:
+            missing.append("TROVA_ARM_LIMITS")
+        if not getattr(gateway, "keepout_assessed", False):
+            missing.append("TROVA_ARM_KEEP_OUT")
+        if gateway.camera is None:
+            missing.append("TROVA_CAMERA_BODY_MM")
+    if observe_clearance_mm is None:
+        missing.append("TROVA_OBSERVE_CLEARANCE_MM")
+    mode = None if gateway is None else gateway.mode
+    keep = None
+    if gateway is not None:
+        keep = ("not_assessed" if not gateway.keepout_assessed
+                else ("none" if not gateway.keepouts else f"{len(gateway.keepouts)} boxes"))
+    return {
+        "missing": missing, "unchecked": list(UNCHECKED_OBSTACLES),
+        "collision_avoidance": False, "mode": mode, "grok_can_edit": False,
+        "mode_changed_here": False, "software_stop_is_not_safety_rated": True,
+        "physical_estop": "independent of this software",
+        "workspace": None if gateway is None else ("configured" if gateway.limits is not None else "not_configured"),
+        "keep_out": keep,
+        "clearance_mm": observe_clearance_mm,
+        "camera": "configured" if gateway is not None and gateway.camera else "not_configured",
+        "max_speed_mm_s": None if gateway is None else gateway.max_speed_mm_s,
+        "jog_max_mm": None if gateway is None else gateway.jog_max_mm,
+        "joint_limits": None if gateway is None or not gateway.joint_limits else [
+            [lo, hi] for lo, hi in gateway.joint_limits],
+    }
+
+
+def apply_operator_safety(gateway, data: dict, *, observe_clearance_mm=None) -> dict:
+    """Store measurements the operator typed. The motion mode and the unlock are not fields."""
+    unknown = sorted(set(data) - _SAFETY_FIELDS)
+    mode = None if gateway is None else gateway.mode
+    if unknown:
+        return {"ok": False, "applied": [], "mode": mode, "mode_unchanged": True, "collision_avoidance": False,
+                "reason": "unknown safety fields: " + ", ".join(unknown)}
+    if not data.get("confirm"):
+        return {"ok": False, "applied": [], "mode": mode, "mode_unchanged": True, "collision_avoidance": False,
+                "reason": "confirm must be true after the values are measured; nothing was changed"}
+    if gateway is None:
+        return {"ok": False, "applied": [], "mode": mode, "collision_avoidance": False,
+                "reason": "no motion gateway"}
+    parsed: dict = {}
+    try:
+        if data.get("limits") is not None:
+            from .arm.cartesian import Limits
+            limits = Limits.parse(str(data["limits"]))
+            if limits is None:
+                raise ValueError("TROVA_ARM_LIMITS needs six measured numbers")
+            parsed["limits"] = limits
+        if data.get("keep_out") is not None:
+            raw = str(data["keep_out"]).strip()
+            if not raw:
+                raise ValueError("keep-out was empty; send measured boxes or the word none")
+            parsed["keepouts"] = _parse_keepouts(raw)
+        if data.get("speed_mm_s") is not None:
+            speed = float(data["speed_mm_s"])
+            if not 0 < speed <= HARD_SPEED_MM_S:
+                raise ValueError(f"speed must be above 0 and at most {HARD_SPEED_MM_S:g} mm/s")
+            parsed["speed"] = speed
+        if data.get("jog_max_mm") is not None:
+            jog = float(data["jog_max_mm"])
+            if not JOG_MIN_MM <= jog <= HARD_JOG_MAX_MM:
+                raise ValueError(f"jog max must be from {JOG_MIN_MM:g} to {HARD_JOG_MAX_MM:g} mm")
+            parsed["jog"] = jog
+        if data.get("camera_body_mm") is not None:
+            camera = _parse_camera(str(data["camera_body_mm"]))
+            if camera is None:
+                raise ValueError("TROVA_CAMERA_BODY_MM needs x,y,z,radius")
+            parsed["camera"] = camera
+        if data.get("joint_limits") is not None:
+            raw = str(data["joint_limits"]).strip()
+            if not raw:
+                raise ValueError("joint limits were empty; send ten measured numbers inside the xArm 5 ranges")
+            parsed["joints"] = _shrink_joints(raw)
+        if data.get("observe_clearance_mm") is not None:
+            clearance = float(data["observe_clearance_mm"])
+            if clearance <= 0:
+                raise ValueError("TROVA_OBSERVE_CLEARANCE_MM has to be a measured gap above 0")
+            parsed["clearance"] = clearance
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "applied": [], "reason": str(exc), "mode": gateway.mode,
+                "mode_unchanged": gateway.mode == mode, "collision_avoidance": False}
+    applied = []
+    if "limits" in parsed:
+        gateway.limits = parsed["limits"]
+        if gateway.arm is not None and hasattr(gateway.arm, "limits"):
+            gateway.arm.limits = parsed["limits"]
+        applied.append("TROVA_ARM_LIMITS")
+    if "keepouts" in parsed:
+        gateway.keepouts = parsed["keepouts"]
+        gateway.keepout_assessed = True
+        applied.append("TROVA_ARM_KEEP_OUT")
+    if "speed" in parsed:
+        gateway.max_speed_mm_s = parsed["speed"]
+        if gateway.arm is not None and hasattr(gateway.arm, "speed"):
+            gateway.arm.speed = min(float(getattr(gateway.arm, "speed", parsed["speed"])), parsed["speed"])
+        applied.append("TROVA_ARM_SPEED_MM_S")
+    if "jog" in parsed:
+        gateway.jog_max_mm = parsed["jog"]
+        applied.append("TROVA_JOG_MAX_MM")
+    if "camera" in parsed:
+        gateway.camera = parsed["camera"]
+        applied.append("TROVA_CAMERA_BODY_MM")
+    if "joints" in parsed:
+        gateway.joint_limits = parsed["joints"]
+        applied.append("TROVA_ARM_JOINT_LIMITS")
+    clearance = observe_clearance_mm
+    if "clearance" in parsed:
+        clearance = parsed["clearance"]
+        applied.append("TROVA_OBSERVE_CLEARANCE_MM")
+    if gateway.mode != mode:
+        gateway.mode = mode
+    if not applied:
+        return {"ok": False, "applied": [], "reason": "send at least one measured value",
+                "mode": gateway.mode, "mode_unchanged": True, "collision_avoidance": False}
+    report = safety_report(gateway, clearance)
+    report.update({"ok": True, "applied": applied, "clearance_mm": clearance, "mode_unchanged": True,
+                   "reason": "operator measurements stored in this process"})
+    return report
+
+
 def sample_segment(start, end, step_mm: float = SAMPLE_MM) -> list[tuple[float, float, float]]:
     start, end = tuple(start), tuple(end)
     dist = math.dist(start, end)

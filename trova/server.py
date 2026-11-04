@@ -37,7 +37,8 @@ from .scene import (
     Decision, TrackState, assign_tracks, build_objects, decide_text, from_finder, pack, question_for,
     remember_world,
 )
-from .geom import VisionStore, annotate_checkerboard, pose_changed
+from .geom import VisionStore, annotate_checkerboard, pose_changed, reference_error
+from .motion import apply_operator_safety, safety_report
 from .arm.telemetry import observation_record, open_reader
 from .acquire import ScanBook
 from . import agent as agent_mod
@@ -168,6 +169,38 @@ class AgentReq(BaseModel):
     """A spoken or typed task. Mode, limits, speed and unlock are not fields."""
     model_config = ConfigDict(extra="forbid")
     text: str
+    step: bool = False
+
+
+class DropReq(BaseModel):
+    """Remove one accepted calibration sample. This does not move the arm."""
+    model_config = ConfigDict(extra="forbid")
+    kind: str
+    index: int
+
+
+class ReferenceReq(BaseModel):
+    """Operator-measured table point, millimetres in the robot base. u and v are optional pixels."""
+    model_config = ConfigDict(extra="forbid")
+    x_mm: float
+    y_mm: float
+    z_mm: float
+    u: float | None = None
+    v: float | None = None
+    track_id: int | None = None
+
+
+class SafetyReq(BaseModel):
+    """Measured safety values. This model has no mode and no unlock."""
+    model_config = ConfigDict(extra="forbid")
+    confirm: bool = False
+    limits: str | None = None
+    keep_out: str | None = None
+    speed_mm_s: float | None = None
+    jog_max_mm: float | None = None
+    observe_clearance_mm: float | None = None
+    camera_body_mm: str | None = None
+    joint_limits: str | None = None
 
 
 class ScanStartReq(BaseModel):
@@ -263,7 +296,15 @@ class State:
         self.vision = VisionStore.load(s.data_dir / "vision_calib.json")
         self.scans = ScanBook(s.data_dir / "scans")
         self.last_agent: dict | None = None
+        self.task_resume: dict | None = None
+        self.last_reference: dict | None = None
+        self.observe_clearance_mm = _observe_clearance()
+        self.stage_samples: list[dict] = []
         self.task_cancel = threading.Event()
+
+    def note_stage(self, stage: str, seconds: float) -> None:
+        self.stage_samples.append({"stage": stage, "seconds": round(float(seconds), 3), "at": time.time()})
+        del self.stage_samples[:-200]
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
@@ -514,7 +555,19 @@ class State:
         with self.lock:
             if home:
                 self.clear_view()
-            frame, boxes, occl = self.capture_clean(attempts=3)
+            capture_s = 0.0
+            proposals_s = 0.0
+            frame, boxes, occl = None, [], True
+            for _attempt in range(3):
+                t_capture = time.perf_counter()
+                frame = self.frame()
+                capture_s += time.perf_counter() - t_capture
+                t_prop = time.perf_counter()
+                boxes, occl = self.proposals(frame)
+                proposals_s += time.perf_counter() - t_prop
+                if not occl:
+                    break
+                time.sleep(0.4)
             pose = self.robot_telemetry()
             size = [int(frame.shape[1]), int(frame.shape[0])]
             if self.override is None:
@@ -525,7 +578,9 @@ class State:
             if self.camera_on_arm and not self.at_survey() and not vision_ok:
                 reset = "arm camera is not at the survey pose"
             boxes, reset = assign_tracks(self.tracks, boxes, frame, reset, pose_mm=pose_mm)
+            t_grok = time.perf_counter()
             inv = describe_table(self.grok, frame, boxes, self.s.lang)
+            grok_s = inv.latency_s or (time.perf_counter() - t_grok)
             objects = build_objects(boxes, frame, inv.items)
             image = self.audit.save_image("scene", frame)
             drawn = self.audit.save_image("inventory_map", draw_map(frame, boxes, inv))
@@ -553,6 +608,12 @@ class State:
                              map=drawn, image=image, snapshot_id=image, tracks=objects,
                              grok_mode=inv.grok_mode, authoritative=snapshot["authoritative"],
                              tracks_reset=reset, provenance=snapshot["provenance"], motion_allowed=False)
+            for stage, seconds in (("camera_acquisition", capture_s), ("object_proposals", proposals_s),
+                                   ("grok_vision", grok_s)):
+                self.note_stage(stage, seconds)
+            out["timings"] = {"camera_acquisition_s": round(capture_s, 3),
+                              "object_proposals_s": round(proposals_s, 3),
+                              "grok_vision_s": round(grok_s, 3), "realtime_claimed": False}
             return out
 
 
@@ -570,7 +631,9 @@ class AgentHost:
         info = st.source.info()
         self.camera_kind = info.get("kind") or ""
         self.image_size = list(st.frame_size or info.get("size") or [0, 0])
-        self.observe_clearance_mm = _observe_clearance()
+        self.observe_clearance_mm = getattr(st, "observe_clearance_mm", None)
+        if self.observe_clearance_mm is None:
+            self.observe_clearance_mm = _observe_clearance()
         self.read_only_robot = getattr(st, "reader", None) is not None
         self.frame = st.scene_frame
         self.boxes = st.scene_boxes
@@ -586,6 +649,9 @@ class AgentHost:
 
     def robot(self) -> dict:
         return self.st.robot_telemetry()
+
+    def note_stage(self, stage: str, seconds: float) -> None:
+        self.st.note_stage(stage, seconds)
 
     def inverse(self, pose6, ref_joints=None) -> dict:
         reader = getattr(self.st, "reader", None)
@@ -803,6 +869,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "vision": st.vision.assess(size),
             "vision_progress": st.vision.progress(),
             "robot": st.robot_telemetry(),
+            "safety": safety_report(getattr(st.arm, "gateway", None), st.observe_clearance_mm),
+            "reference_check": st.last_reference,
+            "latency": agent_mod._timing_summary(st.stage_samples) | {
+                "realtime_claimed": False, "n": len(st.stage_samples)},
             "agent": st.last_agent,
             "scan": None if not st.scans.active else st.scans.public(st.scans.sessions[st.scans.active]),
             "labels": None if not st.labels else {k: v for k, v in st.labels.items() if k != "codes"},
@@ -1800,10 +1870,13 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         conflict = _reported_size(frame, meta)
         drawn, info = annotate_checkerboard(frame, body.cols, body.rows)
         path = st.audit.save_image("board", drawn)
+        meta["preview"] = path
         if conflict:
             out = {"ok": False, "reason": conflict, "count": len(st.vision.intrinsic_views), "corners": 0}
         else:
             out = st.vision.add_intrinsics(frame, body.cols, body.rows, body.square_mm, image_meta=meta)
+        if not out["ok"]:
+            st.vision.note_rejection("intrinsics", out["reason"], image_path=path)
         st.audit.event("vision_capture", step="intrinsics", ok=out["ok"], reason=out["reason"],
                        count=out.get("count"), moved=False)
         return out | {"moved": False, "image": path, "found": info["found"],
@@ -1841,10 +1914,13 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                           "the view was not stored")
             out = {"ok": False, "corners": info["corners"], "count": len(st.vision.handeye_views), "reason": reason}
         else:
+            meta["preview"] = path
             out = st.vision.add_handeye(
                 frame, after.get("pose6"), body.cols, body.rows, body.square_mm,
                 on_table=body.on_table, pose_source="telemetry", robot=after, image_meta=meta,
                 moving=bool(after.get("moving")))
+        if not out["ok"]:
+            st.vision.note_rejection("handeye", out["reason"], image_path=path, pose_source=after.get("source"))
         st.audit.event("vision_capture", step="handeye", ok=out["ok"], reason=out["reason"],
                        count=out.get("count"), pose_source=after.get("source"), moved=False)
         return out | {"moved": False, "pose_source": after.get("source"), "image": path,
@@ -1856,7 +1932,98 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         report = st.vision.solve()
         st.audit.event("vision_capture", step="solve", version=report["version"],
                        status=report["status"]["status"], moved=False)
-        return report | {"moved": False}
+        return report | {"moved": False, "progress": st.vision.progress()}
+
+    @app.get("/api/vision/samples")
+    def api_vision_samples():
+        return st.vision.samples() | {"moved": False}
+
+    @app.post("/api/vision/sample/drop")
+    def api_vision_drop(body: DropReq):
+        out = st.vision.drop_sample(body.kind, body.index)
+        if out["ok"]:
+            st.vision.save()
+        st.audit.event("vision_capture", step="drop", sample_kind=body.kind, index=body.index,
+                       ok=out["ok"], reason=out["reason"], moved=False)
+        return out | {"moved": False, "progress": st.vision.progress()}
+
+    @app.post("/api/vision/reference")
+    def api_vision_reference(body: ReferenceReq):
+        """Compare a measured point with the calibrated ray. Does not move the arm."""
+        robot = st.robot_telemetry()
+        snap = (st.inventory or {}).get("snapshot") or {}
+        objects = snap.get("objects") or []
+        image_time = snap.get("time")
+        size = st.frame_size or st.source.info().get("size") or [0, 0]
+        u, v = body.u, body.v
+        pose_snap = snap.get("pose") or {}
+        pose = pose_snap.get("pose6")
+        stale = None
+        if robot.get("moving") or pose_snap.get("moving"):
+            stale = "the robot is still moving; take another picture before comparing"
+        elif snap and not pose:
+            stale = "the picture has no robot pose; take another picture before comparing"
+        elif pose and (not robot.get("pose6") or pose_changed(pose, robot.get("pose6"))):
+            stale = "the robot pose changed after the picture; take another picture before comparing"
+        if u is None or v is None:
+            chosen = next((obj for obj in objects if obj.get("track_id") == body.track_id), None)
+            if chosen is None or body.track_id is None:
+                raise HTTPException(400, "pass u and v, or a track_id from the current snapshot")
+            u, v = chosen["center"]
+            size = [snap.get("width") or size[0], snap.get("height") or size[1]]
+        report = st.vision.assess(size)
+        predicted = None
+        uncertainty = None
+        located_reason = None
+        if stale:
+            located_reason = stale
+        elif report["valid"]:
+            located = st.vision.localize(robot.get("pose6"), float(u), float(v), size)
+            predicted = located.get("point_mm")
+            uncertainty = located.get("uncertainty_mm")
+            located_reason = located.get("reason")
+        compared = reference_error(
+            predicted, [body.x_mm, body.y_mm, body.z_mm], uncertainty_mm=uncertainty,
+            calibration_version=st.vision.version, image_time=image_time,
+            pose_source=robot.get("source"), calibration_valid=bool(report["valid"]) and not stale)
+        if stale or (report["valid"] and not compared.get("estimate_from_calibration")):
+            compared["reason"] = located_reason
+            compared["estimate_from_calibration"] = False
+            compared["error_mm"] = None
+        if not report["valid"]:
+            compared["missing"] = report["reasons"]
+        compared["pixel"] = [u, v]
+        compared["moved"] = False
+        st.last_reference = compared
+        st.audit.event("vision_capture", step="reference", error_mm=compared.get("error_mm"),
+                       calibration_valid=compared["calibration_valid"], moved=False)
+        return compared
+
+    @app.get("/api/safety")
+    def api_safety():
+        return safety_report(getattr(st.arm, "gateway", None), st.observe_clearance_mm)
+
+    @app.post("/api/safety")
+    def api_safety_set(body: SafetyReq):
+        gateway = getattr(st.arm, "gateway", None)
+        result = apply_operator_safety(gateway, body.model_dump(), observe_clearance_mm=st.observe_clearance_mm)
+        if result.get("ok") and "TROVA_OBSERVE_CLEARANCE_MM" in result.get("applied", []):
+            st.observe_clearance_mm = result.get("clearance_mm")
+        if result.get("mode") not in (None, getattr(gateway, "mode", None)):
+            result["ok"] = False
+            result["reason"] = "the safety update changed the motion mode; that is refused"
+        st.audit.event("safety", ok=bool(result.get("ok")), applied=result.get("applied"),
+                       mode=result.get("mode"), moved=False)
+        result["moved"] = False
+        result["grok_can_edit"] = False
+        return result
+
+    @app.get("/api/latency")
+    def api_latency():
+        summary = agent_mod._timing_summary(st.stage_samples)
+        summary["realtime_claimed"] = False
+        summary["n"] = len(st.stage_samples)
+        return summary
 
     @app.post("/api/agent/task")
     def api_agent_task(body: AgentReq):
@@ -1864,10 +2031,13 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             raise HTTPException(400, "Say what to do")
         st.task_cancel = threading.Event()
         host = AgentHost(st)
+        continued = st.task_resume if body.step else None
         try:
-            result = agent_mod.run(host, body.text.strip())
+            result = agent_mod.run(host, body.text.strip(), step=body.step, continued=continued)
         except GrokError as exc:
             return fail(exc, "agent")
+        st.task_resume = result.pop("resume", None) if body.step else None
+        result.pop("resume", None)
         st.last_agent = result
         st.audit.event("vision_task", goal=result.get("goal"), status=result.get("status"),
                        phase=result.get("phase"), hardware_moved=result.get("hardware_moved"),
@@ -1879,6 +2049,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     @app.post("/api/agent/cancel")
     def api_agent_cancel():
         st.task_cancel.set()
+        st.task_resume = None
         st.audit.event("vision_task", status="cancel_requested")
         return {"cancelled": True}
 
