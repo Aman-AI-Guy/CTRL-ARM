@@ -80,6 +80,8 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
   <div class="panel">
     <h2>What changed (line clearance)</h2>
     <div class="row"><button onclick="saveRef()">Save reference</button><button class="primary" onclick="doCheck()">Check now</button><span class="muted" id="refinfo">no reference</span></div>
+    <div class="row"><button onclick="setClick('zone')">Draw a zone (click corners)</button><button onclick="finishZone()">Finish zone</button>
+      <button onclick="post('/api/zones/cancel')">Cancel</button><span class="muted" id="zoneinfo"></span></div>
     <div id="checkres" class="result"></div>
     <div class="row" style="margin-top:10px"><input type="text" id="operator" placeholder="operator name" style="max-width:180px"><button onclick="signoff('approve')">Sign off</button><button onclick="signoff('reject')">Reject</button><a href="/api/report" target="_blank"><button>Open record</button></a></div>
     <div class="row"><span class="muted">Jury:</span><button onclick="judgeCheck(true)">✓ all right</button><span class="muted">false alarms</span><input type="number" id="fa" value="0" min="0" style="max-width:70px"><span class="muted">missed</span><input type="number" id="miss" value="0" min="0" style="max-width:70px"><button onclick="judgeCheck(false)">record</button></div>
@@ -127,13 +129,14 @@ live.addEventListener('click', ev => {
   if (clickMode === 'point') return json('/api/arm/point', {u, v});
   if (clickMode === 'teach') return json('/api/arm/teach', {u, v});
   if (clickMode === 'armcal') return json('/api/calibration/arm_click', {u, v});
+  if (clickMode === 'zone') return json('/api/zones/point', {u, v});
   if (clickMode === 'calib') {
     const t = prompt('Table coordinates of this point in mm, as x,y (e.g. 0,0)'); if (!t) return;
     const [x, y] = t.split(',').map(Number); return json('/api/calibration/click', {u, v, x_mm: x, y_mm: y});
   }
 });
 function setClick(m) { clickMode = clickMode === m ? null : m; const el = $('clickmode');
-  el.className = 'mode' + (clickMode ? ' on' : ''); el.textContent = clickMode ? ({point: 'Click mode: the arm points where you click.', teach: 'Teach mode: move the arm tip by hand over a point, then click that point in the image.', calib: 'Calibration: click a point you measured, then type its mm coordinates. 4 or more points.', armcal: 'Arm calibration: put the tip ON the table (freedrive), then click the tip in the image. Repeat at 4-6 spread-out points.'})[clickMode] + ' (click the button again to stop)' : ''; }
+  el.className = 'mode' + (clickMode ? ' on' : ''); el.textContent = clickMode ? ({point: 'Click mode: the arm points where you click.', teach: 'Teach mode: move the arm tip by hand over a point, then click that point in the image.', calib: 'Calibration: click a point you measured, then type its mm coordinates. 4 or more points.', zone: 'Zone: click the corners of the area, then press Finish zone.', armcal: 'Arm calibration: put the tip ON the table (freedrive), then click the tip in the image. Repeat at 4-6 spread-out points.'})[clickMode] + ' (click the button again to stop)' : ''; }
 
 function photoChosen() { photoFile = $('photo').files[0] || null; $('photoname').textContent = photoFile ? 'photo ready' : ''; }
 
@@ -176,10 +179,19 @@ function showCheck(d) {
     let h = `<div class="big" style="color:var(${r.line_clear ? '--ok' : '--bad'})">${r.line_clear ? 'Line clear' : 'NOT clear: ' + r.changes.length + ' change(s)'}</div><div>${esc(r.summary)}</div>`;
     h += '<ul class="changes">' + r.changes.map(c => `<li class="risk-${esc(c.risk)}"><b>C${c.id} ${esc(c.kind)}</b> ${esc(c.label)}: ${esc(c.explanation)}</li>`).join('') + '</ul>';
     if (r.filtered.length) h += `<div class="muted">${r.filtered.length} candidate(s) rejected by Grok as false alarms (see the record).</div>`;
+    if (r.zones) h += '<ul class="changes">' + r.zones.map(z => `<li class="${z.ok ? '' : 'risk-high'}"><b>${esc(z.name)}</b> (${z.rule === 'empty' ? 'must be empty' : 'only ' + esc(z.allowed.join(', '))}): ${z.ok ? 'OK' : esc(z.problems.join('; '))}</li>`).join('') + '</ul>';
     h += `<div class="muted">${r.frames_used} frames · Grok ${r.grok_latency_s}s · total ${r.total_s}s</div>`;
     h += `<div class="thumbs"><a href="/files/${d.ref_marked}" target="_blank"><img src="/files/${d.ref_marked}"></a><a href="/files/${d.cur_marked}" target="_blank"><img src="/files/${d.cur_marked}"></a></div>`;
     el.innerHTML = h;
   }
+}
+
+// ---- feature 2: zones
+async function finishZone() {
+  const name = prompt('Zone name (e.g. line area, reject bin)'); if (!name) return;
+  const rule = confirm('OK = this zone must be EMPTY.\nCancel = only some items are allowed.') ? 'empty' : 'allowed';
+  const allowed = rule === 'allowed' ? (prompt('Allowed items, comma separated (e.g. blister pack)') || '') : '';
+  await form('/api/zones/finish', {name, rule, allowed}); setClick(null);
 }
 
 // ---- feature 1: inventory map
@@ -256,6 +268,7 @@ async function refresh() {
   if (S.label_wait) { const el = $('clickmode'); el.className = 'mode on'; el.textContent = 'Wrong find: click the object that should have been found, or press "not on the table".'; }
   else if (!clickMode) $('clickmode').className = 'mode';
   showDog();
+  try { const z = await (await fetch('/api/zones')).json(); $('zoneinfo').textContent = z.zones.length ? z.zones.map(x => x.name).join(', ') : (z.draft.length ? z.draft.length + ' corners' : 'no zones'); } catch (e) {}
   const log = await (await fetch('/api/log?n=30')).json();
   $('log').innerHTML = log.map(e => `<div>${esc(e.time.slice(11))} <b>${esc(e.kind)}</b> ${esc(e.kind === 'find' ? (e.request || '[photo]') + ' → ' + e.result.status + ' ' + (e.result.label || '') : e.kind === 'grok_call' ? e.name + ' ' + e.latency_s + 's' : e.kind === 'change_check' ? e.result.changes.length + ' changes' : e.error || '')}</div>`).join('');
 }

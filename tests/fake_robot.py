@@ -100,5 +100,14 @@ class FakeController:
             elif "stopl" in text or "stopj" in text:
                 self.target = list(self.pos)
 
+    def wait_for(self, text: str, timeout: float = 2.0) -> bool:
+        """Scripts are logged when their connection closes, a moment after the driver returns."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if self.scripts and text in self.scripts[-1]:
+                return True
+            time.sleep(0.01)
+        return False
+
     def close(self):
         self._run = False

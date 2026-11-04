@@ -29,6 +29,7 @@ from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
 from .finder import find as grok_find
 from .inventory import describe as describe_table, draw_map
+from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
 from .marks import HIGHLIGHT, MARK, draw_marks, jpeg
 from .proposals import drop_occluders, find_blobs, is_occluded
@@ -104,6 +105,9 @@ class State:
         self.label_wait: dict | None = None
         self.pending_move: dict | None = None
         self.inventory: dict | None = None
+        self.zones_path = s.data_dir / "zones.json"
+        self.zones: list[Zone] = load_zones(self.zones_path)
+        self.zone_draft: list[list[float]] = []
         self.metrics = {"find_ok": 0, "find_wrong": 0, "find_times": [], "checks": 0,
                         "check_ok": 0, "false_alarms": 0, "missed": 0}
         self.lock = threading.RLock()
@@ -190,6 +194,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 cv2.circle(img, (int(u), int(v)), r, (255, 255, 0), 3, cv2.LINE_AA)
                 cv2.line(img, (int(u) - 2 * r, int(v)), (int(u) + 2 * r, int(v)), (255, 255, 0), 2)
                 cv2.line(img, (int(u), int(v) - 2 * r), (int(u), int(v) + 2 * r), (255, 255, 0), 2)
+        if st.zones or st.zone_draft:
+            img = draw_zones(img, st.zones, (st.last_check or {}).get("result", {}).get("zones"), st.zone_draft)
         for p in st.click_points:
             cv2.drawMarker(img, (int(p[0]), int(p[1])), MARK, cv2.MARKER_TILTED_CROSS, 30, 3)
         if img.shape[1] > max_w:
@@ -329,13 +335,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 ref_names=st.reference.get("names"))
             except GrokError as e:
                 return fail(e, "changes")
+            result = res.as_dict()
+            if st.zones:
+                names = {}
+                if any(z.rule == "allowed" for z in st.zones):   # only "allowed" zones need names from Grok
+                    try:
+                        names = describe_table(st.grok, frames[-1], per[-1], st.s.lang).names()
+                    except GrokError as e:
+                        st.audit.event("error", where="zone_names", error=str(e))
+                zres = eval_zones(st.zones, per[-1], names)
+                result["zones"] = zres
+                bad = [p for z in zres for p in z["problems"]]
+                if bad:
+                    result["line_clear"] = False
+                    result["summary"] = (result["summary"] + " Zones: " + "; ".join(bad) + ".").strip()
+                res.cur_marked = draw_zones(res.cur_marked, st.zones, zres)
             paths = {"ref_marked": st.audit.save_image("ref_changes", res.ref_marked),
                      "cur_marked": st.audit.save_image("cur_changes", res.cur_marked),
                      "cur_raw": st.audit.save_image("current_raw", res.current)}
-            ev = st.audit.event("change_check", result=res.as_dict(), reference=st.reference["raw"], **paths)
+            ev = st.audit.event("change_check", result=result, reference=st.reference["raw"], **paths)
             st.metrics["checks"] += 1
             st.last_check = {"event_id": ev["id"], "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                             "result": res.as_dict(), "reference": st.reference["path"], "signoff": None,
+                             "result": result, "reference": st.reference["path"], "signoff": None,
                              "model": st.grok.stats()["model"], "mock": st.grok.mock, **paths}
             return st.last_check
 
@@ -363,6 +384,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         so_html = (f"<p><b>Signed off by {html.escape(so['operator'])}</b> ({html.escape(so['decision'])}) at "
                    f"{so['time']}. {html.escape(so['note'])}</p>") if so else "<p><b>Not signed off yet.</b></p>"
         verdict = "LINE CLEAR" if r["line_clear"] else "NOT CLEAR"
+        zones_html = ""
+        if r.get("zones"):
+            zr = "".join(f"<tr><td>{html.escape(z['name'])}</td><td>{'empty' if z['rule'] == 'empty' else 'only ' + html.escape(', '.join(z['allowed']))}</td>"
+                         f"<td>{'OK' if z['ok'] else 'VIOLATION'}</td><td>{html.escape('; '.join(z['problems']) or ', '.join(o['name'] for o in z['objects']) or 'nothing inside')}</td></tr>"
+                         for z in r["zones"])
+            zones_html = f"<h2>Zones</h2><table><tr><th>Zone</th><th>Rule</th><th>Status</th><th>Details</th></tr>{zr}</table>"
         return f"""<!doctype html><html><head><meta charset="utf-8"><title>Line clearance record</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:24px auto;padding:0 16px;color:#111;background:#fff}}
@@ -373,6 +400,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 <p class="v">{verdict}</p><p>{html.escape(r['summary'])}</p>
 <div class="g"><div><b>Reference</b><img src="/files/{c['ref_marked']}"></div><div><b>Current</b><img src="/files/{c['cur_marked']}"></div></div>
 <h2>Changes</h2><table><tr><th>#</th><th>Kind</th><th>Object</th><th>Risk</th><th>Why it matters</th></tr>{rows or '<tr><td colspan=5>none</td></tr>'}</table>
+{zones_html}
 <h3>Candidates rejected as false alarms</h3><ul>{filt}</ul>
 <h2>Sign-off</h2>{so_html}
 <p style="color:#555">Trova assists the operator; the operator decides. Every decision above is in the audit log (data/events.jsonl).</p>
@@ -634,6 +662,41 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             st.inventory = out
             st.audit.event("inventory", **{k: v for k, v in out.items()})
             return out
+
+    # ------------------------------------------------------------------ feature 2: zones
+    @app.get("/api/zones")
+    def api_zones():
+        return {"zones": [z.__dict__ for z in st.zones], "draft": st.zone_draft}
+
+    @app.post("/api/zones/point")
+    def api_zone_point(p: dict):
+        st.zone_draft.append([float(p["u"]), float(p["v"])])
+        return {"draft": st.zone_draft}
+
+    @app.post("/api/zones/finish")
+    def api_zone_finish(name: str = Form(...), rule: str = Form("empty"), allowed: str = Form("")):
+        if len(st.zone_draft) < 3:
+            raise HTTPException(400, "Click at least 3 corners first")
+        if rule not in RULES:
+            raise HTTPException(400, f"rule must be one of {RULES}")
+        z = Zone(name=name.strip() or f"zone {len(st.zones) + 1}", polygon=st.zone_draft, rule=rule,
+                 allowed=[a.strip() for a in allowed.split(",") if a.strip()])
+        st.zones = [x for x in st.zones if x.name != z.name] + [z]
+        st.zone_draft = []
+        save_zones(st.zones_path, st.zones)
+        st.audit.event("zone", **z.__dict__)
+        return {"zones": [x.__dict__ for x in st.zones]}
+
+    @app.post("/api/zones/cancel")
+    def api_zone_cancel():
+        st.zone_draft = []
+        return {"draft": []}
+
+    @app.delete("/api/zones/{name}")
+    def api_zone_delete(name: str):
+        st.zones = [z for z in st.zones if z.name != name]
+        save_zones(st.zones_path, st.zones)
+        return {"zones": [x.__dict__ for x in st.zones]}
 
     # ------------------------------------------------------------------ voice (Grok Voice realtime)
     @app.post("/api/arm/point_last")

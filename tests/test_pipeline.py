@@ -363,6 +363,7 @@ def test_socket_cobot_drivers_against_fake_controller(kind):
     arm = CartesianArm(be, z_hover_mm=150, home_mm=None, limits=None, speed_mm_s=400)
     assert arm.point_at(400, 100), arm.last_error
     assert [round(v) for v in arm.tcp_mm()] == [400, 100, 150]
+    assert fc.wait_for("movel")
     s = fc.scripts[-1]
     if kind == "ur":
         assert "movel(p[0.40000,0.10000,0.15000,3.14000," in s and s.startswith("def trova_move():\n  ")
@@ -374,15 +375,13 @@ def test_socket_cobot_drivers_against_fake_controller(kind):
     time.sleep(1.0)
     slow.stop()
     th.join(timeout=3)
-    assert slow.state == "stopped" and ("stopl(2.0)" if kind == "ur" else "stopj(2.0)") in fc.scripts[-1]
+    assert slow.state == "stopped" and fc.wait_for("stopl(2.0)" if kind == "ur" else "stopj(2.0)")
+    time.sleep(0.3)                    # let the stop program land and the pose stream catch up
     y_stop = arm.tcp_mm()[1]
     time.sleep(0.4)
     assert abs(arm.tcp_mm()[1] - y_stop) < 1 and y_stop < 290          # it holds where it stopped
     be.freedrive(True)
-    t0 = time.time()
-    while "freedrive_mode()" not in fc.scripts[-1] and time.time() - t0 < 2:   # server logs it on close
-        time.sleep(0.02)
-    assert "freedrive_mode()" in fc.scripts[-1] and "sync()" in fc.scripts[-1]
+    assert fc.wait_for("freedrive_mode()") and "sync()" in fc.scripts[-1]
     be.close()
     fc.close()
 
@@ -461,3 +460,32 @@ def test_reference_names_reach_the_verify_prompt():
     cur = t.render()
     chg.check(Capture(), ref, rb, [cur, cur], [find_blobs(cur, e)] * 2, ref_names={b.id: f"thing {b.id}" for b in rb})
     assert "in the reference this was: thing" in prompts[0]
+
+
+# ---------------------------------------------------------------- feature 2: zones
+def test_zone_rules_unit():
+    from trova.zones import Zone, evaluate
+    b1, b2 = Box(10, 10, 30, 30, id=1), Box(200, 200, 220, 220, id=2)
+    zone_empty = Zone("line area", [[0, 0], [100, 0], [100, 100], [0, 100]], "empty")
+    zone_bin = Zone("reject bin", [[150, 150], [300, 150], [300, 300], [150, 300]], "allowed", ["blister pack"])
+    r = evaluate([zone_empty, zone_bin], [b1, b2], {1: "blue pen", 2: "blister pack"})
+    assert not r[0]["ok"] and "blue pen must not be in line area" in r[0]["problems"][0]
+    assert r[1]["ok"]
+    r = evaluate([zone_bin], [b2], {2: "usb key"})
+    assert not r[0]["ok"]
+
+
+def test_zones_endpoints_make_line_not_clear(tmp_path, monkeypatch):
+    app, c = _client(tmp_path, monkeypatch)
+    c.post("/api/background", data={"mode": "capture"})
+    for u, v in [(0, 0), (1280, 0), (1280, 800), (0, 800)]:                 # whole table must be empty
+        c.post("/api/zones/point", json={"u": u, "v": v})
+    z = c.post("/api/zones/finish", data={"name": "line area", "rule": "empty"}).json()
+    assert z["zones"][0]["name"] == "line area" and (tmp_path / "zones.json").exists()
+    assert c.get("/api/frame.jpg").status_code == 200                     # overlay draws
+    c.post("/api/reference")
+    chk = c.post("/api/changes").json()["result"]
+    assert chk["changes"] == [] and not chk["line_clear"]                  # nothing changed, but the zone is not empty
+    assert chk["zones"][0]["problems"] and "Zones:" in chk["summary"]
+    assert "Zones" in c.get("/api/report").text
+    assert c.delete("/api/zones/line area").json()["zones"] == []

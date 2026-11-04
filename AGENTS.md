@@ -38,7 +38,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Optional dog room search (sim) | Done, tested | `dog.py` | Go2 driver is a template |
 | Jury mode + eval script | Done, tested | `server.py`, `eval/run_eval.py` | |
 | 1. Table inventory map ("what's on the table?") | Done, tested (mock) | `inventory.py`, `/api/inventory`, UI button, voice tool `describe_table` | Saving a reference now also names its objects (one extra Grok call; `describe=false` to skip), so changes say which object moved |
-| 2. Line-clearance zones | Planned | | |
+| 2. Line-clearance zones | Done, tested (mock) | `zones.py`, `/api/zones*`, UI "Draw a zone" | Rules: `empty` or `allowed` (list). Evaluated in every change check; a violation makes the line NOT clear. Zones are in image pixels: redraw if the camera moves |
 | 3. PDF clearance record | Planned | | |
 | 4. Full-screen jury scoreboard | Planned | | |
 | 5. Failure log (cause of each wrong find) | Planned | | |
@@ -96,6 +96,7 @@ Arm: `POST /api/arm/stop` · `/home` · `/point` · `/freedrive` · `/teach` · 
 Jury: `POST /api/judge` · `/api/label`
 Voice: `GET /api/voice/config` · `POST /api/voice/session` · `/api/voice/log`
 Inventory: `POST /api/inventory` (names every object, labelled map image) · `POST /api/reference` takes `describe` (default true)
+Zones: `GET /api/zones` · `POST /api/zones/point` · `/api/zones/finish` (name, rule, allowed) · `/api/zones/cancel` · `DELETE /api/zones/{name}`
 Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` · `/api/demo/hand`
 
 ## Known gaps
@@ -106,6 +107,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 Feature 2: line-clearance zones (empty / allowed items), shown on the live view, in the check result and in the record. Fake-controller test race fixed (wait_for).
 - 2026-11-04 Feature 1: table inventory map; reference objects are named and the names reach the change-verification prompt.
 - 2026-11-04 AGENTS.md added as the shared state file; `docs/make_guide.py` added.
 - 2026-11-04 Initial skeleton pushed (commit a95e832): everything in the feature table marked Done.
