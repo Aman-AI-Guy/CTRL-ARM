@@ -53,6 +53,7 @@ Rules:
 - inspect_scene, list_objects, select_object, locate_object, observe_object, capture_image, evaluate_goal, request_clarification and report_status do not move the robot.
 - plan_approach, move_towards_object and move_above_object use a pose computed by local code. You do not supply that pose.
 - If motion lock is set, choose report_status. Do not ask for another direction or another distance.
+- Do not repeat the same skill. After inspect_scene, choose select_object.
 - If the phase is clarify, choose request_clarification.
 - If the goal is achieved or the phase is held, blocked, evaluated or reported, choose report_status and set stop true.
 """
@@ -134,32 +135,51 @@ def _calibration_flag(host, task) -> bool:
     return report["valid"]
 
 
-def execution_block(host, task) -> str | None:
-    """Why an object approach must not be sent, even when the gateway would accept the segment."""
+def qualification_blockers(host, task) -> list[str]:
+    """Measurements and settings the operator still has to supply. This does not invent a target."""
     reasons = []
-    if not task.get("authoritative"):
-        reasons.append("recognition is not live, so it cannot authorize motion")
-    if getattr(host, "camera_kind", "") in ("demo", "armsim"):
-        reasons.append("the picture is synthetic, so it cannot authorize motion")
-    if not task.get("calibration_valid"):
-        reasons.append("camera calibration is not valid")
-    if host.observe_clearance_mm is None:
-        reasons.append("TROVA_OBSERVE_CLEARANCE_MM is not set")
+    report = task.get("calibration")
+    if not isinstance(report, dict) or "valid" not in report:
+        report = host.vision.assess(getattr(host, "image_size", None))
+    task["calibration"] = report
+    task["calibration_valid"] = bool(report.get("valid"))
+    if not report.get("valid"):
+        reasons.extend(report.get("reasons") or ["camera calibration is not valid"])
+        reasons.append("capture checkerboard images, solve intrinsics, capture at least 6 hand-eye "
+                       "views from robot telemetry, and solve the table plane")
+    if getattr(host, "observe_clearance_mm", None) is None:
+        reasons.append("set TROVA_OBSERVE_CLEARANCE_MM to the measured gap in millimetres from the table plane to the tool")
     gateway = getattr(host, "gateway", None)
     if gateway is None:
         reasons.append("this arm has no motion gateway")
     else:
         if gateway.limits is None:
-            reasons.append("workspace limits are not configured")
+            reasons.append("set TROVA_ARM_LIMITS to the measured workspace box xmin,xmax,ymin,ymax,zmin,zmax")
         if gateway.camera is None:
-            reasons.append("camera clearance is not configured; autonomous approach stays blocked")
-    robot = host.robot()
+            reasons.append("set TROVA_CAMERA_BODY_MM to the measured camera offset and radius; autonomous approach stays blocked")
+    if not task.get("authoritative"):
+        mode = task.get("grok_mode") or "not live"
+        reasons.append(f"recognition is {mode}, so it cannot authorize motion")
+    if getattr(host, "camera_kind", "") in ("demo", "armsim"):
+        reasons.append("the picture is synthetic, so it cannot authorize motion")
+    robot = {}
+    try:
+        robot = host.robot() or {}
+    except Exception as exc:  # noqa: BLE001 - a dead controller is a blocker, not a pose
+        reasons.append(f"robot telemetry failed: {exc}")
+    source = robot.get("source")
+    if source != "telemetry":
+        reasons.append(f"the pose source is {source or 'unavailable'}; record it from the controller, not a simulation")
     if not robot.get("pose6"):
-        reasons.append("the robot did not report a tool pose")
-    elif robot.get("source") != "telemetry":
-        reasons.append("the pose is not from robot telemetry")
+        reasons.append("the robot did not report a tool pose with roll, pitch and yaw")
     if robot.get("moving"):
         reasons.append("the robot is still moving")
+    return reasons
+
+
+def execution_block(host, task) -> str | None:
+    """Why an object approach must not be sent, even when the gateway would accept the segment."""
+    reasons = qualification_blockers(host, task)
     return "; ".join(reasons) if reasons else None
 
 
@@ -306,6 +326,13 @@ def skill_plan(host, task, argument: str) -> dict:
         task["phase"] = "blocked"
         return _result("plan_approach", False, task["motion_lock"], task, terminal=True, rejection=task["motion_lock"])
     _calibration_flag(host, task)
+    if not task.get("calibration_valid"):
+        blockers = qualification_blockers(host, task)
+        reason = "; ".join(blockers) or "camera calibration is not valid"
+        task["motion_lock"] = reason
+        task["planned_target"] = None
+        task["phase"] = "blocked"
+        return _result("plan_approach", False, reason, task, rejection=reason, executed=False, blockers=blockers)
     goal, err = _target_from_location(host, task)
     if err:
         task["motion_lock"] = err
@@ -488,6 +515,7 @@ def run(host, text: str) -> dict:
             task["phase"] = "blocked"
             status = "blocked"
             break
+        phase_before = task["phase"]
         try:
             result = SKILL_FN[name](host, task, choice.get("argument") or "")
         except GrokError as exc:
@@ -495,6 +523,14 @@ def run(host, text: str) -> dict:
             task["phase"] = "blocked"
         task["last_reason"] = result.get("reason")
         task["steps"].append(result)
+        repeated = (len(task["steps"]) >= 2 and task["steps"][-2].get("skill") == name
+                    and task["phase"] == phase_before and not result.get("terminal"))
+        if repeated:
+            blockers = qualification_blockers(host, task)
+            task["last_reason"] = "; ".join(blockers) if blockers else "the same skill repeated without progress"
+            task["phase"] = "blocked"
+            status = "blocked"
+            break
         if result.get("terminal") or choice.get("stop") or task["phase"] == "reported":
             if task["phase"] == "clarify":
                 status = "clarify"
@@ -523,6 +559,9 @@ def run(host, text: str) -> dict:
         "motion_lock": task.get("motion_lock"), "steps": task["steps"],
         "authoritative": task.get("authoritative"), "grok_mode": task.get("grok_mode"),
         "hardware_moved": any(step.get("executed") for step in task["steps"]),
+        "motion_proposed": task.get("planned_target") is not None,
+        "planned_target": task.get("planned_target"),
+        "blockers": qualification_blockers(host, task),
         "verified_tool_position": False,
         "reason": task.get("last_reason") or "",
         "collision_avoidance": False, "software_stop_is_not_safety_rated": True,

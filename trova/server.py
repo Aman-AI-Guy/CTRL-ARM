@@ -1780,6 +1780,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         packed["robot_tcp_mm"] = robot.get("xyz_mm")
         packed["robot_rpy_deg"] = None if not robot.get("pose6") else list(robot["pose6"][3:])
         packed["joints_deg"] = robot.get("joints")
+        packed["pose_source"] = robot.get("source")
         packed["moving"] = bool(robot.get("moving"))
         packed["calibration_version"] = st.vision.version
         packed["calibration_valid"] = bool(st.vision.assess(st.frame_size)["valid"])
@@ -1811,8 +1812,9 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             raise HTTPException(400, str(exc)) from None
         st.audit.event("scan", action="capture", viewpoint=record["viewpoint_id"],
                        accepted=record["accepted"], reason=record["reject_reason"])
-        return {k: record.get(k) for k in ("viewpoint_id", "session_id", "accepted", "reject_reason",
-                                           "robot_tcp_mm", "camera_pose", "calibration_version",
+        return {k: record.get(k) for k in ("viewpoint_id", "session_id", "object_id", "accepted",
+                                           "reject_reason", "pose_source", "robot_tcp_mm", "joints_deg",
+                                           "camera_pose", "calibration_version", "recorded_at",
                                            "sync", "sync_precision_claimed")}
 
     @app.get("/api/scan")

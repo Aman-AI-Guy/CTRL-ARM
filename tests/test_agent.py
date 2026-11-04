@@ -138,6 +138,14 @@ def test_scan_session_keeps_metadata_and_does_not_reconstruct(tmp_path):
                                "sync": "snapshot_after_request"})
     assert good["accepted"] is True and good["camera_pose"] is not None
     assert good["calibration_version"] == 2
+    assert good["object_id"] == "pen" and good["recorded_at"]
+    simulated = book.capture(jpeg, {"pose6": [10, 20, 200, 180, 0, 0], "robot_tcp_mm": [10, 20, 200],
+                                    "pose_source": "simulated", "requested_at": 30.0, "stopped_at": 29.0,
+                                    "width": 8, "height": 8, "tool_camera": np.eye(4).tolist(),
+                                    "joints_deg": [1, 2, 3, 4, 5], "calibration_version": 2})
+    assert simulated["accepted"] is False and simulated["camera_pose"] is None
+    assert "telemetry" in simulated["reject_reason"]
+    assert simulated["object_id"] == "pen" and simulated["joints_deg"] == [1, 2, 3, 4, 5]
     book.sessions[book.active]["intrinsics"] = {"k": [[800, 0, 4], [0, 800, 4], [0, 0, 1]], "width": 8, "height": 8}
     ranked = book.candidates([10, 20, 0], 100)
     assert ranked["reconstructed"] is False and ranked["coverage_is_not_a_reconstruction"] is True
@@ -147,6 +155,8 @@ def test_scan_session_keeps_metadata_and_does_not_reconstruct(tmp_path):
     folder = __import__("pathlib").Path(exported["folder"])
     assert "not been run" in (folder / "points3D.txt").read_text()
     assert "PINHOLE" in (folder / "cameras.txt").read_text()
+    assert "v0003" not in (folder / "images.txt").read_text()
+    assert not (folder / "images" / "v0003.jpg").exists()
 
 
 def test_api_task_stays_blocked_on_the_demo_and_rejects_a_mode_field(tmp_path, monkeypatch):
@@ -172,9 +182,78 @@ def test_api_task_stays_blocked_on_the_demo_and_rejects_a_mode_field(tmp_path, m
     assert started["reconstructed"] is False
     captured = client.post("/api/scan/capture").json()
     assert captured["sync_precision_claimed"] is False
+    assert captured["accepted"] is False
+    assert captured["pose_source"] == "simulated"
+    assert "telemetry" in (captured.get("reject_reason") or "")
+    page = client.get("/").text
+    assert 'id="cambadge"' in page and 'id="motionbadge"' in page and 'id="movedbadge"' in page
+    assert "calibration not valid" in page and "movement not executed" in page and "Grok online" in page
     exported = client.post("/api/scan/export").json()
     assert exported["reconstructed"] is False
     assert client.post("/api/scan/finish").json()["status"] == "finished"
+
+
+def test_uncalibrated_plan_names_measurements_and_does_not_invent_a_target():
+    from trova.agent import skill_plan
+    from trova.geom import VisionStore
+    arm = _arm()
+    host = _Host(arm, VisionStore())
+    host.observe_clearance_mm = None
+    host.gateway.limits = None
+    host.gateway.camera = None
+    host.robot = lambda: {"xyz_mm": [1, 2, 3], "pose6": None, "source": "simulated", "moving": False}
+    task = _task()
+    task["authoritative"] = False
+    task["grok_mode"] = "mock"
+    task["calibration_valid"] = False
+    before = list(arm.tcp_mm())
+    planned = skill_plan(host, task, "")
+    assert planned["executed"] is False and task.get("planned_target") is None
+    assert list(arm.tcp_mm()) == before
+    for needle in ("intrinsics", "hand-eye", "table plane", "TROVA_OBSERVE_CLEARANCE_MM",
+                   "TROVA_ARM_LIMITS", "TROVA_CAMERA_BODY_MM", "mock", "simulated"):
+        assert needle in planned["reason"], needle
+
+
+def test_calibrated_proposal_is_not_executed_from_a_simulated_pose():
+    from test_geom import _fixture_store
+    arm = _arm()
+    host = _Host(arm, _fixture_store())
+    host.robot = lambda: {"xyz_mm": [300.0, 0.0, 200.0], "pose6": [300.0, 0.0, 200.0, 180, 0, 0],
+                          "joints": [0, 0, 0, 0, 0], "moving": False, "source": "simulated"}
+    task = _task()
+    before = list(arm.tcp_mm())
+    planned = skill_plan(host, task, "")
+    assert planned["ok"] and planned["executed"] is False
+    assert np.allclose(task["planned_target"], [100, 50, 150], atol=1.0)
+    moved = skill_move_above(host, task, "")
+    assert moved["executed"] is False and "simulated" in moved["reason"]
+    assert np.allclose(arm.tcp_mm(), before)
+
+
+def test_a_repeated_skill_stops_and_names_the_blockers():
+    from trova.agent import run
+    from trova.geom import VisionStore
+
+    class _Answer:
+        data = {"skill": "list_objects", "argument": "", "stop": False}
+        offline = False
+        mock = False
+
+    class _Grok:
+        def json(self, **_kwargs):
+            return _Answer()
+
+    host = _Host(_arm(), VisionStore())
+    host.grok = _Grok()
+    host.observe_clearance_mm = None
+    host.snapshot = lambda: {"objects": [], "grok_mode": "live", "summary": "nothing", "width": 8, "height": 8}
+    result = run(host, "list the table")
+    assert result["hardware_moved"] is False and result["motion_proposed"] is False
+    assert result["status"] == "blocked"
+    assert len(result["steps"]) == 2
+    assert "TROVA_OBSERVE_CLEARANCE_MM" in result["reason"]
+    assert "intrinsics" in result["reason"]
 
 
 def test_state_does_not_snapshot_the_pi(tmp_path, monkeypatch):

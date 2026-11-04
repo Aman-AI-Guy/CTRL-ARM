@@ -130,6 +130,11 @@ class ScanBook:
             reasons.append("the image was requested before the robot settled")
         if not meta.get("pose6") and not meta.get("robot_tcp_mm"):
             reasons.append("robot pose was not read")
+        pose_source = meta.get("pose_source")
+        if pose_source is not None and pose_source != "telemetry":
+            reasons.append(f"robot pose source is {pose_source or 'unspecified'}, not telemetry")
+        if not meta.get("width") or not meta.get("height"):
+            reasons.append("the frame has no image size")
         if meta.get("resolution_mismatch"):
             reasons.append("the JPEG size does not match the camera status")
         view_id = f"v{len(session['views']) + 1:04d}"
@@ -140,17 +145,21 @@ class ScanBook:
         camera_pose = None
         matrix = meta.get("tool_camera")
         pose6 = meta.get("pose6")
-        if matrix is not None and pose6 is not None and len(pose6) >= 6:
+        trust_pose = pose_source is None or pose_source == "telemetry"
+        if trust_pose and matrix is not None and pose6 is not None and len(pose6) >= 6:
             camera_pose = np.round(camera_pose_matrix(pose6, matrix), 5).tolist()
         record = {
             "viewpoint_id": view_id, "session_id": session["id"], "object_id": session["object_id"],
             "orientation": session["orientation"],
+            "viewpoint": {"id": view_id, "object_id": session["object_id"],
+                          "orientation": session["orientation"]},
             "image": str(image_path), "sha256": hashlib.sha256(jpeg or b"").hexdigest(),
             "requested_at": requested, "received_at": meta.get("received_at"),
-            "request_s": meta.get("request_s"), "stopped_at": stopped,
+            "recorded_at": time.time(), "request_s": meta.get("request_s"), "stopped_at": stopped,
             "width": meta.get("width"), "height": meta.get("height"),
             "camera_status": meta.get("camera_status"), "protection": meta.get("protection"),
-            "robot_tcp_mm": meta.get("robot_tcp_mm"), "robot_rpy_deg": meta.get("robot_rpy_deg"),
+            "pose_source": pose_source, "robot_tcp_mm": meta.get("robot_tcp_mm"),
+            "robot_rpy_deg": meta.get("robot_rpy_deg"),
             "joints_deg": meta.get("joints_deg"), "moving": meta.get("moving"),
             "camera_pose": camera_pose, "calibration_version": meta.get("calibration_version"),
             "calibration_valid": meta.get("calibration_valid"),
@@ -196,14 +205,17 @@ class ScanBook:
         images.mkdir(parents=True, exist_ok=True)
         posed = 0
         lines = []
-        for index, view in enumerate(session["views"], start=1):
+        for view in session["views"]:
+            if not view.get("accepted"):
+                continue
             source = Path(view["image"])
             if source.exists():
                 (images / source.name).write_bytes(source.read_bytes())
             pose = view.get("camera_pose")
-            if not view.get("accepted") or not pose:
+            if not pose:
                 continue
-            rotation = np.array(pose, float)[:3, :3]
+            posed += 1
+            index = posed
             # COLMAP stores world-to-camera. We have camera-to-base, so invert the rotation block.
             world_to_cam = np.linalg.inv(np.array(pose, float))
             quat = _quaternion(world_to_cam[:3, :3])
@@ -212,9 +224,8 @@ class ScanBook:
             lines.append(f"{index} {' '.join(str(v) for v in quat)} "
                          f"{translation[0]:.6f} {translation[1]:.6f} {translation[2]:.6f} 1 {name}")
             lines.append("")
-            posed += 1
-            _ = rotation
         (folder / "images.txt").write_text("# trovacolmap poses are camera-to-base inverted into world-to-camera\n"
+                                           "# rejected views are omitted; reconstruction has not been run\n"
                                            "# reconstructed: false\n" + "\n".join(lines) + ("\n" if lines else ""))
         (folder / "points3D.txt").write_text("# no points: reconstruction has not been run\n")
         intrinsics = session.get("intrinsics")

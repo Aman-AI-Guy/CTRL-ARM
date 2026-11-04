@@ -43,8 +43,8 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | M2 unified motion gateway | Done, tested on simulated backends | `motion.py`, `POST /api/arm/jog`, `xarm_voice_execute.py` | Every jog, Cartesian move, joint move, point, tour, room scan, and waypoint path is a proposal checked by `MotionGateway` before a driver runs. Modes: `dry_run` (default for a real controller), `simulation`, `hardware`. Hardware needs `TROVA_MOTION_MODE=hardware` and `TROVA_HARDWARE_UNLOCK=MOVE`, set by an operator; pytest cannot select it. Requested jog millimetres are kept when the gateway rejects them. No collision mesh. A software or voice STOP is not a safety-rated e-stop |
 | M3 Pi camera (IMX219 on the arm) | Client done and tested; one live read succeeded, mDNS did not | `pi_cam.py`, `camera.PiSource`, `trova_cam.py`, `trova-stream/` | Sony IMX219 on a Pi Zero 2 W, Wi-Fi port 8080, not the robot Ethernet port and not `/dev/video`. `TROVA_CAMERA=pi`, `pi:host`, or `pi:host:port`. Default host `trova-cam.local` (it did not resolve here). A previous DHCP address answered: status `streaming`, protection `normal`, 1640×1232, rotate 180, about 10 fps. `GET /snapshot.jpg` is captured after the request; use it after the arm has stopped. `GET /stream.mjpg` is for display. A failed request drops the previous buffer. The server already rotates 180; `TROVA_CAM_EXTRA_ROTATE` is the only extra rotation. HTTP 503 (thermal pause) is not retried. `trova-stream/install.sh` and the systemd units were not run |
 | M3 camera-to-robot geometry | Software done; no real calibration has been solved | `geom.py`, read-only `tcp_pose` | `T_base_camera = T_base_tool @ T_tool_camera`. Intrinsics use `cv2.calibrateCamera`. Hand-eye uses Park and Martin in this process, because OpenCV 5.0.0 here has the `CALIB_HAND_EYE_*` constants and no `cv2.calibrateHandEye`. A matrix is stored only when the solve also passes a leave-one-out check, board-origin consistency within 10 mm, and pose diversity (15 deg and 30 mm). That needs at least 6 poses. One-axis motions, a high residual, and a failed hold-out are not stored. A model is valid only with reprojection under 1.5 px, those hand-eye checks, telemetry poses, and a table plane within 5 mm. Simulated observations do not set the valid flag. The fixed-view homography is not used after the camera moves. A table object is a camera ray against that plane. One RGB image does not measure height, so the point is not a verified tool pose. `TROVA_OBSERVE_CLEARANCE_MM` is an operator measurement; empty means no observation target |
-| M3 vision skills and closed loop | Software done; the arm has not approached an object | `agent.py`, `POST /api/agent/task`, UI "Run task", voice tool `run_vision_task` | Skills: `inspect_scene`, `list_objects`, `select_object`, `locate_object`, `observe_object`, `plan_approach`, `move_towards_object`, `move_above_object`, `capture_image`, `evaluate_goal`, `request_clarification`, `report_status`. Grok returns a skill name. An argument that contains coordinates is rejected, and the motion skills recompute the target from the ray. Every proposal goes through `MotionGateway`. Execution also requires live recognition, a non-synthetic camera, a valid calibration, workspace limits, a camera-body sphere, a measured clearance, and a telemetry pose. A rejected move locks the task. The loop stops at 8 steps, on timeout, on cancel, or when the target, the frame, or the calibration is not usable. A centered image is not a reached 3D goal. `verified_tool_position` stays false. The sentence "trova la penna blu e posizionati sopra" is wired; it has not been run on the robot |
-| M3 multi-view capture | Session format done; reconstruction not run | `acquire.py`, `/api/scan*` | `start`, `capture`, list, `finish`, an orientation mark, and a COLMAP pose export. Each view stores the JPEG, request time, resolution, TCP, joints, calibration version, and object id. A moving robot, a stale request, a bad JPEG, or a missing pose is kept and marked rejected. `sync_precision_claimed`, `reconstructed`, `textured_mesh`, and `cad` stay false. Side viewpoints are candidates, not Cartesian commands |
+| M3 vision skills and closed loop | Software done; the arm has not approached an object | `agent.py`, `POST /api/agent/task`, UI "Run task", voice tool `run_vision_task` | Skills: `inspect_scene`, `list_objects`, `select_object`, `locate_object`, `observe_object`, `plan_approach`, `move_towards_object`, `move_above_object`, `capture_image`, `evaluate_goal`, `request_clarification`, `report_status`. Grok returns a skill name. An argument that contains coordinates is rejected, and the motion skills recompute the target from the ray. Every proposal goes through `MotionGateway`. Execution also requires live recognition, a non-synthetic camera, a valid calibration, workspace limits, a camera-body sphere, a measured clearance, and a telemetry pose. If those are missing, the task returns `blockers` naming `TROVA_OBSERVE_CLEARANCE_MM`, `TROVA_ARM_LIMITS`, `TROVA_CAMERA_BODY_MM`, the calibration reasons, and the pose source. An invalid calibration does not invent a metric target. A valid calibration can still return a dry-run proposal. A rejected move locks the task. The loop stops at 8 steps, on timeout, on cancel, when the same skill repeats without a phase change, or when the target, the frame, or the calibration is not usable. A centered image is not a reached 3D goal. `verified_tool_position` stays false. The header keeps camera online, Grok online, calibration valid, motion proposed, and movement executed as separate badges. The sentence "trova la penna blu e posizionati sopra" is wired; it has not been run on the robot |
+| M3 multi-view capture | Session format done; reconstruction not run | `acquire.py`, `/api/scan*` | `start`, `capture`, list, `finish`, an orientation mark, and a COLMAP pose export. Each view stores the JPEG, request and record times, resolution, TCP, joints, pose source, camera pose when the hand-eye exists, calibration version, object id, and viewpoint metadata. A moving robot, a stale request, a bad JPEG, a frame without a size, a missing pose, or a pose whose source is not telemetry is kept and marked rejected. A simulated pose does not get a metric camera pose, and rejected views are left out of the COLMAP export. `sync_precision_claimed`, `reconstructed`, `textured_mesh`, and `cad` stay false. Side viewpoints are candidates, not Cartesian commands |
 | 2. Line-clearance zones | Done, tested (mock) | `zones.py`, `/api/zones*`, UI "Draw a zone" | Rules: `empty` or `allowed` (list). Evaluated in every change check; a violation makes the line NOT clear. Zones are in image pixels: redraw if the camera moves |
 | 3. PDF clearance record | Done, tested | `record_pdf.py`, `GET /api/report.pdf`, UI "Download PDF" | Verdict, images, changes, zones, rejected candidates, sign-off, audit id. Copy saved in `data/records/`. Uses reportlab (now a dependency) |
 | 4. Full-screen jury scoreboard | Done, tested | `static/jury.html`, `GET /jury`, `POST /api/metrics/reset` | Found x/N, median find time, false alarms, checks; latest request + verdict; live camera. Reset before the demo. Link "scoreboard" in the UI header |
@@ -151,27 +151,50 @@ Scan: `POST /api/scan/start` (object_id) · `POST /api/scan/capture` · `GET /ap
 ## M3 launch, calibration, and physical qualification
 
 The robot has not approached an object. These commands do not unlock hardware and do not send a motion.
+`TROVA_MOCK=1` forces simulated Grok. Leave it unset when the check is live recognition. `TROVA_ARM=sim`
+keeps the server off the controller. The camera host is DHCP; `trova-cam.local` did not resolve here.
 
 ```bash
-# App against the Pi, arm simulated. Replace the host when DHCP changes. Do not hardcode it in the repo.
-TROVA_CAMERA=pi TROVA_CAM_HOST=trova-cam.local TROVA_ARM=sim TROVA_MOCK=1 .venv/bin/python -m trova
+# 1. Real camera and live Grok. Bind loopback. Do not set TROVA_MOCK.
+TROVA_CAMERA=pi TROVA_CAM_HOST=<pi-host> TROVA_ARM=sim TROVA_HOST=127.0.0.1 TROVA_PORT=8765 \
+  .venv/bin/python -m trova
 
-# Read-only camera check. Skips with the real error when the host does not answer. Does not enable the arm.
-TROVA_CAM_HOST=trova-cam.local .venv/bin/python -m pytest -q tests/test_live_camera.py
+# Read-only camera check. Skips with the real error when the host does not answer.
+TROVA_CAM_HOST=<pi-host> .venv/bin/python -m pytest -q tests/test_live_camera.py
+
+# 2. Snapshot, inventory, selection. A JPEG is not recognition: read grok_mode on the JSON.
+curl -s -X POST http://127.0.0.1:8765/api/inventory
+curl -s http://127.0.0.1:8765/api/frame.jpg -o /tmp/trova-frame.jpg
+curl -s -X POST http://127.0.0.1:8765/api/select -F 'text=oggetto 1'
+
+# 3. Operator calibration captures. Pose the arm yourself first. These do not move it.
+curl -s -X POST http://127.0.0.1:8765/api/vision/intrinsics -H 'content-type: application/json' \
+  -d '{"cols":9,"rows":6,"square_mm":25}'
+curl -s -X POST http://127.0.0.1:8765/api/vision/handeye -H 'content-type: application/json' \
+  -d '{"cols":9,"rows":6,"square_mm":25,"on_table":true}'
+
+# 4. Solve and read the report. valid stays false until the real observations pass.
+curl -s -X POST http://127.0.0.1:8765/api/vision/intrinsics/solve
+curl -s -X POST http://127.0.0.1:8765/api/vision/handeye/solve
+curl -s http://127.0.0.1:8765/api/vision/calibration
+
+# 5. Dry-run proposal. hardware_moved must stay false. Read blockers when calibration is missing.
+curl -s -X POST http://127.0.0.1:8765/api/agent/task -H 'content-type: application/json' \
+  -d '{"text":"trova la penna blu e posizionati sopra"}'
+
+# 6. Multi-view session. A simulated pose is stored and marked rejected. reconstructed stays false.
+curl -s -X POST http://127.0.0.1:8765/api/scan/start -H 'content-type: application/json' \
+  -d '{"object_id":"pen"}'
+curl -s -X POST http://127.0.0.1:8765/api/scan/capture
+curl -s http://127.0.0.1:8765/api/scan
+curl -s -X POST http://127.0.0.1:8765/api/scan/export
 ```
 
 Calibration captures only take a picture and read telemetry. Pose the arm yourself (pendant or a separately
 authorized bring-up) before each capture. Measure one checkerboard square and pass that `square_mm`.
-
-```bash
-curl -s -X POST localhost:8000/api/vision/intrinsics -H 'content-type: application/json' \
-  -d '{"cols":9,"rows":6,"square_mm":25}'
-curl -s -X POST localhost:8000/api/vision/intrinsics/solve
-curl -s -X POST localhost:8000/api/vision/handeye -H 'content-type: application/json' \
-  -d '{"cols":9,"rows":6,"square_mm":25,"on_table":true}'
-curl -s -X POST localhost:8000/api/vision/handeye/solve
-curl -s localhost:8000/api/vision/calibration
-```
+`XArmBackend.tcp_pose` calls `get_position` only. Constructing the backend still applies `TROVA_ARM_TCP_MM`
+when that variable is set, so leave it empty for a read that must not write the tool offset. It does not call
+`motion_enable`. If `TROVA_TOKEN` is set, add `-H "x-trova-token: $TROVA_TOKEN"` to each `/api/` request.
 
 Operator procedure, still not executed on the arm. `trova/geom.py` `PROCEDURE` is the same capture order.
 
@@ -194,7 +217,7 @@ Operator procedure, still not executed on the arm. `trova/geom.py` `PROCEDURE` i
 - Hardware mode is never enabled by the test suite, and M2 has not been run on the physical arm. `python -m trova.arm.bringup`
   remains an operator procedure: it measures the box before `TROVA_ARM_LIMITS` exists, so it caps speed at 30 mm/s and
   still calls the SDK itself. It is not available to Grok. `xarm_voice_preview.py` and the telemetry scripts only read the arm when someone runs them.
-- No live Grok / Grok Voice call has run yet (keys arrive at the event).
+- Live Grok Vision ran on 2026-11-04 through the Trova app against a Pi frame. Inventory `grok_mode` was `live` (not mock or offline): it named two black caps, a tall black bottle, a pink highlighter, a white earbud case, and a small white sticker. One local proposal kept an empty name. A find for "the blue pen" returned `not_found` and named the pink highlighter. Grok Voice was not opened; there is no browser on this machine. The speech parser passed with a temporary Node binary that was not installed into the environment.
 - Arm drivers are tested against fakes, not real robots or simulators. Elite is the least certain.
 - Go2 dog driver is a template.
 - Elite: the freedrive script (`while True:` inside `def ... end`) and the `a=`/`v=` keywords of `movel` are unverified:
@@ -202,9 +225,9 @@ Operator procedure, still not executed on the arm. `trova/geom.py` `PROCEDURE` i
 - Voice: `audio.input.transcription` (grok-transcribe + keyterms) is not in the public session docs; if the session
   rejects it, drop that block in `voice.py`. Browser speech fallback in Chrome needs internet (Google recognition).
 - Label OCR (feature 11) and watch explanations (feature 10) are tested in mock only; QR decoding is real (OpenCV).
-- The Pi camera client is in the app. `trova-cam.local` did not resolve on this machine. `192.168.5.160:8080` answered a read-only status and snapshot on 2026-11-04 (1640×1232, rotate 180, protection normal). That address is DHCP and is not the default. The boot service has not been installed; do not run `trova-stream/install.sh` unless an operator asks. Live Grok Vision was not run on that snapshot.
-- No `data/vision_calib.json` has been solved from the real arm. An empty file is unsolved and contains no matrix. A matrix without the observations that produced it is ignored. The xArm was not moved for calibration or for the sentence "trova la penna blu e posizionati sopra". OpenCV 5.0.0 on this machine has no `cv2.calibrateHandEye`. The local Park and Martin solve was checked on projected observations, including a leave-one-out, small pixel noise, a shifted board, and one-axis or pure-translation poses. Those checks do not set the calibration valid. It has not been run on a physical board. Live Grok Vision was not run on the Pi snapshot, so there is no live inventory of that table.
-- An autonomous approach stays blocked until calibration is valid, `TROVA_OBSERVE_CLEARANCE_MM` and `TROVA_CAMERA_BODY_MM` are measured, workspace limits exist, the pose source is telemetry, recognition is live, and the operator has set the M2 hardware unlock. The gateway is still not a collision model. Scan export does not reconstruct a mesh or claim camera-to-robot sync precision. Watch mode and preflight call `frame()`, which on the Pi is a fresh snapshot and is slow.
+- The Pi camera client is in the app. `trova-cam.local` still did not resolve. `192.168.5.160:8080` answered again on 2026-11-04: status moved from idle to streaming, protection normal, 1640×1232, rotate 180, about 11 fps, temperature about 49. The Trova server with `TROVA_CAMERA=pi` served `/api/frame.jpg` and `/api/camera/stream`, and `/api/state` reported the camera online only after a snapshot. That address is DHCP and is not the default. The boot service has not been installed.
+- No `data/vision_calib.json` has been solved from the real arm. An empty file is unsolved and contains no matrix. A matrix without the observations that produced it is ignored. The xArm was not moved. A read-only SDK call to the controller port returned a 6-value tool pose and 5 joint angles, error code 0, then disconnected. It did not call `motion_enable`, `set_state`, or `set_position`, and those numbers were not stored as a calibration. The Trova process used `TROVA_ARM=sim`, so `/api/vision/handeye` correctly refused the capture (`moved` false, no roll/pitch/yaw). OpenCV 5.0.0 here has no `cv2.calibrateHandEye`. The Park and Martin solve was checked on projected observations, including a leave-one-out, small pixel noise, a shifted board, and one-axis or pure-translation poses. Those checks do not set the calibration valid. It has not been run on a physical board.
+- An autonomous approach stays blocked until calibration is valid, `TROVA_OBSERVE_CLEARANCE_MM` and `TROVA_CAMERA_BODY_MM` are measured, workspace limits exist, the pose source is telemetry, recognition is live, and the operator has set the M2 hardware unlock. The live task on 2026-11-04 returned those blockers, `hardware_moved` false, and no proposed target. A scan capture from the simulated arm was stored and rejected, with no camera pose, and the COLMAP export posed nothing. The gateway is still not a collision model. Watch mode and preflight call `frame()`, which on the Pi is a fresh snapshot and is slow.
 - The arm camera: which way it looks, what the sphere's cable plugs into (USB to the Mac?), and whether the LED ring is
   controllable are read from photos, not confirmed. Check with `python -m trova.camera --list` and `ls /dev/tty.usb*`.
   Room scan pan direction and pixels/degree are measured from the photos, but only in simulation so far.
@@ -212,6 +235,7 @@ Operator procedure, still not executed on the arm. `trova/geom.py` `PROCEDURE` i
 
 ## Changelog (newest first)
 
+- 2026-11-04 Scan captures from a simulated pose are rejected and left out of the COLMAP export. An approach without calibration names the missing measurements and does not invent a target. A repeated skill stops the loop. The header separates camera, Grok, calibration, a proposed motion, and an executed movement. The Pi and a live Grok Vision call were exercised; the arm was not moved.
 - 2026-11-04 Hand-eye acceptance requires a leave-one-out check. Inconsistent, noisy, or insufficiently diverse observations are not stored, and simulated checks do not mark a calibration valid.
 - 2026-11-04 M3 skills and capture sessions: Grok names a skill, the gateway checks every approach, and hardware stays blocked until calibration and the operator unlock are both present. Scan sessions record images and robot poses and do not claim a reconstruction. The arm was not moved.
 - 2026-11-04 M3 camera geometry: intrinsics, a Park/Martin hand-eye solve, and a table-plane ray. No calibration file is fabricated. Moving the camera more than 25 mm stops image-space track ids from being trusted. Tool pose reads do not enable the motors.

@@ -37,7 +37,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
 </head>
 <body>
 <header>
-  <h1>Trova</h1><span id="mode" class="badge">…</span><span id="cambadge" class="badge">camera …</span><span id="visionbadge" class="badge">vision …</span><span id="armst" class="badge">arm …</span>
+  <h1>Trova</h1><span id="mode" class="badge">Grok …</span><span id="cambadge" class="badge">camera …</span><span id="visionbadge" class="badge">calibration …</span><span id="motionbadge" class="badge">motion …</span><span id="movedbadge" class="badge">movement …</span><span id="armst" class="badge">arm …</span>
   <a href="/jury" target="_blank" class="badge" style="text-decoration:none">scoreboard</a>
   <a href="/history" target="_blank" class="badge" style="text-decoration:none">history</a>
   <button class="badge" style="background:none;cursor:pointer" onclick="runPreflight()">preflight</button>
@@ -529,10 +529,13 @@ function showAgent(d) {
   el.className = 'result show st-' + (d.goal_achieved ? 'found' : d.status === 'clarify' ? 'clarify' : 'not_found');
   const steps = (d.steps || []).map(s => `<li><b>${esc(s.skill)}</b> ${esc(s.reason || '')}</li>`).join('');
   const prop = d.proposal && d.proposal.proposal ? d.proposal.proposal.target_mm : null;
+  const blocks = (d.blockers || []).map(b => `<li>${esc(b)}</li>`).join('');
+  const camState = (typeof S !== 'undefined' && S && S.source) ? (S.source.online ? 'camera online' : (S.source.kind === 'pi' ? 'camera offline' : 'camera ' + S.source.kind)) : 'camera';
   el.innerHTML = `<div class="big">${esc(d.status)} · ${esc(d.phase || '')}</div><div>${esc(d.reason || '')}</div>` +
     (d.question ? `<div class="big">${esc(d.question)}</div>` : '') +
-    `<div class="muted">hardware moved: ${d.hardware_moved ? 'yes' : 'no'} · verified tool position: no · calibration ${d.calibration_valid ? 'valid' : 'not valid'} · recognition ${esc(d.grok_mode || (d.authoritative ? 'live' : 'not live'))}</div>` +
+    `<div class="muted">${esc(camState)} · Grok ${esc(d.grok_mode || (d.authoritative ? 'live' : 'not live'))} · calibration ${d.calibration_valid ? 'valid' : 'not valid'} · motion ${prop ? 'proposed' : 'not proposed'} · movement ${d.hardware_moved ? 'executed' : 'not executed'}</div>` +
     (d.motion_lock ? `<div style="color:var(--warn)">${esc(d.motion_lock)}</div>` : '') +
+    (blocks ? `<ul class="changes">${blocks}</ul>` : '') +
     (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm (not a verified contact pose)</div>` : '') +
     (steps ? `<ul class="changes">${steps}</ul>` : '');
 }
@@ -576,7 +579,7 @@ async function refresh() {
   try { S = await (await fetch('/api/state')).json(); } catch { return; }
   frameSize = S.frame_size;
   if (!refresh.langSet && S.lang === 'it') { $('pttlang').value = 'it-IT'; } refresh.langSet = true;
-  const m = $('mode'); m.textContent = S.mock ? 'MOCK Grok' : S.grok.offline ? 'OFFLINE: Grok unreachable' : 'LIVE ' + S.grok.model;
+  const m = $('mode'); m.textContent = S.mock ? 'Grok mock' : S.grok.offline ? 'Grok offline' : 'Grok online ' + S.grok.model;
   m.className = 'badge ' + (S.mock || S.grok.offline ? 'mock' : 'live'); m.title = S.grok.last_error || '';
   $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.motion_mode ? ' · ' + S.arm.motion_mode : '') + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
   $('armst').title = S.arm_blocked || ''; $('armst').style.color = S.arm_blocked ? 'var(--warn)' : '';
@@ -591,9 +594,17 @@ async function refresh() {
   cam.className = 'badge ' + (src.kind === 'pi' && src.online ? 'live' : (src.kind === 'demo' || src.kind === 'armsim' ? 'mock' : ''));
   const vis = S.vision || {};
   const vb = $('visionbadge');
-  vb.textContent = vis.valid ? 'vision valid' : 'vision not valid';
+  vb.textContent = vis.valid ? 'calibration valid' : 'calibration not valid';
   vb.className = 'badge ' + (vis.valid ? 'live' : 'mock');
   vb.title = (vis.reasons || []).join('; ');
+  const agent = S.agent || {};
+  const proposed = !!(agent.motion_proposed || agent.planned_target || (agent.proposal && agent.proposal.proposal && agent.proposal.proposal.target_mm));
+  const mb = $('motionbadge');
+  mb.textContent = proposed ? 'motion proposed' : 'motion not proposed';
+  mb.className = 'badge ' + (proposed ? 'mock' : '');
+  const moved = $('movedbadge');
+  moved.textContent = agent.hardware_moved ? 'movement executed' : 'movement not executed';
+  moved.className = 'badge ' + (agent.hardware_moved ? 'live' : '');
   if (S.motion) $('motioninfo').textContent = `motion ${S.motion.mode} · clearance ${S.motion.clearance} · collision avoidance: no · software stop is not the physical e-stop`;
   if (S.robot) $('visioninfo').textContent = `robot pose: ${S.robot.source || 'unavailable'}` + (S.robot.pose6 ? '' : ' · no roll/pitch/yaw') + (vis.reasons && vis.reasons.length ? ' · ' + vis.reasons[0] : '');
   if (S.agent && document.activeElement !== $('agentq')) showAgent(S.agent);
