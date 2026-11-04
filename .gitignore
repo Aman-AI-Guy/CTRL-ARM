@@ -9,3 +9,10 @@ experiments/*_grok.jpg
 experiments/webcam*.jpg
 .DS_Store
 *.egg-info/
+.env
+
+# Local secrets and Windows metadata
+.env
+*.Zone.Identifier
+__pycache__/
+*.pyc
