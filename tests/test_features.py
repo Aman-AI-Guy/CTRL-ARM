@@ -933,3 +933,37 @@ def test_state_stays_json_after_a_room_scan(tmp_path, monkeypatch):
     assert s.status_code == 200 and s.json()["at_survey"] is False
     pre = {i["name"]: i for i in c.get("/api/preflight").json()["items"]}
     assert pre["Home pose"]["status"] == "ok" and "joints" in pre["Home pose"]["detail"]
+
+
+def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
+    """The arm's Pi camera streams MJPEG over Wi-Fi: it must use the newest-frame reader with the 2 s stale check."""
+    import numpy as np
+
+    import trova.camera as cam_mod
+    alive = [True]
+
+    class FakeStream:
+        def __init__(self, src):
+            self.src = src
+
+        def isOpened(self):
+            return True
+
+        def set(self, *a):
+            return True
+
+        def read(self):
+            return (True, np.zeros((1232, 1640, 3), np.uint8)) if alive[0] else (False, None)
+
+        def release(self):
+            pass
+    monkeypatch.setattr(cam_mod.cv2, "VideoCapture", FakeStream)
+    src = cam_mod.open_source("http://trova-cam.local:8080/stream.mjpg")
+    try:
+        assert isinstance(src, cam_mod.WebcamSource) and src.read().shape == (1232, 1640, 3)
+        alive[0] = False                                     # Wi-Fi drops: no new frames
+        src._ts -= cam_mod.STALE_S + 1
+        with pytest.raises(RuntimeError, match="no new frame"):
+            src.read()
+    finally:
+        src.close()

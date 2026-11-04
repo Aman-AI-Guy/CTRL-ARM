@@ -67,8 +67,21 @@ suggestions to agree with staff.
 - [ ] **There is a tip to measure from.** The flange carries only the camera dome. Fit a thin pointer, or pick one
       fixed point on the dome as the tip. Measure it from the flange centre for the TCP offset. Calibration, the
       dry test and every ruler error are measured to this point.
-- [ ] **The camera cable is routed and secured** along the arm, with slack for a full turn of joint 1, so it cannot
-      snag during homing.
+- [ ] **The camera's power cable is routed and secured** along the arm, with slack for a full turn of joint 1, so it
+      cannot snag during homing. The camera is a Raspberry Pi Zero 2 W (IMX219). It sends pictures over **Wi-Fi**
+      (`http://trova-cam.local:8080`), so this cable only powers it.
+- [ ] **Network**: the Mac is cabled to the arm's control box **and** on the same Wi-Fi as the Pi. Check both:
+      `ping trova-cam.local` and open `http://trova-cam.local:8080` (the live page). If the venue Wi-Fi blocks
+      devices from seeing each other, use your own router or a phone hotspot for the Mac and the Pi.
+- [ ] **Measure the camera delay.** Hold a phone running a stopwatch in front of the camera. Photograph the phone and
+      the live page on the Mac together, and read the difference between the two times. Set
+      `TROVA_CAMERA_SETTLE_S` = delay + 0.5 s (the default 0.6 s is probably too short over Wi-Fi). Then a find right
+      after homing can never use a frame taken while the arm was still moving.
+- [ ] **LED ring**: Trova cannot drive it (the Pi's GPIO drives it). Leave `TROVA_LED` empty. During the run, keep
+      it either off or steady white from the Pi. Changing colours change the picture.
+- [ ] **Nobody uses the Pi page's "scan" or settings during the run.** They change resolution and exposure. If the
+      Pi gets hot it drops to 640×480. Trova then refuses to move the arm (the calibration image size no longer
+      matches). Let it cool: check `http://trova-cam.local:8080/status.json` → `temp`, `protection`.
 - [ ] **The reach circle is clear** (700 mm around the base). Move out the power strip, chargers, cups, the mouse and
       the boxes, so only the test objects remain. Keep the emergency-exit walkway outside the reach.
 - [ ] **The E-stop is within the operator's reach**: control box button, or a remote button on a cable.
@@ -83,7 +96,8 @@ TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax     # from the bring-up; zmax mus
 TROVA_ARM_Z_MM=                                     # pointing height: tip >= 50 mm above the tallest object (E-stop sag)
 TROVA_ARM_TCP_MM=0,0,<pointer length>
 TROVA_CAMERA_ON_ARM=1
-TROVA_CAMERA=<index from python -m trova.camera --list>
+TROVA_CAMERA=http://trova-cam.local:8080/stream.mjpg   # the Pi on the arm, over Wi-Fi (1640x1232)
+TROVA_CAMERA_SETTLE_S=                              # measured camera delay + 0.5 s
 TROVA_ARM_JOINT_SPEED_DEG_S=5                       # slow homing for the first run
 TROVA_OPERATOR_NAME=<your name>
 TROVA_OPERATOR_TOKEN=<a long random secret>
