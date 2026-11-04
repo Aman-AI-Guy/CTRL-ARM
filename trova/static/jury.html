@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trova scoreboard</title>
+<link rel="icon" href="data:,">
 <style>
 :root{--bg:#0d0f13;--panel:#181b21;--ink:#f2f3f5;--muted:#9aa0ab;--accent:#ff54de;--ok:#48d67c;--bad:#ff6258;--line:#2a2e36}
 :root[data-theme="light"]{--bg:#f6f6f3;--panel:#fff;--ink:#16181d;--muted:#5d6370;--accent:#b4009e;--ok:#137333;--bad:#b3261e;--line:#dcdcd6}
@@ -25,7 +26,7 @@ img{width:100%;border-radius:14px;border:1px solid var(--line);display:block;bac
 </head>
 <body>
 <header><h1>Trova</h1><span class="sub">Track A · CTRL+F: SEA · live score</span>
-  <span class="r"><button onclick="theme()">Light / dark</button><button onclick="reset()">Reset score</button></span></header>
+  <span class="r"><button onclick="theme()">Light / dark</button><button onclick="resetScore()">Reset score</button></span></header>
 <section class="grid">
   <div class="k"><div class="v accent" id="found">0 / 0</div><div class="l">objects found (jury requests)</div></div>
   <div class="k"><div class="v" id="time">–</div><div class="l">median time to find (s)</div></div>
@@ -45,7 +46,7 @@ const $ = id => document.getElementById(id), esc = s => String(s ?? '').replace(
 function theme() { const r = document.documentElement; r.dataset.theme = r.dataset.theme === 'light' ? '' : 'light';
   try { localStorage.setItem('trova-jury-theme', r.dataset.theme); } catch (e) {} }
 try { document.documentElement.dataset.theme = localStorage.getItem('trova-jury-theme') || ''; } catch (e) {}
-async function reset() { if (confirm('Reset the score to zero?')) { await fetch('/api/metrics/reset', {method: 'POST'}); tick(); } }
+async function resetScore() { if (confirm('Reset the score to zero?')) { await fetch('/api/metrics/reset', {method: 'POST'}); tick(); } }
 const live = $('live');
 function next() { live.src = '/api/frame.jpg?boxes=0&t=' + Date.now(); }
 live.onload = () => setTimeout(next, 400); live.onerror = () => setTimeout(next, 1500); next();

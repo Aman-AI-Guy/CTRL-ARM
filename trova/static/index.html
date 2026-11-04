@@ -4,16 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trova</title>
+<link rel="icon" href="data:,">
 <style>
 :root{--bg:#f6f6f3;--panel:#fff;--ink:#16181d;--muted:#5d6370;--line:#dcdcd6;--accent:#b4009e;--ok:#137333;--bad:#b3261e;--warn:#9a6700;--btn:#eceae4}
 @media (prefers-color-scheme:dark){:root{--bg:#121316;--panel:#1b1d22;--ink:#eceef2;--muted:#9aa0ab;--line:#2c2f36;--accent:#ff5ee8;--ok:#5cc985;--bad:#ff7a70;--warn:#e0b04c;--btn:#262931}}
 *{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
-header{display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+header{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
 h1{font-size:20px;margin:0}h2{font-size:16px;margin:0 0 8px}.badge{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
 .badge.live{color:var(--ok);border-color:var(--ok)}.badge.mock{color:var(--warn);border-color:var(--warn)}
 #stop{margin-left:auto;background:var(--bad);color:#fff;border:0;border-radius:10px;font-weight:700;padding:10px 18px;font-size:16px}
 main{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(320px,1fr);gap:16px;padding:16px;max-width:1500px;margin:0 auto}
 main>section{min-width:0}.row>*{min-width:0}
+@media (max-width:600px){#armst{order:9;flex-basis:100%;text-align:left;border:0;padding:0}}
 @media (max-width:900px){main{grid-template-columns:minmax(0,1fr);padding:12px 16px}#viewcol{order:2}#ctrlcol{order:1}}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
 #live{width:100%;border-radius:10px;border:1px solid var(--line);display:block;cursor:crosshair;background:#000;min-height:120px}
@@ -49,15 +51,15 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <details><summary>Setup: camera, empty table, calibration, arm</summary>
       <div class="row" style="margin-top:10px"><input type="text" id="src" placeholder="demo | 0 | 1 | path/to/video.mp4 | folder/"><button onclick="setSource()">Switch source</button></div>
       <div class="row"><label class="file">Use a photo of the table<input type="file" accept="image/*" id="scene" onchange="uploadScene()"></label><button onclick="post('/api/upload_scene/clear')">Back to live</button>
-        <button onclick="form('/api/source/step',{delta:-1})">◀ img</button><button onclick="form('/api/source/step',{delta:1})">img ▶</button></div>
-      <div class="row"><button onclick="form('/api/background',{mode:'capture'})">Capture empty table</button><button onclick="form('/api/background',{mode:'clear'})">Clear empty table</button><span class="muted" id="bginfo"></span></div>
+        <button onclick="sendForm('/api/source/step',{delta:-1})">◀ img</button><button onclick="sendForm('/api/source/step',{delta:1})">img ▶</button></div>
+      <div class="row"><button onclick="sendForm('/api/background',{mode:'capture'})">Capture empty table</button><button onclick="sendForm('/api/background',{mode:'clear'})">Clear empty table</button><span class="muted" id="bginfo"></span></div>
       <div class="row"><button onclick="post('/api/calibration/aruco')">Calibrate (ArUco)</button><button onclick="setClick('calib')">Calibrate by clicks</button><button onclick="post('/api/calibration/reset')">Reset</button><button onclick="markers()">Print markers</button><span class="muted" id="calinfo"></span></div>
-      <div class="row"><b class="muted">Real cobot (UR, xArm, Elite):</b><button onclick="form('/api/arm/freedrive',{on:true})">Freedrive on</button><button onclick="form('/api/arm/freedrive',{on:false})">off</button>
+      <div class="row"><b class="muted">Real cobot (UR, xArm, Elite):</b><button onclick="sendForm('/api/arm/freedrive',{on:true})">Freedrive on</button><button onclick="sendForm('/api/arm/freedrive',{on:false})">off</button>
         <button onclick="setClick('armcal')">Calibrate with arm (click the tip)</button><button onclick="markerFromArm()">Record marker from arm</button></div>
       <div class="row"><button onclick="post('/api/arm/home')">Arm home</button><button onclick="setClick('point')">Click to point</button><button onclick="setClick('teach')">Teach pose (click)</button><button onclick="post('/api/arm/teach_home')">Teach home</button>
-        <button onclick="form('/api/arm/compliant',{on:true})">Compliant on</button><button onclick="form('/api/arm/compliant',{on:false})">off</button></div>
+        <button onclick="sendForm('/api/arm/compliant',{on:true})">Compliant on</button><button onclick="sendForm('/api/arm/compliant',{on:false})">off</button></div>
       <div class="row"><span class="muted">object threshold</span><input type="number" id="thresh" step="2" style="max-width:90px" onchange="tune()"><span class="muted">min area</span><input type="number" id="minarea" step="0.0002" style="max-width:110px" onchange="tune()"></div>
-      <div class="row" id="demorow"><span class="muted">demo:</span><button onclick="form('/api/demo/tamper',{kind:'add'})">+ add</button><button onclick="form('/api/demo/tamper',{kind:'remove'})">− remove</button><button onclick="form('/api/demo/tamper',{kind:'move'})">↔ move</button><button onclick="form('/api/demo/hand',{on:true})">hand in</button><button onclick="form('/api/demo/hand',{on:false})">hand out</button></div>
+      <div class="row" id="demorow"><span class="muted">demo:</span><button onclick="sendForm('/api/demo/tamper',{kind:'add'})">+ add</button><button onclick="sendForm('/api/demo/tamper',{kind:'remove'})">− remove</button><button onclick="sendForm('/api/demo/tamper',{kind:'move'})">↔ move</button><button onclick="sendForm('/api/demo/hand',{on:true})">hand in</button><button onclick="sendForm('/api/demo/hand',{on:false})">hand out</button></div>
     </details>
   </div>
   <div class="panel"><details><summary>Log</summary><div id="log"></div></details></div>
@@ -110,11 +112,13 @@ let S = null, clickMode = null, photoFile = null, frameSize = [1, 1];
 async function call(url, opts) {
   const r = await fetch(url, opts);
   let d; try { d = await r.json(); } catch { d = {}; }
-  if (!r.ok || d.error) { toast((d.error || d.detail || r.statusText)); throw d; }
+  if (!r.ok || d.error) { toast((d.error || d.detail || r.statusText)); d.shown = true; throw d; }
   return d;
 }
+// errors from call() are already shown in the panel: don't also report them as uncaught
+window.addEventListener('unhandledrejection', e => { if (e.reason && e.reason.shown) e.preventDefault(); });
 const post = url => call(url, {method: 'POST'}).then(refresh);
-const form = (url, obj) => { const f = new FormData(); for (const k in obj) f.append(k, obj[k]); return call(url, {method: 'POST', body: f}).then(d => { refresh(); return d; }); };
+const sendForm = (url, obj) => { const f = new FormData(); for (const k in obj) f.append(k, obj[k]); return call(url, {method: 'POST', body: f}).then(d => { refresh(); return d; }); };
 const json = (url, obj) => call(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(obj)}).then(d => { refresh(); return d; });
 function toast(msg) { const r = $('findres'); r.className = 'result show st-not_found'; r.innerHTML = '<b>Error</b> ' + esc(String(msg)); }
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
@@ -196,7 +200,7 @@ async function finishZone() {
   const name = prompt('Zone name (e.g. line area, reject bin)'); if (!name) return;
   const rule = confirm('OK = this zone must be EMPTY.\nCancel = only some items are allowed.') ? 'empty' : 'allowed';
   const allowed = rule === 'allowed' ? (prompt('Allowed items, comma separated (e.g. blister pack)') || '') : '';
-  await form('/api/zones/finish', {name, rule, allowed}); setClick(null);
+  await sendForm('/api/zones/finish', {name, rule, allowed}); setClick(null);
 }
 
 // ---- feature 6: point at all
@@ -252,7 +256,7 @@ async function sendDog() {
   const q = (S && S.last_find && S.last_find.request) || $('q').value;
   if (!q) return alert('Ask for an object first');
   $('dogres').className = 'result show'; $('dogres').innerHTML = 'The dog is walking its route…';
-  try { await form('/api/dog/search', {description: q, wait: false}); } catch (e) {}
+  try { await sendForm('/api/dog/search', {description: q, wait: false}); } catch (e) {}
 }
 function showDog() {
   if (!S || !S.dog) { $('dogpanel').style.display = 'none'; return; }
@@ -263,10 +267,10 @@ function showDog() {
     : d.status === 'found' ? `<div class="big">Found in ${esc(d.spot)}: ${esc(d.label)}</div><div>${esc(d.where)}</div><div class="thumbs"><a href="/files/${d.photo}" target="_blank"><img src="/files/${d.photo}"></a></div>`
     : `<div class="big">${d.status === 'stopped' ? 'Stopped' : 'Not found'}</div><div class="muted">visited: ${esc(d.visited.join(', '))} ${esc(d.where || '')}</div>`;
 }
-async function signoff(decision) { const op = $('operator').value.trim(); if (!op) return alert('Operator name first'); await form('/api/signoff', {operator: op, decision}); }
-async function setSource() { await form('/api/source', {spec: $('src').value}); }
+async function signoff(decision) { const op = $('operator').value.trim(); if (!op) return alert('Operator name first'); await sendForm('/api/signoff', {operator: op, decision}); }
+async function setSource() { await sendForm('/api/source', {spec: $('src').value}); }
 async function uploadScene() { const f = new FormData(); f.append('photo', $('scene').files[0]); await call('/api/upload_scene', {method: 'POST', body: f}); refresh(); }
-async function markerFromArm() { const id = prompt('Touch the centre of an ArUco marker with the tip. Marker id (0-3)?'); if (id === null) return; await form('/api/calibration/marker_from_arm', {marker_id: id}); }
+async function markerFromArm() { const id = prompt('Touch the centre of an ArUco marker with the tip. Marker id (0-3)?'); if (id === null) return; await sendForm('/api/calibration/marker_from_arm', {marker_id: id}); }
 async function markers() { const d = await call('/api/calibration/markers', {method: 'POST'}); d.files.forEach(u => window.open(u)); }
 async function tune() { await json('/api/tune', {thresh: +$('thresh').value, min_area_frac: +$('minarea').value}); }
 
