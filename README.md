@@ -27,6 +27,7 @@ Grok Hackathon at the Museum, Pavia, 4–5 November 2026. Track A, CTRL+F: SEA (
 | Feature | How to use it |
 |---|---|
 | What's on the table? (inventory map) | Button next to Find, or ask the voice. Saving a reference also names its objects, so changes say *which* object |
+| M1 scene selection (read-only) | Inventory freezes a snapshot with stable object IDs. Click an object or say "the second blue pen" / "oggetto 3". Selection never moves or authorizes the arm; if camera preparation needs Home, inventory returns a blocked response |
 | Line-clearance zones | "Draw a zone", click corners, Finish: rule *must be empty* or *only these items*. Checked in every "what changed" |
 | PDF clearance record | "Download PDF" after a check; a copy goes to `data/records/` |
 | Jury scoreboard | Open `/jury` on the projector; "Reset score" before the demo |
@@ -99,6 +100,20 @@ the lift interlock; it keeps STOP latched and never homes. Reset and any later H
 `move=false` on Find / Find all never parks or repositions the arm. With a Cartesian arm it uses the current
 parked view, or returns HTTP 409 explaining that an explicit Home is needed. Homing and all camera preparation
 use the same motion authorization checks as pointing, including the required Cartesian safety box and home pose.
+
+Inventory and M1 selection are always read-only, including voice clarification answers. Their context survives
+state polling. API clarification answers must carry the original `snapshot_id` and returned `selection_context.id`;
+missing, stale and replayed contexts are refused. A scene answer sent to Find/Find all/Find clarification is blocked.
+To leave scene mode, explicitly press **Find** / **Find all** (API: `new_find=true`); motion still requires every
+existing safety guard. M1 selection never grants or changes the legacy **Point at last find** target.
+
+Stable `track_id` numbers and frame-local `box_id` numbers are separate: an expired track is never reinterpreted as
+a box number. API `box_id` selection requires `snapshot_id`. Changing camera source, uploading/replacing a scene,
+returning to live view or reteaching the survey pose invalidates the snapshot and retires its tracks; the next
+snapshot reports `tracks_reset`. Advancing frames within the same image sequence keeps track associations.
+Selection reports separate snapshot and decision provenance (including earlier clarification decisions).
+`authoritative=true` requires live naming and live model decisions, where needed; local ID/ordinal matching does
+not erase an earlier offline fallback. `motion_allowed` remains false for every selection.
 
 ## Hardware hookup
 

@@ -10,6 +10,7 @@ const TrovaVoice = (() => {
   let ws = null, ctx = null, mic = null, node = null, sink = null;
   let playTime = 0, sources = [], toolRuns = [], cfg = null, h = {};
   let lastStop = 0, userLine = '', botLine = '', buf = [], bufLen = 0;
+  let scene = null;  // independent of UI polling; a missing/stale selection context cannot become motion
 
   const WORKLET = `class Cap extends AudioWorkletProcessor {
     process(inputs) { const c = inputs[0] && inputs[0][0]; if (c) this.port.postMessage(c.slice(0)); return true; }
@@ -47,6 +48,7 @@ const TrovaVoice = (() => {
   // ---- tools Grok can call: each returns a small JSON for the model to talk about
   const tools = {
     async find_object({description}) {
+      if (scene) return tools.select_object({description});
       const d = await api('/api/find', {text: description, move: cfg.confirm ? 'false' : 'true'});
       if (d.error) return {error: d.error};
       h.onFind && h.onFind(d);
@@ -55,21 +57,28 @@ const TrovaVoice = (() => {
               candidate_ids: r.candidate_ids, arm: d.arm_blocked ? 'blocked: ' + d.arm_blocked : (d.moved ? 'pointing' : 'waiting for yes')};
     },
     async answer_clarification({answer}) {
+      if (scene) return tools.select_object({description: answer});
       const d = await api('/api/clarify', {answer, move: 'false'});
       if (d.error) return {error: d.error};
       h.onFind && h.onFind(d);
       const r = d.result;
       return {status: r.status, label: r.label, reason: r.reason, clarifying_question: r.clarifying_question};
     },
-    async point_at_found() { const d = await api('/api/arm/point_last'); return d.error ? {error: d.error} : {ok: true, label: d.label}; },
+    async point_at_found() {
+      if (scene) return {error: 'Scene selection cannot authorize motion. Explicitly start a new Find.'};
+      const d = await api('/api/arm/point_last'); return d.error ? {error: d.error} : {ok: true, label: d.label};
+    },
     async find_all({description}) {
+      if (scene) return tools.select_object({description});
       const d = await api('/api/find_all', {text: description, move: cfg.confirm ? 'false' : 'true'});
       if (d.error) return {error: d.error};
       h.onFindAll && h.onFindAll(d);
       return {count: d.result.count, label: d.result.label, arm: d.arm_blocked ? 'blocked: ' + d.arm_blocked : (d.moved ? 'visiting them' : 'waiting for yes')};
     },
     async describe_table() {
+      scene = {snapshot_id: null, pending: null};  // a failed snapshot must also stay read-only
       const d = await api('/api/inventory'); if (d.error) return {error: d.error};
+      scene = {snapshot_id: d.snapshot && d.snapshot.id, pending: null};
       h.onInventory && h.onInventory(d);
       const rows = (d.snapshot && d.snapshot.objects) || d.objects;
       return {summary: d.summary, grok_mode: d.snapshot && d.snapshot.grok_mode,
@@ -78,14 +87,21 @@ const TrovaVoice = (() => {
                                        confidence: o.confidence}))};
     },
     async select_object({description, track_id}) {
+      if (!scene || !scene.snapshot_id || (scene.pending && !scene.pending.id))
+        return {error: 'Selection context unavailable. Take a new snapshot.'};
       const body = {};
+      body.snapshot_id = scene.snapshot_id;
+      if (scene.pending) body.selection_context = scene.pending.id;
       if (description) body.text = description;
       if (track_id != null && track_id !== '') body.track_id = String(track_id);
       const d = await api('/api/select', body);
       if (d.error) return {error: d.error};
+      scene.pending = d.status === 'clarify' ? (d.selection_context || {}) : null;
       h.onSelect && h.onSelect(d);
       return {status: d.status, name: d.object && d.object.name, track_id: d.object && d.object.track_id,
               question: d.question, candidates: (d.candidates || []).map(o => o.track_id),
+              snapshot_grok_mode: d.snapshot_grok_mode, selection_grok_mode: d.selection_grok_mode,
+              provenance: d.provenance,
               authoritative: d.authoritative, motion_allowed: d.motion_allowed, reason: d.reason};
     },
     async save_reference() { const d = await api('/api/reference'); h.onRefresh && h.onRefresh(); return d.error ? {error: d.error} : {saved: true, objects: d.n_objects}; },

@@ -38,7 +38,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Grok Voice (realtime, confirm-before-move, stop word) | Done; config/token tested | `voice.py`, `static/voice.js` | Not yet heard live |
 | Optional dog room search (sim) | Done, tested | `dog.py` | Go2 driver is a template |
 | Jury mode + eval script | Done, tested | `server.py`, `eval/run_eval.py` | |
-| 1. Table inventory map ("what's on the table?") | Done, tested (mock) | `inventory.py`, `/api/inventory`, UI button, voice tool `describe_table` | Saving a reference now also names its objects (one extra Grok call; `describe=false` to skip), so changes say which object moved |
+| 1. Table inventory map ("what's on the table?") | Done, tested offline | `inventory.py`, `scene.py`, `/api/inventory`, `/api/select`, `tests/test_scene.py`, `tests/test_m1_integration.py` | M1 frozen snapshots and selection are motion-free, including camera preparation (409 if explicit Home is needed). Stable track IDs are separate from frame-local box IDs; changing source/upload/survey view retires tracks without reusing IDs. Voice selection context survives polling; snapshot-bound one-use clarification tokens are checked by the server. Snapshot and selection provenance remain separate: mock/offline/unverified decisions never become authoritative. Saving a reference also names its objects (`describe=false` skips) |
 | 2. Line-clearance zones | Done, tested (mock) | `zones.py`, `/api/zones*`, UI "Draw a zone" | Rules: `empty` or `allowed` (list). Evaluated in every change check; a violation makes the line NOT clear. Zones are in image pixels: redraw if the camera moves |
 | 3. PDF clearance record | Done, tested | `record_pdf.py`, `GET /api/report.pdf`, UI "Download PDF" | Verdict, images, changes, zones, rejected candidates, sign-off, audit id. Copy saved in `data/records/`. Uses reportlab (now a dependency) |
 | 4. Full-screen jury scoreboard | Done, tested | `static/jury.html`, `GET /jury`, `POST /api/metrics/reset` | Found x/N, median find time, false alarms, checks; latest request + verdict; live camera. Reset before the demo. Link "scoreboard" in the UI header |
@@ -91,6 +91,12 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 6. `data/` and `.env` are never committed. On the venue Wi-Fi set `TROVA_TOKEN` (the API then needs `?token=` once per device). Copy the final test set to `eval/data/` before the deadline.
 7. **Request models (pydantic) live at module level in `server.py`**, never inside `create_app`: FastAPI cannot
    resolve them under postponed annotations (a test enforces this).
+8. **Scene selection is read-only.** Inventory never implicitly homes; unavailable parked views return 409.
+   A selection never grants or retargets `point_last` permission (that remains the explicit last-Find action).
+   Browser and realtime voice retain their own scene context outside state polling. Clarification answers use
+   `/api/select` with the original `snapshot_id` and one-use `selection_context` ID; missing/stale context is refused.
+   Starting a moving Find after scene mode requires an explicit new Find action (`new_find=true`), then all
+   existing STOP, cancellation, startup, lift and motion authorization guards still apply.
 
 ## Module map
 
@@ -113,7 +119,7 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 ## HTTP API
 
 `GET /` UI · `GET /api/state` · `GET /api/frame.jpg` · `GET /api/log`
-Find: `POST /api/find` (text, photo, move) · `POST /api/clarify` · `POST /api/arm/point_last`
+Find: `POST /api/find` (text, photo, move, new_find=false) · `POST /api/clarify` · `POST /api/arm/point_last`. `new_find=true` explicitly leaves scene mode; it does not bypass motion safety guards.
 Changes: `POST /api/reference` · `POST /api/changes` · `POST /api/signoff` · `GET /api/report`
 Setup: `POST /api/background` · `/api/source` · `/api/source/step` · `/api/upload_scene` · `/api/upload_scene/clear` · `/api/tune`
 Calibration: `POST /api/calibration/aruco` · `/click` · `/arm_click` · `/marker_from_arm` · `/reset` · `/markers`
@@ -121,12 +127,12 @@ Arm: `POST /api/arm/stop` · `/home` · `/point` · `/freedrive` · `/clear_erro
 Software reset: `POST /api/arm/reset` JSON (operator, stop_nonce, area_clear=true, controller_ready=true), no motion; `GET /api/state` includes `stop_latched`, `stop_nonce`, `physical_arm`, `safety_persistence_error`. Lift recovery: `POST /api/arm/recover_lift` same JSON + fork_freed=true + note, requires STOP latched, clears only the lift interlock. Hardware reset/recovery/clear_errors/freedrive/compliant require x-trova-operator-token with configured operator credentials (403 if unconfigured, 401 if invalid); stale nonce 409. Successful recovery/reset rotates the nonce. Software reset never recovers controller/physical stops. Watch acknowledgement dismisses normally and returns `motion_blocked` when its guarded homing is refused.
 Jury: `POST /api/judge` · `/api/label`
 Voice: `GET /api/voice/config` · `POST /api/voice/session` · `/api/voice/log`
-Inventory: `POST /api/inventory` (names every object, labelled map image) · `POST /api/reference` takes `describe` (default true)
+Inventory: `POST /api/inventory` (read-only frozen snapshot, stable track IDs, labelled map; 409 if repositioning is needed) · `POST /api/select` (text or track_id, optional snapshot_id; box_id requires snapshot_id; pending clarification requires original snapshot_id and selection_context ID). Selection returns motion_allowed=false, snapshot_grok_mode, selection_grok_mode and cumulative provenance; a clarification also returns selection_context. `GET /api/state` exposes pending_select and selection_active. `POST /api/reference` takes `describe` (default true).
 Zones: `GET /api/zones` · `POST /api/zones/point` · `/api/zones/finish` (name, rule, allowed) · `/api/zones/cancel` · `DELETE /api/zones/{name}`
 Record: `GET /api/report.pdf` (PDF of the last check; copy in data/records/)
 Jury: `GET /jury` (scoreboard page) · `POST /api/metrics/reset`
 Failures: `GET /api/failures` (counts by cause, owner, next fix) · `POST /api/judge` takes `cause` (arm_missed)
-Find all: `POST /api/find_all` (text, move) · `/api/arm/point_last` also starts a pending tour
+Find all: `POST /api/find_all` (text, move, new_find=false) · `/api/arm/point_last` also starts a pending tour
 Tray: `POST /api/arm/lift_tray` (place_u, place_v; pick defaults to the last find; 403 unless TROVA_ALLOW_LIFT=1)
 Preflight: `GET /api/preflight` (grok=1 pings Grok) · CLI `python -m trova.preflight [url]`
 Watch: `POST /api/watch` (on, point) · `/api/watch/ack` (who) · state field `watch`
@@ -137,6 +143,9 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Known gaps
 
+- M1 snapshots are frozen observations, not live motion targets. Track association uses image overlap/colour,
+  not guaranteed physical identity; unannounced camera displacement is not detected as a source change.
+  Retake/calibrate after moving the camera. Scene selection never grants motion permission.
 - Every physical restart is disarmed and lift state is durable in data/arm_safety.json, but application persistence
   cannot stop an abandoned controller command after a hard process crash: hardware watchdog/controller-side
   safeguards are separately required. Software STOP is not safety-rated. Use one server process per robot with
@@ -159,6 +168,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 M1 integration review fixes: polling-independent voice scene context and server-bound one-use clarifications; explicit new Find transition; inventory never homes; corrected offline property for empty snapshots; source/upload/survey changes retire stable tracks and invalidate snapshots; removed stable-ID/box-ID fallback; separate cumulative snapshot/selection provenance prevents offline authority laundering. External integration probes promoted to 36 permanent synthetic regressions; full offline suite: 172 passed, 0 failed/skipped; Ruff unavailable. Browser smoke passed all 26 steps, including M1 selection/poll/speech and explicit simulator reset/recovery. No hardware, secrets or real configuration changes.
 - 2026-11-04 Independent safety review fixes: disarmed hardware boots; fsynced atomic lift marker and conservative recovery of missing/corrupt records; no xArm constructor recovery/enabling; immutable watch generations/tickets/worker identity prevent old-callback authority reuse; mandatory hardware operator authentication and authenticated audit identity; nonce-bound one-use STOP confirmations; checked SDK stop/recovery/state results without implicit restart; unavailable FK/missing limits refuse joint motion. Review probes promoted into repository regressions: 131 offline tests passed (0 failed/skipped); Ruff unavailable. No secrets/hardware settings changed.
 - 2026-11-04 P0 motion fixes: independent operator-reset software STOP latch; cancelled request epochs survive reset, concurrent admission, delayed Grok, clarification/confirmation and watch callbacks. Central authorization guards home/camera/room/watch motion, Cartesian limits+home fail closed, move=false never repositions; interrupted lifts require separate staff-confirmed recovery with STOP latched. Offline regression coverage added; no hardware/configuration changes.
 - 2026-11-04 Camera on the arm (the team's xArm 5 sphere camera): taught survey pose as joints, pictures only from it, gating of pixel moves / watch / overlays, joint moves checked by forward kinematics, simulated arm camera, camera finder, bring-up --camera-on-arm, preflight items. Feature 14: look around the room and face the object. Optional LED ring driver + firmware.

@@ -571,7 +571,7 @@ def test_browser_speech_commands():
     assert got["what do you see"]["cmd"] == "inventory"
     assert got["seleziona la seconda penna blu"] == {"cmd": "select", "text": "la seconda penna blu"}
     assert got["oggetto 3"] == {"cmd": "select", "text": "oggetto 3"}
-    assert got["number 2"] == {"cmd": "find", "text": "number 2"}   # a find clarification, not a new selection
+    assert got["number 2"] == {"cmd": "select", "text": "number 2"}  # context chooses selection or legacy clarification
 
 
 # ---------------------------------------------------------------- feature 13: audit trail page, tamper evidence

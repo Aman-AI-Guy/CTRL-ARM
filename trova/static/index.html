@@ -124,6 +124,8 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
 <script>
 const $ = id => document.getElementById(id);
 let S = null, clickMode = null, photoFile = null, frameSize = [1, 1];
+// Local workflow state must survive polling, including stale/missing server context (fail closed).
+let sceneSnapshotId = null, pendingSelection = null, selectionActive = false;
 
 async function call(url, opts) {
   const r = await fetch(url, opts);
@@ -163,8 +165,9 @@ function setClick(m) { clickMode = clickMode === m ? null : m; const el = $('cli
 
 function photoChosen() { photoFile = $('photo').files[0] || null; $('photoname').textContent = photoFile ? 'photo ready' : ''; }
 
-async function doFind() {
+async function doFind(newRequest = true) {
   const f = new FormData(); f.append('text', $('q').value); if (photoFile) f.append('photo', photoFile);
+  f.append('new_find', String(newRequest));
   $('q').blur();   // so the space bar is STOP again while the arm moves
   $('findbtn').disabled = true; $('findbtn').textContent = 'Looking…';
   try { showFind(await call('/api/find', {method: 'POST', body: f})); } catch (e) {} finally {
@@ -173,6 +176,7 @@ async function doFind() {
 async function answer(a) { const f = new FormData(); f.append('answer', a); try { showFind(await call('/api/clarify', {method: 'POST', body: f})); } catch (e) {} refresh(); }
 
 function showFind(d) {
+  selectionActive = false; pendingSelection = null; sceneSnapshotId = null;
   const r = d.result, el = $('findres'); el.className = 'result show st-' + r.status;
   if (S) { S.pending_select = null; S.pending_question = r.status === 'clarify' ? r.clarifying_question : null; }   // a spoken answer may come before the next poll
   let h = '';
@@ -229,11 +233,11 @@ async function runSpoken(text) {
     post('/api/arm/stop'); if (p.also === 'watch_off') json('/api/watch', {on: false});
     return TrovaSpeech.say(it ? 'Fermo.' : 'Stopped.', $('pttlang').value);
   }
-  if (p.cmd === 'inventory') { if (S) S.pending_select = null; return doInventory(); }
-  if (S && S.pending_select && (p.cmd === 'find' || p.cmd === 'select')) return selectSpoken(p.text || text);
-  if (p.cmd === 'find' && S && S.pending_question) return answer(text);   // the answer to Trova's question
+  if (p.cmd === 'inventory') return doInventory();
+  if ((selectionActive || pendingSelection || (S && S.pending_select)) && ['find', 'select', 'find_all'].includes(p.cmd)) return selectSpoken(p.text || text);
+  if (['find', 'select'].includes(p.cmd) && S && S.pending_question) return answer(text);   // legacy Find clarification
   if (p.cmd === 'select') return selectSpoken(p.text);
-  if (p.cmd === 'find' || p.cmd === 'find_all') { $('q').value = p.text; return p.cmd === 'find' ? doFind() : doFindAll(); }
+  if (p.cmd === 'find' || p.cmd === 'find_all') { $('q').value = p.text; return p.cmd === 'find' ? doFind(false) : doFindAll(false); }
   if (p.cmd === 'room') { $('q').value = p.text; return lookAround(); }
   const run = {check: doCheck, labels: readLabels, reference: saveRef,
     watch_on: () => json('/api/watch', {on: true, point: $('watchpoint').checked}), watch_off: () => json('/api/watch', {on: false}),
@@ -350,14 +354,15 @@ async function finishZone() {
 }
 
 // ---- feature 6: point at all
-async function doFindAll() {
+async function doFindAll(newRequest = true) {
   const q = $('q').value.trim(); if (!q) return alert('Type what to find, e.g. all the pens');
   $('q').blur();
   const el = $('findres'); el.className = 'result show'; el.innerHTML = 'Looking for every match…';
-  try { showFindAll(await call('/api/find_all', (() => { const f = new FormData(); f.append('text', q); return {method: 'POST', body: f}; })())); } catch (e) {}
+  try { showFindAll(await call('/api/find_all', (() => { const f = new FormData(); f.append('text', q); f.append('new_find', String(newRequest)); return {method: 'POST', body: f}; })())); } catch (e) {}
   refresh();
 }
 function showFindAll(d) {
+  selectionActive = false; pendingSelection = null; sceneSnapshotId = null;
   const r = d.result, el = $('findres'); el.className = 'result show st-' + (r.count ? 'found' : 'not_found');
   el.innerHTML = `<div class="big">${r.count ? r.count + ' found: ' + esc(r.label) : 'None found'}</div><div>${esc(r.reason)}</div>` +
     (r.count && !d.moved && !d.arm_blocked && d.targets.length ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at all</button></div>` : '') +
@@ -367,10 +372,12 @@ function showFindAll(d) {
 
 // ---- feature 1: inventory map
 async function doInventory() {
+  selectionActive = true; pendingSelection = null; sceneSnapshotId = null;
   const el = $('findres'); el.className = 'result show'; el.innerHTML = 'Naming every object…';
   try { showInventory(await call('/api/inventory', {method: 'POST'})); } catch (e) {}
 }
 function showInventory(d) {
+  selectionActive = true; pendingSelection = null; sceneSnapshotId = d.snapshot && d.snapshot.id;
   if (S) S.pending_select = null;
   const el = $('findres'); el.className = 'result show st-found';
   const snap = d.snapshot || {};
@@ -390,13 +397,27 @@ function showInventory(d) {
 }
 async function pickObject(trackId) {
   const f = new FormData(); f.append('track_id', String(trackId));
+  if (!selectionFields(f)) return;
   try { showSelection(await call('/api/select', {method: 'POST', body: f})); } catch (e) {}
 }
 async function selectSpoken(text) {
   const f = new FormData(); f.append('text', text);
+  if (!selectionFields(f)) return;
   try { showSelection(await call('/api/select', {method: 'POST', body: f})); } catch (e) {}
 }
+function selectionFields(f) {
+  const pending = pendingSelection || (S && S.pending_select);
+  const snapshot = pending ? pending.snapshot_id : sceneSnapshotId;
+  if (!snapshot || (pending && !pending.id)) { toast('Selection context unavailable. Take a new snapshot.'); return false; }
+  f.append('snapshot_id', snapshot);
+  if (pending) f.append('selection_context', pending.id);
+  return true;
+}
 function showSelection(d) {
+  selectionActive = true;
+  sceneSnapshotId = d.snapshot_id;
+  // Keep an invalid sentinel if a clarification lacks context: never fall through to moving Find.
+  pendingSelection = d.status === 'clarify' ? (d.selection_context || {}) : null;
   const el = $('findres');
   if (S) {
     S.pending_select = d.status === 'clarify' ? (d.question || true) : null;
@@ -475,6 +496,11 @@ async function tune() { await json('/api/tune', {thresh: +$('thresh').value, min
 
 async function refresh() {
   try { S = await (await fetch('/api/state')).json(); } catch { return; }
+  if (S.selection_active) {
+    selectionActive = true;
+    if (!sceneSnapshotId && S.inventory) sceneSnapshotId = S.inventory.snapshot && S.inventory.snapshot.id;
+    if (!pendingSelection && S.pending_select) pendingSelection = S.pending_select;
+  }
   frameSize = S.frame_size;
   if (!refresh.langSet && S.lang === 'it') { $('pttlang').value = 'it-IT'; } refresh.langSet = true;
   const m = $('mode'); m.textContent = S.mock ? 'MOCK Grok' : S.grok.offline ? 'OFFLINE: Grok unreachable' : 'LIVE ' + S.grok.model;

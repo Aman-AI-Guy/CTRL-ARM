@@ -26,7 +26,9 @@ const TrovaSpeech = (() => {
     for (const [cmd, re] of RULES) if (re.test(t)) return {cmd};
     const sel = q.match(/^(seleziona|select|scegli|choose)\s+(.+)$/);
     if (sel) return {cmd: 'select', text: sel[2]};
-    if (/^(oggetto|object)\s+\d+$/.test(q)) return {cmd: 'select', text: q};
+    if (/^(oggetto|object|id|numero|number)\s+\d+$/.test(q) ||
+        /\b(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|prim[oa]|second[oa]|terz[oa]|quart[oa]|quint[oa])\b/.test(q))
+      return {cmd: 'select', text: q};
     if (!q) return {cmd: 'none'};
     return {cmd: ALL.test(t) ? 'find_all' : 'find', text: q};
   }

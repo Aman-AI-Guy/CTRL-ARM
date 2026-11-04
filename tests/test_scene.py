@@ -39,7 +39,7 @@ def test_ordinal_and_id_selection_stay_in_code():
     assert decide_text("the second blue pen", objects).track_ids == [5]
     assert decide_text("seconda penna blu", objects).track_ids == [5]
     assert decide_text("oggetto 4", objects).track_ids == [4]
-    assert decide_text("oggetto 1", objects).track_ids == [4]   # no track 1: the reading-order box
+    assert decide_text("oggetto 1", objects).status == "not_found"  # a retired track is not a box number
     assert decide_text("blue pen", objects).status == "defer"
     assert decide_text("oggetto 9", objects).status == "not_found"
     mark_ambiguous(objects)

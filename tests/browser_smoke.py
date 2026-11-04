@@ -103,8 +103,10 @@ def main() -> int:
                                                    wait_text("#findres", "Looking for every match"),
                                                    pg.click("body", position={"x": 5, "y": 990}), pg.keyboard.press("Space"),
                                                    pg.wait_for_timeout(600), text("#armst"))[6])
+            step("explicit simulator reset", lambda: _reset_simulator(pg))
             step("what's on the table", lambda: (press("What's on the table?"), wait_text("#findres", "Naming every"),
                                                  text("#findres")[:60])[2])
+            step("M1 select + poll + speech", lambda: _scene_selection(pg, text))
             step("save reference", lambda: (press("Save reference"), pg.wait_for_timeout(1500), text("#refinfo"))[2])
             step("set batch + old-lot carton", lambda: (pg.fill("#lot", "A123"), press("Set batch"),
                                                         press("+ old-lot carton"), pg.wait_for_timeout(600),
@@ -123,6 +125,7 @@ def main() -> int:
             step("tray lift + STOP", lambda: (find(f"the {_unique(pg)} one"), press("Lift its tray", exact=False),
                                               pg.mouse.click(*_corners(pg)[2]), pg.wait_for_timeout(800), press("STOP"),
                                               pg.wait_for_timeout(500), text("#armst"))[6])
+            step("explicit simulator recovery", lambda: _reset_simulator(pg))
             step("arm home", lambda: (press("Arm home"), pg.wait_for_timeout(500), text("#armst"))[2])
             step("dog search", lambda: (press("Send the dog to look"), pg.wait_for_timeout(6000),
                                         text("#dogres")[:60])[2])
@@ -158,6 +161,41 @@ def main() -> int:
     print("\n".join(log))
     print("\n" + ("PASS: no problems" if not problems else "PROBLEMS:\n  " + "\n  ".join(problems)))
     return 1 if problems else 0
+
+
+def _reset_simulator(pg):
+    """Explicit test-operator decisions, restricted to the built-in offline simulator."""
+    state = pg.request.get(pg.url.rstrip("/") + "/api/state").json()
+    assert state["arm"]["name"] == "sim" and not state["physical_arm"] and state["stop_latched"]
+    base = pg.url.rstrip("/")
+    confirmation = {"operator": "Offline Smoke Test", "stop_nonce": state["stop_nonce"],
+                    "area_clear": True, "controller_ready": True}
+    if state["lift_interrupted"]:
+        response = pg.request.post(base + "/api/arm/recover_lift", data=confirmation | {
+            "fork_freed": True, "note": "Explicit recovery decision in the synthetic no-load simulator"})
+        assert response.ok, response.text()
+        confirmation["stop_nonce"] = pg.request.get(base + "/api/state").json()["stop_nonce"]
+    response = pg.request.post(base + "/api/arm/reset", data=confirmation)
+    assert response.ok, response.text()
+    after = pg.request.get(base + "/api/state").json()
+    assert not after["stop_latched"]
+    assert all(after["arm"][key] == state["arm"][key] for key in ("tip_mm", "target_mm"))  # no motion
+
+
+def _scene_selection(pg, text):
+    before = pg.request.get(pg.url.rstrip("/") + "/api/state").json()
+    pg.evaluate("""async () => {
+      const f = new FormData(); f.append('text', 'black object'); f.append('snapshot_id', sceneSnapshotId);
+      const d = await call('/api/select', {method:'POST', body:f});
+      if(d.status !== 'clarify') throw Error('Expected scene clarification');
+      showSelection(d);
+      await refresh();
+      await runSpoken('the second black object');
+    }""")
+    assert "Selected:" in text("#findres"), text("#findres")
+    after = pg.request.get(pg.url.rstrip("/") + "/api/state").json()
+    assert before["arm"] == after["arm"] and before["stop_nonce"] == after["stop_nonce"]
+    return text("#findres")[:90]
 
 
 def _corners(pg):

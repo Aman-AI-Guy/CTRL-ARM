@@ -60,7 +60,7 @@ def _grok_mode(grok: GrokClient, result=None) -> str:
         return "live"
     if grok.mock:
         return "mock"
-    if grok.offline():
+    if grok.offline:
         return "offline"
     return "live"
 

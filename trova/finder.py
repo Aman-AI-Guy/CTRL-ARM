@@ -83,6 +83,7 @@ class FindResult:
     clarifying_question: str | None = None
     candidate_ids: list[int] = field(default_factory=list)
     mode: str = "som"                 # som | direct | offline (Grok unreachable: local colour match)
+    grok_mode: str = "unknown"        # provenance, separate from the box-finding method
     grok_latency_s: float = 0.0
     total_s: float = 0.0
     grok_calls: int = 0
@@ -92,7 +93,7 @@ class FindResult:
         return {"status": self.status, "box": self.box.as_dict() if self.box else None,
                 "label": self.label, "reason": self.reason, "confidence": round(self.confidence, 2),
                 "clarifying_question": self.clarifying_question, "candidate_ids": self.candidate_ids,
-                "mode": self.mode, "grok_latency_s": round(self.grok_latency_s, 2),
+                "mode": self.mode, "grok_mode": self.grok_mode, "grok_latency_s": round(self.grok_latency_s, 2),
                 "total_s": round(self.total_s, 2), "grok_calls": self.grok_calls,
                 "n_candidates": len(self.boxes)}
 
@@ -122,6 +123,7 @@ def find(grok: GrokClient, frame: np.ndarray, boxes: list[Box], request: str = "
                "request": request, "history": history or [], "has_photo": query_image is not None,
                "query_color": color_name(query_image) if query_image is not None else None}
         r = grok.json(name="trova_select", prompt=prompt, schema=SELECT_SCHEMA, images=images, mock_context=ctx)
+        res.grok_mode = "offline" if r.offline else "mock" if r.mock else "live"
         d = r.data
         res.marked, res.grok_calls, res.grok_latency_s = marked, 1, r.latency_s
         res.label, res.reason = d.get("label", ""), d.get("reason", "")
@@ -149,6 +151,9 @@ def _direct(grok, frame, request, query_image, photo_line, res: FindResult) -> N
     prompt = DIRECT_PROMPT.format(request=request, photo_line=photo_line.replace("Image 3", "Image 2"))
     r = grok.json(name="trova_direct", prompt=prompt, schema=DIRECT_SCHEMA, images=images,
                   mock_context={"request": request})
+    mode = "offline" if r.offline else "mock" if r.mock else "live"
+    if res.grok_mode not in ("offline", "mock"):
+        res.grok_mode = mode
     d = r.data
     res.mode = "direct"
     res.grok_calls += 1

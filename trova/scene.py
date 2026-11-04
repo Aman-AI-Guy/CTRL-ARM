@@ -191,8 +191,6 @@ def decide_text(text: str, objects: list[dict]) -> Decision:
     if id_match:
         number = int(id_match.group(1))
         hits = [obj for obj in objects if obj["track_id"] == number]
-        if not hits:
-            hits = [obj for obj in objects if obj["box_id"] == number]
         if len(hits) == 1:
             return Decision("selected", [hits[0]["track_id"]], reason=f"id {number}",
                             confidence=float(hits[0]["confidence"]))
@@ -246,8 +244,13 @@ def from_finder(status: str, box_id: int | None, candidate_ids: list[int], confi
     return Decision("not_found", reason=reason or "not in this snapshot", confidence=confidence)
 
 
-def pack(decision: Decision, objects: list[dict], authoritative: bool, snapshot_id: str) -> dict:
-    """JSON for /api/select. Motion stays off. Mock and offline names are not authoritative."""
+def pack(decision: Decision, objects: list[dict], authoritative: bool, snapshot_id: str,
+         *, snapshot_mode: str = "unknown", selection_modes: list[str] | None = None) -> dict:
+    """Keep naming and decision provenance separate, including earlier clarification decisions."""
+    modes = list(selection_modes or [])
+    authoritative = authoritative and snapshot_mode == "live" and all(mode == "live" for mode in modes)
+    selection_mode = next((mode for mode in ("offline", "mock", "unknown") if mode in modes),
+                          "live" if modes else "local")
     by_id = {obj["track_id"]: obj for obj in objects}
     candidates = [by_id[i] for i in decision.track_ids if i in by_id]
     chosen = candidates[0] if decision.status == "selected" and len(candidates) == 1 else None
@@ -262,7 +265,7 @@ def pack(decision: Decision, objects: list[dict], authoritative: bool, snapshot_
     reason = decision.reason or "no match"
     reason = f"{reason}. selection does not move the arm"
     if not authoritative:
-        reason += ". Names are from mock or offline recognition and cannot authorize motion"
+        reason += ". Snapshot or selection recognition is mock, offline or unverified and cannot authorize motion"
     confidence = decision.confidence or (float(chosen["confidence"]) if chosen else 0.0)
     return {
         "status": status,
@@ -274,4 +277,7 @@ def pack(decision: Decision, objects: list[dict], authoritative: bool, snapshot_
         "motion_allowed": False,
         "reason": reason,
         "snapshot_id": snapshot_id,
+        "snapshot_grok_mode": snapshot_mode,
+        "selection_grok_mode": selection_mode,
+        "provenance": {"snapshot": snapshot_mode, "selection": modes},
     }

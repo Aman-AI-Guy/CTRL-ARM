@@ -211,9 +211,12 @@ class State:
         self.pending_move: dict | None = None
         self.inventory: dict | None = None
         self.tracks = TrackState()             # stable ids across snapshots of the same view
+        self.tracks_reset_reason: str | None = None
         self.scene_frame: np.ndarray | None = None
         self.scene_boxes: list[Box] | None = None
         self.select_history: list[tuple[str, str]] = []
+        self.pending_select: dict | None = None  # snapshot-bound, one-use clarification; never motion permission
+        self.selection_active = False           # leaving read-only scene mode needs an explicit new Find
         self.tour: dict | None = None
         self.zones_path = s.data_dir / "zones.json"
         self.zones: list[Zone] = load_zones(self.zones_path)
@@ -241,6 +244,15 @@ class State:
         self.room: dict | None = None          # feature 14: last room scan (status, views, result)
 
     # ---------- frames, proposals, calibration
+    def invalidate_scene(self, reason: str, *, reset_tracks: bool = True) -> None:
+        """Called under self.lock when a view changes. Retired stable IDs are never recycled."""
+        self.inventory = self.scene_frame = self.scene_boxes = None
+        self.pending_select = None
+        self.select_history = []
+        if reset_tracks:
+            self.tracks.previous = []
+            self.tracks_reset_reason = reason
+
     def frame(self) -> np.ndarray:
         try:
             f = self.override.copy() if self.override is not None else self.source.read()
@@ -481,7 +493,9 @@ class State:
         if not busy and was_there and not self.manual_mode:
             return                         # already parked: reading a frame requires no motion/reset
         if not move:
-            raise ArmBusy("move=false: no safe parked camera view is available; explicitly home the arm first")
+            reason = self.arm_blocked(pixels=False)
+            raise ArmBusy("move=false: no safe parked camera view is available; explicitly home the arm first"
+                          + (f"; {reason}" if reason else ""))
         self.start_arm(self.arm.home, job="home", pixels=False, ticket=ticket, wait=True)
         if self.arm.state != "idle":
             raise ArmBusy("The arm did not reach home: " + (getattr(self.arm, "last_error", None) or self.arm.state))
@@ -695,6 +709,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "camera_on_arm": st.camera_on_arm, "at_survey": st.at_survey(), "poses": load_poses(st.s.data_dir),
             "reference": None if not st.reference else {k: st.reference[k] for k in ("time", "path", "n_objects")},
             "pending_question": st.pending["question"] if st.pending else None,
+            "pending_select": st.pending_select,
+            "selection_active": st.selection_active,
             "pending_candidates": st.pending.get("candidates", []) if st.pending else [],
             "label_wait": st.label_wait is not None,
             "last_find": lf or None,
@@ -712,9 +728,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     # ------------------------------------------------------------------ find
-    def do_find(request: str, query_img, history, move: bool = True, reuse: dict | None = None, ticket=None):
+    def find_intent(new_find: bool = False) -> None:
+        """A scene answer cannot become an automatic Find, including camera preparation.
+
+        Called under st.lock. Only an explicit new Find action can leave the selection workflow.
+        """
+        if (st.pending_select or st.selection_active) and not new_find:
+            blocked = st.arm_blocked()
+            raise HTTPException(409, "Scene selection is read-only: answer via /api/select with its context, "
+                                "or explicitly start a new Find" + (f"; {blocked}" if blocked else ""))
+        if new_find:
+            st.selection_active = False
+            st.pending_select = None
+            st.select_history = []
+
+    def do_find(request: str, query_img, history, move: bool = True, reuse: dict | None = None, ticket=None,
+                new_find: bool = False):
         ticket = st.motion_ticket(ticket)
         with st.lock:
+            find_intent(new_find)
             t0, asked = time.perf_counter(), time.time()
             if reuse:                       # a clarify answer: same frame and box numbers as the question
                 frame, boxes, occluded = reuse["frame"], reuse["boxes"], reuse["occluded"]
@@ -760,22 +792,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {k: v for k, v in st.last_find.items() if k != "box"}
 
     @app.post("/api/find")
-    def api_find(text: str = Form(""), photo: UploadFile | None = File(None), move: bool = Form(True)):
+    def api_find(text: str = Form(""), photo: UploadFile | None = File(None), move: bool = Form(True),
+                 new_find: bool = Form(False)):
         q = decode_upload(photo.file.read()) if photo is not None and photo.filename else None
         if not text.strip() and q is None:
             raise HTTPException(400, "Say what to find, or send a photo")
         try:
-            return do_find(text.strip(), q, [], move)
+            return do_find(text.strip(), q, [], move, new_find=new_find)
         except (ArmBusy, CameraError):
             raise
         except (GrokError, ValueError, RuntimeError) as e:
             return fail(e, "find")
 
     @app.post("/api/find_all")
-    def api_find_all(text: str = Form(...), move: bool = Form(True)):
+    def api_find_all(text: str = Form(...), move: bool = Form(True), new_find: bool = Form(False)):
         """Feature 6: "point at all the pens": every match, then the arm visits each in turn."""
         ticket = st.motion_ticket()
         with st.lock:
+            find_intent(new_find)
             t0, asked = time.perf_counter(), time.time()
             st.clear_view(move=move, ticket=ticket)
             frame = st.frame()
@@ -806,6 +840,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/clarify")
     def api_clarify(answer: str = Form(...)):
         with st.lock:                      # one answer per question, even if the button is double-clicked
+            if st.pending_select:
+                raise HTTPException(409, "Scene clarification must use /api/select with its snapshot and context")
             p, st.pending = st.pending, None
             if not p:
                 raise HTTPException(400, "No question pending")
@@ -999,32 +1035,42 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             new = open_source(spec)
         except Exception as e:  # noqa: BLE001 - report any camera error to the UI
             return fail(e, "source")
-        old, st.source = st.source, new
-        old.close()
-        if hasattr(new, "attach"):
-            new.attach(st.arm, st.s.data_dir)
-        st.override, st.background, st.background_path = None, None, None
-        st.audit.event("source", spec=spec)
-        return st.source.info()
+        with st.lock:
+            old, st.source = st.source, new
+            old.close()
+            if hasattr(new, "attach"):
+                new.attach(st.arm, st.s.data_dir)
+            st.override, st.background, st.background_path = None, None, None
+            st.invalidate_scene("camera source changed")
+            st.audit.event("source", spec=spec)
+            return st.source.info()
 
     @app.post("/api/source/step")
     def api_step(delta: int = Form(1)):
-        if not isinstance(st.source, ImageSource):
-            raise HTTPException(400, "Only for an image folder source")
-        st.source.step(delta)
-        return st.source.info()
+        with st.lock:
+            if not isinstance(st.source, ImageSource):
+                raise HTTPException(400, "Only for an image folder source")
+            st.source.step(delta)
+            st.invalidate_scene("source frame advanced", reset_tracks=False)
+            return st.source.info()
 
     @app.post("/api/upload_scene")
     def api_upload_scene(photo: UploadFile = File(...)):
-        st.override = decode_upload(photo.file.read())
-        st.background, st.background_path = None, None
-        st.audit.event("upload_scene", size=list(st.override.shape[:2]))
-        return {"override": True}
+        frame = decode_upload(photo.file.read())
+        with st.lock:
+            st.override = frame
+            st.background, st.background_path = None, None
+            st.invalidate_scene("uploaded scene changed")
+            st.audit.event("upload_scene", size=list(st.override.shape[:2]))
+            return {"override": True}
 
     @app.post("/api/upload_scene/clear")
     def api_upload_clear():
-        st.override = None
-        return {"override": False}
+        with st.lock:
+            if st.override is not None:
+                st.override = None
+                st.invalidate_scene("returned to camera source")
+            return {"override": False}
 
     @app.post("/api/tune")
     def api_tune(t: Tune):
@@ -1126,23 +1172,26 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     def api_arm_teach_pose(name: str = Form("home_joints")):
         """Record the arm's current joint angles as a named pose: home_joints (with the camera on the arm: the
         survey pose, where the camera sees the whole table) or look_joints (the room scan starts here)."""
-        arm = _need_cartesian()
-        if name not in ("home_joints", "look_joints"):
-            raise HTTPException(400, "name must be home_joints or look_joints")
-        try:
-            q = arm.backend.joints()
-        except NotImplementedError as e:
-            return fail(e, "teach_pose")
-        poses = save_pose(st.s.data_dir, name, q)
-        if name == "home_joints":
-            arm.home_joints = poses[name]
-            if st.camera_on_arm and st.calib and st.calib.source in ("arm", "aruco_robot"):
-                st.calib = None                # the view changed: the old pixel -> robot mapping is wrong now
-                if st.calib_path.exists():
-                    st.calib_path.unlink()
-        st.audit.event("teach_pose", name=name, joints=poses[name])
-        return {"poses": poses, "note": "survey pose changed: calibrate again (ArUco)" if name == "home_joints"
-                and st.camera_on_arm else ""}
+        with st.lock:
+            arm = _need_cartesian()
+            if name not in ("home_joints", "look_joints"):
+                raise HTTPException(400, "name must be home_joints or look_joints")
+            try:
+                q = arm.backend.joints()
+            except NotImplementedError as e:
+                return fail(e, "teach_pose")
+            poses = save_pose(st.s.data_dir, name, q)
+            if name == "home_joints":
+                arm.home_joints = poses[name]
+                if st.camera_on_arm:
+                    st.invalidate_scene("survey pose changed")
+                    if st.calib and st.calib.source in ("arm", "aruco_robot"):
+                        st.calib = None        # the old pixel -> robot mapping is wrong now
+                        if st.calib_path.exists():
+                            st.calib_path.unlink()
+            st.audit.event("teach_pose", name=name, joints=poses[name])
+            return {"poses": poses, "note": "survey pose changed: calibrate again (ArUco)" if name == "home_joints"
+                    and st.camera_on_arm else ""}
 
     @app.post("/api/arm/clear_errors")
     def api_arm_clear_errors(request: Request):
@@ -1361,9 +1410,11 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     @app.post("/api/inventory")
     def api_inventory():
         with st.lock:
-            st.clear_view()
+            st.selection_active = True  # failures also retain read-only intent; no fallback into moving Find
+            st.invalidate_scene("new snapshot requested", reset_tracks=False)
+            st.clear_view(move=False)  # a read-only snapshot must never park/reposition the arm
             f, boxes, occl = st.capture_clean(attempts=3)
-            reset = None
+            reset = st.tracks_reset_reason
             if st.camera_on_arm and not st.at_survey():
                 reset = "arm camera is not at the survey pose"
             boxes, reset = assign_tracks(st.tracks, boxes, f, reset)
@@ -1385,7 +1436,10 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             out = inv.as_dict() | {"map": drawn, "n_objects": len(boxes), "occluded": occl, "snapshot": snapshot}
             st.scene_frame, st.scene_boxes = f, boxes
             st.select_history = []
+            st.pending_select = None
+            st.selection_active = True
             st.inventory = out
+            st.tracks_reset_reason = None
             st.audit.event("inventory", summary=inv.summary, n_objects=len(boxes), occluded=occl,
                            map=drawn, image=image, snapshot_id=image, tracks=objects,
                            grok_mode=inv.grok_mode, authoritative=snapshot["authoritative"],
@@ -1393,14 +1447,24 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             return out
 
     @app.post("/api/select")
-    def api_select(text: str = Form(""), track_id: str = Form(""), box_id: str = Form("")):
+    def api_select(text: str = Form(""), track_id: str = Form(""), box_id: str = Form(""),
+                   snapshot_id: str = Form(""), selection_context: str = Form("")):
         """Pick one object in the current snapshot. This route never calls the arm."""
         with st.lock:
             snap = (st.inventory or {}).get("snapshot")
             if not snap or st.scene_frame is None or st.scene_boxes is None:
                 raise HTTPException(400, "Take a snapshot first")
+            if snapshot_id and snapshot_id != snap["id"]:
+                raise HTTPException(409, "Selection snapshot expired: take a new snapshot")
+            pending = st.pending_select
+            if pending:
+                if snapshot_id != pending["snapshot_id"] or selection_context != pending["id"]:
+                    raise HTTPException(409, "Missing or stale selection clarification context")
+            elif selection_context:
+                raise HTTPException(409, "Selection clarification expired: take a new snapshot")
             objects = snap["objects"]
             authoritative = snap.get("grok_mode") == "live"
+            modes = list(pending.get("modes", ["unknown"])) if pending else []
 
             def _opt(raw: str, label: str) -> int | None:
                 raw = (raw or "").strip()
@@ -1412,6 +1476,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                     raise HTTPException(400, f"{label} must be an integer") from None
 
             tid, bid = _opt(track_id, "track_id"), _opt(box_id, "box_id")
+            if bid is not None and not snapshot_id:
+                raise HTTPException(400, "box_id is frame-local and requires snapshot_id")
             if tid is None and bid is None and not text.strip():
                 raise HTTPException(400, "Say which object, or pass track_id")
             if tid is not None or bid is not None:
@@ -1438,16 +1504,23 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                                           history=history or None, direct_fallback=False)
                     except GrokError as e:
                         return fail(e, "select")
+                    mode = "offline" if found.mode == "offline" else found.grok_mode
+                    modes.append(mode if mode in ("live", "mock", "offline") else "unknown")
                     decision = from_finder(found.status, found.box.id if found.box else None, found.candidate_ids,
                                            found.confidence, found.reason, objects, text)
             if decision.status == "clarify" and decision.question:
                 st.select_history = [(decision.question, "")]
+                st.pending_select = {"id": uuid.uuid4().hex, "snapshot_id": snap["id"],
+                                     "question": decision.question, "modes": list(modes)}
             else:
                 st.select_history = []
-            out = pack(decision, objects, authoritative, snap["id"])
+                st.pending_select = None
+            out = pack(decision, objects, authoritative, snap["id"],
+                       snapshot_mode=snap.get("grok_mode", "unknown"), selection_modes=modes)
+            out["selection_context"] = st.pending_select
             st.audit.event("select", status=out["status"], snapshot_id=snap["id"],
                            track_id=None if not out["object"] else out["object"]["track_id"],
-                           authoritative=out["authoritative"], motion_allowed=False)
+                           authoritative=out["authoritative"], provenance=out["provenance"], motion_allowed=False)
             return out
 
     # ------------------------------------------------------------------ feature 2: zones
