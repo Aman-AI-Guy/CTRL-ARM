@@ -32,6 +32,7 @@ from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
 from .finder import find as grok_find, find_all as grok_find_all
 from .inventory import describe as describe_table, draw_map
+from .scene import Decision, TrackState, assign_tracks, build_objects, decide_text, from_finder, pack, question_for
 from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
 from . import history, preflight
@@ -167,6 +168,10 @@ class State:
         self.label_wait: dict | None = None
         self.pending_move: dict | None = None
         self.inventory: dict | None = None
+        self.tracks = TrackState()             # stable ids across snapshots of the same view
+        self.scene_frame: np.ndarray | None = None
+        self.scene_boxes: list[Box] | None = None
+        self.select_history: list[tuple[str, str]] = []
         self.tour: dict | None = None
         self.zones_path = s.data_dir / "zones.json"
         self.zones: list[Zone] = load_zones(self.zones_path)
@@ -1090,20 +1095,107 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         with (st.cases_dir / "finds.jsonl").open("a") as f:
             f.write(json.dumps(case, ensure_ascii=False) + "\n")
 
-    # ------------------------------------------------------------------ feature 1: inventory map
+    # ------------------------------------------------------------------ feature 1: inventory map + M1 snapshot
+    def _pose_readonly() -> dict | None:
+        """Telemetry only. status() reads the pose; it does not enable or command motion."""
+        try:
+            pose = st.arm.status()
+        except Exception:  # noqa: BLE001 - a pose is optional on the snapshot
+            return None
+        if not isinstance(pose, dict):
+            return None
+        return {"state": pose.get("state"), "tip_mm": pose.get("tip_mm"), "tcp_mm": pose.get("tcp_mm")}
+
     @app.post("/api/inventory")
     def api_inventory():
         with st.lock:
             st.clear_view()
             f, boxes, occl = st.capture_clean(attempts=3)
+            reset = None
+            if st.camera_on_arm and not st.at_survey():
+                reset = "arm camera is not at the survey pose"
+            boxes, reset = assign_tracks(st.tracks, boxes, f, reset)
             try:
                 inv = describe_table(st.grok, f, boxes, st.s.lang)
             except GrokError as e:
                 return fail(e, "inventory")
-            out = inv.as_dict() | {"map": st.audit.save_image("inventory_map", draw_map(f, boxes, inv)),
-                                   "n_objects": len(boxes), "occluded": occl}
+            objects = build_objects(boxes, f, inv.items)
+            image = st.audit.save_image("scene", f)
+            drawn = st.audit.save_image("inventory_map", draw_map(f, boxes, inv))
+            snapshot = {
+                "id": image, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "image": image, "map": drawn, "width": int(f.shape[1]), "height": int(f.shape[0]),
+                "at_survey": st.at_survey(), "camera_on_arm": st.camera_on_arm,
+                "pose": _pose_readonly(), "grok_mode": inv.grok_mode, "tracks_reset": reset,
+                "occluded": occl, "objects": objects,
+                "authoritative": inv.grok_mode == "live", "motion_allowed": False,
+            }
+            out = inv.as_dict() | {"map": drawn, "n_objects": len(boxes), "occluded": occl, "snapshot": snapshot}
+            st.scene_frame, st.scene_boxes = f, boxes
+            st.select_history = []
             st.inventory = out
-            st.audit.event("inventory", **{k: v for k, v in out.items()})
+            st.audit.event("inventory", summary=inv.summary, n_objects=len(boxes), occluded=occl,
+                           map=drawn, image=image, snapshot_id=image, tracks=objects,
+                           grok_mode=inv.grok_mode, authoritative=snapshot["authoritative"],
+                           tracks_reset=reset)
+            return out
+
+    @app.post("/api/select")
+    def api_select(text: str = Form(""), track_id: str = Form(""), box_id: str = Form("")):
+        """Pick one object in the current snapshot. This route never calls the arm."""
+        with st.lock:
+            snap = (st.inventory or {}).get("snapshot")
+            if not snap or st.scene_frame is None or st.scene_boxes is None:
+                raise HTTPException(400, "Take a snapshot first")
+            objects = snap["objects"]
+            authoritative = snap.get("grok_mode") == "live"
+
+            def _opt(raw: str, label: str) -> int | None:
+                raw = (raw or "").strip()
+                if not raw:
+                    return None
+                try:
+                    return int(raw)
+                except ValueError:
+                    raise HTTPException(400, f"{label} must be an integer") from None
+
+            tid, bid = _opt(track_id, "track_id"), _opt(box_id, "box_id")
+            if tid is None and bid is None and not text.strip():
+                raise HTTPException(400, "Say which object, or pass track_id")
+            if tid is not None or bid is not None:
+                hits = objects
+                if tid is not None:
+                    hits = [obj for obj in hits if obj["track_id"] == tid]
+                if bid is not None:
+                    hits = [obj for obj in hits if obj["box_id"] == bid]
+                if len(hits) == 1:
+                    decision = decide_text(f"oggetto {hits[0]['track_id']}", objects)
+                elif not hits:
+                    decision = Decision("not_found", reason="That object is not in this snapshot")
+                else:
+                    decision = Decision("clarify", [obj["track_id"] for obj in hits], question_for(hits, text),
+                                        reason="several objects match that id")
+            else:
+                decision = decide_text(text, objects)
+                if decision.status == "defer":
+                    history = list(st.select_history)
+                    if history and history[-1][1] == "":
+                        history[-1] = (history[-1][0], text.strip())
+                    try:
+                        found = grok_find(st.grok, st.scene_frame, st.scene_boxes, text.strip(),
+                                          history=history or None, direct_fallback=False)
+                    except GrokError as e:
+                        return fail(e, "select")
+                    decision = from_finder(found.status, found.box.id if found.box else None, found.candidate_ids,
+                                           found.confidence, found.reason, objects, text)
+            if decision.status == "clarify" and decision.question:
+                st.select_history = [(decision.question, "")]
+            else:
+                st.select_history = []
+            out = pack(decision, objects, authoritative, snap["id"])
+            st.audit.event("select", status=out["status"], snapshot_id=snap["id"],
+                           track_id=None if not out["object"] else out["object"]["track_id"],
+                           authoritative=out["authoritative"], motion_allowed=False)
             return out
 
     # ------------------------------------------------------------------ feature 2: zones

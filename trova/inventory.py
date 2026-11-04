@@ -50,18 +50,35 @@ LANG = {"en": "Write names, notes and summary in English.", "it": "Write names, 
         "both": "Write names in English; write the summary in English, then in Italian after ' / '."}
 
 
+def _grok_mode(grok: GrokClient, result=None) -> str:
+    """live when the names came from xAI. mock and offline must not authorize a later motion."""
+    if result is not None:
+        if result.offline:
+            return "offline"
+        if result.mock:
+            return "mock"
+        return "live"
+    if grok.mock:
+        return "mock"
+    if grok.offline():
+        return "offline"
+    return "live"
+
+
 @dataclass
 class Inventory:
     items: dict[int, dict] = field(default_factory=dict)   # box id -> {name, category, note}
     summary: str = ""
     latency_s: float = 0.0
     time: str = ""
+    grok_mode: str = "live"          # live | mock | offline
 
     def names(self) -> dict[int, str]:
         return {i: d["name"] for i, d in self.items.items()}
 
     def as_dict(self) -> dict:
         return {"summary": self.summary, "time": self.time, "latency_s": round(self.latency_s, 2),
+                "grok_mode": self.grok_mode,
                 "objects": [{"box_id": i, **d} for i, d in sorted(self.items.items())]}
 
 
@@ -69,6 +86,7 @@ def describe(grok: GrokClient, frame: np.ndarray, boxes: list[Box], lang: str = 
     inv = Inventory(time=time.strftime("%H:%M:%S"))
     if not boxes:
         inv.summary = "The table is empty." if lang != "it" else "Il tavolo è vuoto."
+        inv.grok_mode = _grok_mode(grok)
         return inv
     ctx = {"boxes": boxes, "colors": {b.id: color_name(crop(frame, b, pad=0)) for b in boxes}}
     r = grok.json(name="trova_inventory", prompt=PROMPT.format(n=len(boxes), lang=LANG.get(lang, LANG["en"])),
@@ -78,11 +96,19 @@ def describe(grok: GrokClient, frame: np.ndarray, boxes: list[Box], lang: str = 
         if o.get("box_id") in ids and o.get("name", "").lower() != "nothing":
             inv.items[o["box_id"]] = {"name": o["name"], "category": o.get("category", "other"), "note": o.get("note", "")}
     inv.summary, inv.latency_s = r.data.get("summary", ""), r.latency_s
+    inv.grok_mode = _grok_mode(grok, r)
     return inv
 
 
+def _map_tag(box: Box) -> str:
+    track = box.extra.get("track_id")
+    if track and track != box.id:
+        return f"{track} #{box.id}"
+    return str(track or box.id)
+
+
 def draw_map(frame: np.ndarray, boxes: list[Box], inv: Inventory) -> np.ndarray:
-    """The table with each box labelled '3 · blue pen'."""
+    """The table with each box labelled by its stable track id and name."""
     img = frame.copy()
     scale = max(0.5, frame.shape[1] / 1500)
     lw = max(2, int(frame.shape[1] / 600))
@@ -90,7 +116,8 @@ def draw_map(frame: np.ndarray, boxes: list[Box], inv: Inventory) -> np.ndarray:
         name = inv.items.get(b.id, {}).get("name")
         color = HIGHLIGHT if name else MARK
         cv2.rectangle(img, (int(b.x0), int(b.y0)), (int(b.x1), int(b.y1)), color, lw)
-        _label(img, f"{b.id} {name}" if name else str(b.id), b.x0, b.y0, color, scale)
+        tag = _map_tag(b)
+        _label(img, f"{tag} {name}" if name else tag, b.x0, b.y0, color, scale)
     return img
 
 

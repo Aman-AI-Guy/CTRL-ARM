@@ -9,7 +9,7 @@ const TrovaSpeech = (() => {
     ['labels', /\b(read (the )?labels?|check (the )?(lots?|batch|labels?)|leggi (le )?etichette|controlla (il )?lott[oi])\b/],
     ['watch_off', /\b(stop watching|smetti di sorvegliare)\b/],
     ['watch_on', /\b(watch the line|start watching|guard the line|sorveglia( la linea)?)\b/],
-    ['inventory', /\b(what('s| is) on the table|describe the table|cosa c'?(è|e) sul tavolo|descrivi il tavolo)\b/],
+    ['inventory', /\b(what('s| is) on the table|describe the table|cosa c'?(è|e) sul tavolo|descrivi il tavolo|fai una foto|quali oggetti vedi|che oggetti vedi|what do you see|dimmi quali oggetti)\b/],
     ['check', /^\s*(check|check now|controlla|controlla ora)\s*$|\b(check (the line|for changes)|what changed|line clearance|cosa (è|e) cambiato)\b/],
     ['reference', /\b(save (the )?reference|salva (il )?riferimento)\b/],
     ['home', /\b(go home|park the arm|vai a casa|parcheggia)\b/],
@@ -24,6 +24,9 @@ const TrovaSpeech = (() => {
     const q = t.trim().replace(/^(trova|find|where is|where's|dov'?(è|e)|cerca|show me|mostrami)\s+/, '');
     if (new RegExp(ROOM.source).test(t)) return {cmd: 'room', text: q.replace(ROOM, ' ').replace(/\s+/g, ' ').trim()};
     for (const [cmd, re] of RULES) if (re.test(t)) return {cmd};
+    const sel = q.match(/^(seleziona|select|scegli|choose)\s+(.+)$/);
+    if (sel) return {cmd: 'select', text: sel[2]};
+    if (/^(oggetto|object)\s+\d+$/.test(q)) return {cmd: 'select', text: q};
     if (!q) return {cmd: 'none'};
     return {cmd: ALL.test(t) ? 'find_all' : 'find', text: q};
   }
@@ -40,6 +43,11 @@ const TrovaSpeech = (() => {
   }
 
   // short sentences for the operator, in the language of the request
+  function phraseSelect(d, it) {
+    if (d.status === 'selected' && d.object) return (it ? 'Selezionato: ' : 'Selected: ') + (d.object.name || d.object.track_id);
+    if (d.status === 'clarify') return d.question || '';
+    return it ? 'Non lo vedo in questa foto.' : "I can't see that in this photo.";
+  }
   function phraseFind(d, it) {
     const r = d.result;
     if (r.status === 'found') return (it ? 'Trovato: ' : 'Found: ') + r.label + (d.moved ? (it ? '. Lo indico.' : '. Pointing at it.') : '.');
@@ -70,7 +78,7 @@ const TrovaSpeech = (() => {
   }
   function cancel() { try { rec && rec.stop(); } catch (e) {} }
 
-  return {parse, italian, say, phraseFind, phraseCheck, supported, listen, cancel};
+  return {parse, italian, say, phraseFind, phraseSelect, phraseCheck, supported, listen, cancel};
 })();
 
 if (typeof module !== 'undefined') module.exports = TrovaSpeech;

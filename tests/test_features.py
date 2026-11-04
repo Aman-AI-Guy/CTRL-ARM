@@ -537,7 +537,9 @@ def test_browser_speech_commands():
     said = ["Stop!", "fermo", "stop watching", "find my watch", "watch the line", "sorveglia la linea", "check",
             "what changed?", "check the lot", "leggi le etichette", "what's on the table", "trova la penna rossa",
             "all the pens", "tutte le forbici", "where is the red mug", "something to write with", "save the reference",
-            "look around for the red umbrella", "guarda in giro per la borsa nera"]
+            "look around for the red umbrella", "guarda in giro per la borsa nera",
+            "fai una foto e dimmi quali oggetti vedi", "what do you see", "seleziona la seconda penna blu",
+            "oggetto 3", "number 2"]
     js = ("const S = require(process.argv[1]); const [said, sw] = JSON.parse(process.argv[2]);"
           "console.log(JSON.stringify(said.map(t => S.parse(t, sw))));")
     out = subprocess.run([node, "-e", js, str(STATIC / "speech.js"), json.dumps([said, STOP_WORDS])],
@@ -555,6 +557,11 @@ def test_browser_speech_commands():
     assert got["where is the red mug"]["text"] == "the red mug"
     assert got["look around for the red umbrella"] == {"cmd": "room", "text": "the red umbrella"}
     assert got["guarda in giro per la borsa nera"] == {"cmd": "room", "text": "la borsa nera"}
+    assert got["fai una foto e dimmi quali oggetti vedi"]["cmd"] == "inventory"
+    assert got["what do you see"]["cmd"] == "inventory"
+    assert got["seleziona la seconda penna blu"] == {"cmd": "select", "text": "la seconda penna blu"}
+    assert got["oggetto 3"] == {"cmd": "select", "text": "oggetto 3"}
+    assert got["number 2"] == {"cmd": "find", "text": "number 2"}   # a find clarification, not a new selection
 
 
 # ---------------------------------------------------------------- feature 13: audit trail page, tamper evidence

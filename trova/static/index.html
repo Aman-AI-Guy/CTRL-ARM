@@ -174,7 +174,7 @@ async function answer(a) { const f = new FormData(); f.append('answer', a); try 
 
 function showFind(d) {
   const r = d.result, el = $('findres'); el.className = 'result show st-' + r.status;
-  if (S) S.pending_question = r.status === 'clarify' ? r.clarifying_question : null;   // a spoken answer may come before the next poll
+  if (S) { S.pending_select = null; S.pending_question = r.status === 'clarify' ? r.clarifying_question : null; }   // a spoken answer may come before the next poll
   let h = '';
   if (r.status === 'found') h = `<div class="big">Found: ${esc(r.label)}</div><div>${esc(r.reason)}</div>` +
       (!d.moved && !d.arm_blocked && d.table_mm ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at it</button></div>` : '') +
@@ -229,10 +229,13 @@ async function runSpoken(text) {
     post('/api/arm/stop'); if (p.also === 'watch_off') json('/api/watch', {on: false});
     return TrovaSpeech.say(it ? 'Fermo.' : 'Stopped.', $('pttlang').value);
   }
+  if (p.cmd === 'inventory') { if (S) S.pending_select = null; return doInventory(); }
+  if (S && S.pending_select && (p.cmd === 'find' || p.cmd === 'select')) return selectSpoken(p.text || text);
   if (p.cmd === 'find' && S && S.pending_question) return answer(text);   // the answer to Trova's question
+  if (p.cmd === 'select') return selectSpoken(p.text);
   if (p.cmd === 'find' || p.cmd === 'find_all') { $('q').value = p.text; return p.cmd === 'find' ? doFind() : doFindAll(); }
   if (p.cmd === 'room') { $('q').value = p.text; return lookAround(); }
-  const run = {check: doCheck, labels: readLabels, reference: saveRef, inventory: doInventory,
+  const run = {check: doCheck, labels: readLabels, reference: saveRef,
     watch_on: () => json('/api/watch', {on: true, point: $('watchpoint').checked}), watch_off: () => json('/api/watch', {on: false}),
     home: () => post('/api/arm/home')}[p.cmd];
   if (run) await run();
@@ -368,11 +371,53 @@ async function doInventory() {
   try { showInventory(await call('/api/inventory', {method: 'POST'})); } catch (e) {}
 }
 function showInventory(d) {
+  if (S) S.pending_select = null;
   const el = $('findres'); el.className = 'result show st-found';
-  el.innerHTML = `<div class="big">${esc(d.summary)}</div><ul class="changes">` +
-    d.objects.map(o => `<li><b>${o.box_id}</b> ${esc(o.name)} <span class="muted">· ${esc(o.category)} · ${esc(o.note)}</span></li>`).join('') +
-    `</ul><div class="muted">Grok ${d.latency_s}s</div><div class="thumbs"><a href="/files/${d.map}" target="_blank"><img src="/files/${d.map}"></a></div>`;
+  const snap = d.snapshot || {};
+  const rows = snap.objects || d.objects.map(o => ({track_id: o.box_id, box_id: o.box_id, name: o.name,
+    category: o.category || '', note: o.note || '', confidence: '', ambiguous: false, touches_border: false}));
+  const banner = snap.grok_mode && snap.grok_mode !== 'live'
+    ? `<div style="color:var(--warn)">Recognition is ${esc(snap.grok_mode)}. A selection from it cannot authorize motion.</div>` : '';
+  el.innerHTML = banner + `<div class="big">${esc(d.summary)}</div><ul class="changes">` +
+    rows.map(o => `<li><button onclick="pickObject(${Number(o.track_id)})"><b>${o.track_id}</b> ${esc(o.name)}</button> ` +
+      `<span class="muted">box ${o.box_id} · ${esc(o.category)} · ${esc(o.note)}` +
+      (o.confidence === '' || o.confidence == null ? '' : ` · confidence ${o.confidence}`) +
+      (o.ambiguous ? ' · similar objects' : '') + (o.touches_border ? ' · at the edge' : '') + `</span></li>`).join('') +
+    `</ul><div class="muted">Grok ${d.latency_s}s${snap.tracks_reset ? ' · tracks reset: ' + esc(snap.tracks_reset) : ''}</div>` +
+    `<div class="thumbs">` + [snap.image, snap.map || d.map].filter(Boolean).map(p =>
+      `<a href="/files/${p}" target="_blank"><img src="/files/${p}"></a>`).join('') + `</div>`;
   if (speakOn()) TrovaSpeech.say(d.summary, $('pttlang').value);
+}
+async function pickObject(trackId) {
+  const f = new FormData(); f.append('track_id', String(trackId));
+  try { showSelection(await call('/api/select', {method: 'POST', body: f})); } catch (e) {}
+}
+async function selectSpoken(text) {
+  const f = new FormData(); f.append('text', text);
+  try { showSelection(await call('/api/select', {method: 'POST', body: f})); } catch (e) {}
+}
+function showSelection(d) {
+  const el = $('findres');
+  if (S) {
+    S.pending_select = d.status === 'clarify' ? (d.question || true) : null;
+    if (S.pending_select) S.pending_question = null;
+  }
+  el.className = 'result show st-' + (d.status === 'selected' ? 'found' : d.status === 'clarify' ? 'clarify' : 'not_found');
+  let h = '';
+  if (d.status === 'selected' && d.object) {
+    const o = d.object;
+    h = `<div class="big">Selected: ${esc(o.name || ('object ' + o.track_id))}</div>` +
+        `<div>track ${o.track_id} · box ${o.box_id} · confidence ${o.confidence}` +
+        (o.ambiguous ? ' · similar objects' : '') + `</div>`;
+  } else if (d.status === 'clarify') {
+    h = `<div class="big">${esc(d.question || '')}</div><div class="row">` +
+      (d.candidates || []).map(o => `<button onclick="pickObject(${Number(o.track_id)})">${o.track_id} ${esc(o.name || '')}</button>`).join('') +
+      `</div>`;
+  } else h = `<div class="big">Not in this photo</div>`;
+  if (d.authoritative === false) h += `<div style="color:var(--warn)">Recognition is not live. This selection cannot authorize motion.</div>`;
+  h += `<div class="muted">${esc(d.reason || '')}</div>`;
+  el.innerHTML = h;
+  if (speakOn()) TrovaSpeech.say(TrovaSpeech.phraseSelect(d, $('pttlang').value === 'it-IT'), $('pttlang').value);
 }
 
 // ---- voice (Grok Voice realtime)
@@ -388,7 +433,7 @@ async function toggleVoice() {
   $('voicebtn').textContent = '⏹ Stop talking';
   const ok = await TrovaVoice.start({onStatus: s => $('vstatus').textContent = s, onLine: vline,
     onFind: d => { showFind(d); refresh(); }, onCheck: d => { showCheck(d); refresh(); }, onRefresh: refresh,
-    onInventory: d => showInventory(d), onFindAll: d => { showFindAll(d); refresh(); },
+    onInventory: d => showInventory(d), onSelect: d => showSelection(d), onFindAll: d => { showFindAll(d); refresh(); },
     onLabels: d => showLabels(d), onTool: () => refresh(), onClosed: () => { $('voicebtn').textContent = '🎤 Talk to Trova'; }}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
   if (!ok) $('voicebtn').textContent = '🎤 Talk to Trova';
 }

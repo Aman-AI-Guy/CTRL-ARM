@@ -42,7 +42,8 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
 - {move}
 - find_all: "point at all the pens", "show me every red thing". Say how many you found; then, if they want them
   shown, call point_at_found (it visits each one in turn).
-- describe_table: "what's on the table?", "cosa c'è sul tavolo?". Read the summary, then list names only if asked.
+- describe_table: "what's on the table?", "cosa c'è sul tavolo?", "fai una foto e dimmi quali oggetti vedi". Read the summary. Mention track ids only if asked. This does not move the arm.
+- select_object: the person picks one listed object ("the second blue pen", "oggetto 3", "seleziona la penna blu"). Pass their words as description. It never moves the arm. If the result is "clarify", ask its question and call select_object again with the answer. If authoritative is false, say the names are uncertain and do not offer to move.
 - save_reference: when they say the table is in its approved / clean state.
 - check_changes: "what changed?", "is the line clear?". Say how many changes, then each one in a few words, highest risk first.
 - stop_arm: whenever they say stop, wait, fermo, basta. The app also stops the arm on its own when it hears these words.
@@ -50,7 +51,7 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
 - {dog_line}
 
 # Safety
-The arm only points; it never grabs. If a tool returns an error or "blocked", say so and do not retry by yourself."""
+The arm only points; it never grabs. describe_table and select_object never move it. Pointing happens only when you call point_at_found after find_object. If a tool returns an error or "blocked", say so and do not retry by yourself."""
 
 
 def tools(dog: bool) -> list[dict]:
@@ -68,8 +69,12 @@ def tools(dog: bool) -> list[dict]:
          "description": "Find EVERY object matching a description (e.g. 'all the pens'); point_at_found then visits each.",
          "parameters": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]}},
         {"type": "function", "name": "describe_table",
-         "description": "Name every object on the table and summarise it in one sentence.",
+         "description": "Take a snapshot, name every object, and summarise it in one sentence. Does not move the arm.",
          "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "select_object",
+         "description": "Select one object from the latest snapshot by description or track id. Does not move the arm. If status is clarify, ask the question and call this again with the answer.",
+         "parameters": {"type": "object", "properties": {"description": {"type": "string"},
+                                                        "track_id": {"type": "integer"}}}},
         {"type": "function", "name": "save_reference",
          "description": "Save the current table as the approved reference state.",
          "parameters": {"type": "object", "properties": {}}},

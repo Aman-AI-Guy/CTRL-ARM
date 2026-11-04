@@ -71,7 +71,22 @@ const TrovaVoice = (() => {
     async describe_table() {
       const d = await api('/api/inventory'); if (d.error) return {error: d.error};
       h.onInventory && h.onInventory(d);
-      return {summary: d.summary, objects: d.objects.map(o => o.name)};
+      const rows = (d.snapshot && d.snapshot.objects) || d.objects;
+      return {summary: d.summary, grok_mode: d.snapshot && d.snapshot.grok_mode,
+              authoritative: !!(d.snapshot && d.snapshot.authoritative), motion_allowed: false,
+              objects: rows.map(o => ({track_id: o.track_id || o.box_id, name: o.name, ambiguous: !!o.ambiguous,
+                                       confidence: o.confidence}))};
+    },
+    async select_object({description, track_id}) {
+      const body = {};
+      if (description) body.text = description;
+      if (track_id != null && track_id !== '') body.track_id = String(track_id);
+      const d = await api('/api/select', body);
+      if (d.error) return {error: d.error};
+      h.onSelect && h.onSelect(d);
+      return {status: d.status, name: d.object && d.object.name, track_id: d.object && d.object.track_id,
+              question: d.question, candidates: (d.candidates || []).map(o => o.track_id),
+              authoritative: d.authoritative, motion_allowed: d.motion_allowed, reason: d.reason};
     },
     async save_reference() { const d = await api('/api/reference'); h.onRefresh && h.onRefresh(); return d.error ? {error: d.error} : {saved: true, objects: d.n_objects}; },
     async check_changes() {
