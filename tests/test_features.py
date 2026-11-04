@@ -16,7 +16,7 @@ SHADOWED = {"form", "submit", "reset", "click", "focus", "blur", "remove", "appe
 
 
 def test_inline_handlers_do_not_call_shadowed_names():
-    for page in ("index.html", "jury.html"):
+    for page in ("index.html", "jury.html", "history.html"):
         html = (STATIC / page).read_text()
         for handler in re.findall(r'\son\w+="([^"]*)"', html):
             for fn in re.findall(r"(?<![\w.])([A-Za-z_]\w*)\(", handler):
@@ -552,3 +552,44 @@ def test_browser_speech_commands():
     assert got["trova la penna rossa"] == {"cmd": "find", "text": "la penna rossa"}
     assert got["all the pens"]["cmd"] == got["tutte le forbici"]["cmd"] == "find_all"
     assert got["where is the red mug"]["text"] == "the red mug"
+
+
+# ---------------------------------------------------------------- feature 13: audit trail page, tamper evidence
+def test_history_rows_csv_and_tamper_evidence(tmp_path, monkeypatch):
+    import json
+
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/find", data={"text": "the red one", "move": "false"})
+    c.post("/api/reference", data={"describe": "false"})
+    st.source.table.tamper("add")
+    c.post("/api/changes")
+    c.post("/api/signoff", data={"operator": "Ana Rossi", "decision": "reject"})
+    c.post("/api/arm/stop")
+    assert c.get("/history").status_code == 200
+    d = c.get("/api/history").json()
+    kinds = [r["kind"] for r in d["rows"]]
+    assert kinds[:3] == ["arm_stop", "signoff", "change_check"] and "grok_call" not in kinds and d["grok_calls"] >= 1
+    check = next(r for r in d["rows"] if r["kind"] == "change_check")
+    assert check["result"].startswith("NOT CLEAR") and check["image"]
+    only = c.get("/api/history", params={"groups": "clearance"}).json()["rows"]
+    assert {r["group"] for r in only} == {"clearance"}
+    assert [r["kind"] for r in c.get("/api/history", params={"q": "ana rossi"}).json()["rows"]] == ["signoff"]
+    csv_text = c.get("/api/history.csv").text
+    assert csv_text.startswith("time,event id,kind") and "Ana Rossi" in csv_text
+
+    v = c.get("/api/history/verify").json()
+    assert v["ok"] and v["hashed"] == v["events"] > 5
+    log = tmp_path / "events.jsonl"
+    lines = log.read_text().splitlines()
+    i = next(n for n, line in enumerate(lines) if '"signoff"' in line)
+    e = json.loads(lines[i])
+    e["decision"] = "approve"                                  # someone edits the record afterwards
+    log.write_text("\n".join(lines[:i] + [json.dumps(e)] + lines[i + 1:]) + "\n")
+    v = c.get("/api/history/verify").json()
+    assert not v["ok"] and v["broken_at"] == i + 1
+    log.write_text("\n".join(lines[:i] + lines[i + 1:]) + "\n")   # or deletes the line
+    v = c.get("/api/history/verify").json()
+    assert not v["ok"] and v["broken_at"] == i + 1

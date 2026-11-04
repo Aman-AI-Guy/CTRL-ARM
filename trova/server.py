@@ -34,7 +34,7 @@ from .finder import find as grok_find, find_all as grok_find_all
 from .inventory import describe as describe_table, draw_map
 from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
-from . import preflight
+from . import history, preflight
 from .watch import Watch
 from . import labels as lbl
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
@@ -1087,6 +1087,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return st.audit.recent(n, kind)
 
     preflight.register(app, st)      # feature 9: GET /api/preflight
+    history.register(app, st, STATIC)   # feature 13: /history, /api/history(.csv), /api/history/verify
 
     # ------------------------------------------------------------------ feature 11: labels and batch
     @app.post("/api/batch")

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trova audit trail</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#f6f6f3;--panel:#fff;--ink:#16181d;--muted:#5d6370;--line:#dcdcd6;--accent:#b4009e;--ok:#137333;--bad:#b3261e;--warn:#9a6700;--btn:#eceae4}
+@media (prefers-color-scheme:dark){:root{--bg:#121316;--panel:#1b1d22;--ink:#eceef2;--muted:#9aa0ab;--line:#2c2f36;--accent:#ff5ee8;--ok:#5cc985;--bad:#ff7a70;--warn:#e0b04c;--btn:#262931}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
+header{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+h1{font-size:20px;margin:0}a{color:var(--accent)}.muted{color:var(--muted);font-size:13px}
+main{max-width:1300px;margin:0 auto;padding:12px 16px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+button,.chip{padding:7px 12px;border-radius:8px;border:1px solid var(--line);background:var(--btn);color:var(--ink);font-size:13px;cursor:pointer}
+.chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+input[type=search]{flex:1;min-width:160px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-size:15px}
+#verify{font-weight:600}.ok{color:var(--ok)}.bad{color:var(--bad)}
+.row{display:grid;grid-template-columns:150px 110px minmax(0,1fr) minmax(0,1.4fr) 96px;gap:10px;align-items:start;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+.row.head{font-weight:600;color:var(--muted);background:none;position:sticky;top:52px}
+.row img{width:96px;border-radius:6px;border:1px solid var(--line);display:block}
+.k{font:12px ui-monospace,Menlo,monospace;color:var(--muted)}.g-alarms .r,.g-errors .r{color:var(--bad)}
+.r b.clear{color:var(--ok)}.r b.notclear{color:var(--bad)}
+@media (max-width:760px){.row{grid-template-columns:minmax(0,1fr) 80px}.row.head{display:none}.row .t{grid-column:1/3}
+  .row .k{grid-column:1/3}.row img{width:80px}.row .w{grid-column:1}.row .r{grid-column:1}.row .i{grid-column:2;grid-row:3/5}}
+</style>
+</head>
+<body>
+<header><h1>Trova audit trail</h1><span class="muted">every request, decision, alarm and sign-off, newest first</span>
+  <span style="margin-left:auto" class="muted"><a href="/">back to Trova</a></span></header>
+<main>
+  <div class="bar" id="chips"></div>
+  <div class="bar"><input type="search" id="q" placeholder="search: a request, an operator, a lot number…" oninput="load()">
+    <label class="muted"><input type="checkbox" id="auto" checked> live</label>
+    <a id="csv" href="/api/history.csv"><button>Download CSV</button></a>
+    <button onclick="verify()">Verify log integrity</button><span id="verify" class="muted"></span></div>
+  <div class="muted" id="count"></div>
+  <div class="row head"><div>Time</div><div>Event</div><div>What</div><div>Result</div><div>Photo</div></div>
+  <div id="rows"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const NAMES = {finds: 'Finds', clearance: 'Line clearance', alarms: 'Alarms', arm: 'Arm', setup: 'Setup', voice: 'Voice', dog: 'Dog', errors: 'Errors', other: 'Other'};
+let on = new Set(), groups = [];
+function chips(counts) {
+  $('chips').innerHTML = groups.concat(['other']).map(g => `<span class="chip ${on.has(g) ? 'on' : ''}" onclick="toggleGroup('${g}')">${NAMES[g] || g} ${counts[g] || 0}</span>`).join('') +
+    `<span class="chip ${on.size ? '' : 'on'}" onclick="toggleGroup('')">All</span>`;
+}
+function toggleGroup(g) { if (!g) on.clear(); else on.has(g) ? on.delete(g) : on.add(g); load(); }
+function verdict(r) { return esc(r).replace(/^LINE CLEAR/, '<b class="clear">LINE CLEAR</b>').replace(/^NOT CLEAR/, '<b class="notclear">NOT CLEAR</b>'); }
+async function load() {
+  const qs = new URLSearchParams({groups: [...on].join(','), q: $('q').value, n: 400});
+  $('csv').href = '/api/history.csv?' + qs;
+  let d; try { d = await (await fetch('/api/history?' + qs)).json(); } catch (e) { return; }
+  groups = d.groups; chips(d.counts);
+  $('count').textContent = `${d.rows.length} events shown · ${d.grok_calls} Grok calls logged (not shown)`;
+  $('rows').innerHTML = d.rows.map(r => `<div class="row g-${r.group}"><div class="t">${esc(r.time)}</div><div class="k">${esc(r.kind)}</div>` +
+    `<div class="w">${esc(r.what)}</div><div class="r">${verdict(r.result)}</div>` +
+    `<div class="i">${r.image ? `<a href="/files/${esc(r.image)}" target="_blank"><img loading="lazy" src="/files/${esc(r.image)}" alt=""></a>` : ''}</div></div>`).join('') ||
+    '<p class="muted">Nothing yet.</p>';
+}
+async function verify() {
+  const d = await (await fetch('/api/history/verify')).json();
+  $('verify').className = d.ok ? 'ok' : 'bad';
+  $('verify').textContent = d.ok ? `✓ intact: ${d.hashed} of ${d.events} events chained (last ${d.last_hash})`
+    : `✗ broken at line ${d.broken_at}: ${d.reason}`;
+}
+load(); setInterval(() => { if ($('auto').checked && document.activeElement !== $('q')) load(); }, 3000);
+</script>
+</body>
+</html>
