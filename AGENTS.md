@@ -149,7 +149,11 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 - First supervised run: proven only against `cartesian:fake` + `armsim`. Real xArm speed, stop/hold, reached check,
   controller-reported pose and pixel→mm accuracy are unmeasured until the runbook (`docs/first-supervised-run.md`) is
   done. The bring-up's `zmax` (max(home z, Z) + 80) can be below the default hover (Z + 100): the mode then refuses.
-  Joint-space homing is not covered by the 20 mm/s cap (use the controller's reduced mode and a low joint speed).
+  Joint-space moves are not covered by the 20 mm/s cap: Arm home, and stage 1 itself when the survey pose's flange is
+  not level. The xArm 5 moves in Cartesian lines only with roll ±180 and pitch 0 (manual p. 156); otherwise
+  `XArmBackend.move_linear` uses `motion_type=2`, a curve the safety box does not check. The controller's reduced mode
+  (it limits joint speed too) and safety boundary are the backstop. The runbook's controller settings were checked
+  against the xArm 5 user manual; its reduced-mode numbers are suggestions (the manual gives none).
 - No live Grok / Grok Voice call has run yet (keys arrive at the event).
 - Arm drivers are tested against fakes, not real robots or simulators. Elite is the least certain.
 - Go2 dog driver is a template.
@@ -165,6 +169,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-04 First-run runbook checked against the xArm 5 user manual: mounting, payload, collision sensitivity (≥3), self-collision, rebound, reduced mode (limits joint speed), safety boundary, E-stop sag and recovery, singularity near the base, joint error codes. Documented that stage 1 from a tilted survey pose is joint-planned, not straight. Docs only; 145 tests pass.
 - 2026-11-04 First supervised run mode (`TROVA_FIRST_RUN=1`, off by default): two-stage find → hover → descend with single-use, target-bound confirmations through `point_last` + `authorize_motion`, 20 mm/s cap, show-before-moving panel with the collision warning, arrival pose in the audit, ruler error → `arm_accuracy` / `arm_missed`, preflight items, calibration stores its survey pose; runbook `docs/first-supervised-run.md`. 145 offline tests pass; no hardware run.
 - 2026-11-04 Independent safety review fixes: disarmed hardware boots; fsynced atomic lift marker and conservative recovery of missing/corrupt records; no xArm constructor recovery/enabling; immutable watch generations/tickets/worker identity prevent old-callback authority reuse; mandatory hardware operator authentication and authenticated audit identity; nonce-bound one-use STOP confirmations; checked SDK stop/recovery/state results without implicit restart; unavailable FK/missing limits refuse joint motion. Review probes promoted into repository regressions: 131 offline tests passed (0 failed/skipped); Ruff unavailable. No secrets/hardware settings changed.
 - 2026-11-04 P0 motion fixes: independent operator-reset software STOP latch; cancelled request epochs survive reset, concurrent admission, delayed Grok, clarification/confirmation and watch callbacks. Central authorization guards home/camera/room/watch motion, Cartesian limits+home fail closed, move=false never repositions; interrupted lifts require separate staff-confirmed recovery with STOP latched. Offline regression coverage added; no hardware/configuration changes.

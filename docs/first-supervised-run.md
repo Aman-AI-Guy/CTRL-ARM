@@ -2,15 +2,23 @@
 
 This is the first time Trova moves the real arm to an object. Everything below is done by people, on site, with the
 staff member responsible for the arm. Trova's software STOP is **not** safety-rated, and Trova has **no collision
-avoidance**. The physical E-stop is the only stop you can rely on.
+avoidance**. The physical E-stop is the stop of last resort. The xArm manual says it "should not be used as a risk
+reduction measure": the real protection is slow speed, reduced mode, the safety boundary, collision detection and a
+clear area.
+
+Checked against the UFACTORY xArm 5 user manual (manualslib 1893450). The manual's page numbers are given below.
 
 What the mode does (`TROVA_FIRST_RUN=1`, off by default):
 
 - The find never moves the arm, even with `move=true`. The UI shows the photo with the chosen box, the target in mm,
   the height, the distance from the current pose, the speed and "Collision avoidance: NOT PRESENT. Hold the physical
   E-stop."
-- **Stage 1** (one confirmation) moves the tip straight to `TROVA_ARM_Z_MM + TROVA_FIRST_RUN_HOVER_MM` (default +100 mm)
-  above the object. **Stage 2** (a new confirmation, issued only after stage 1 arrived) descends straight down to
+- **Stage 1** (one confirmation) moves the tip to `TROVA_ARM_Z_MM + TROVA_FIRST_RUN_HOVER_MM` (default +100 mm) above
+  the object. **This path is a straight line only if the flange is level at the start.** The xArm 5 moves in Cartesian
+  lines only with the flange parallel to the base (roll ±180°, pitch 0; manual p. 156). If the flange is tilted, as at a
+  camera survey pose, the driver plans this move in joint space (`motion_type=2`). The tip then follows a curve whose
+  low points the safety box does not check, and the 20 mm/s figure is not guaranteed to be the tip speed.
+- **Stage 2** (a new confirmation, issued only after stage 1 arrived) descends straight down to
   `TROVA_ARM_Z_MM`. Each confirmation can be used once, only for its own stage and target, within 60 s, and never
   after a STOP.
 - Speed is at most 20 mm/s for every Cartesian move (`TROVA_FIRST_RUN_SPEED_MM_S` can only lower it).
@@ -26,16 +34,32 @@ What the mode does (`TROVA_FIRST_RUN=1`, off by default):
 .venv/bin/python -m trova.arm.bringup <xarm ip> --camera-on-arm
 ```
 
-Follow its steps with staff at the E-stop. Then, in UFACTORY Studio, **with staff**, set these and write down the
-values you chose:
+Follow its steps with staff at the E-stop. Then, in xArm Studio → Settings, **with staff**, set the items below and
+write down each value. The manual gives no numeric values for the reduced-mode limits, so the numbers here are
+suggestions to agree with staff.
 
-- [ ] **Reduced mode ON**, with a reduced TCP speed limit of ≤ 50 mm/s. This also limits the joint-space homing
-      move, which Trova's mm/s cap does not cover.
-- [ ] **Collision sensitivity** high (as high as staff accept without false trips).
-- [ ] **Safety boundary** (controller fence) ON, at or just outside `TROVA_ARM_LIMITS`. Step 1 of the bring-up
-      prints whether it is on.
-- [ ] TCP offset of the pointer set (or `TROVA_ARM_TCP_MM`).
-- [ ] The physical E-stop is tested: pressed, the arm stops, then released and recovered by staff.
+- [ ] **Mounting direction** matches the real mount (Floor is the default; manual p. 82). A wrong value makes the arm
+      misjudge gravity. That causes frequent collision stops and "uncontrolled motion" in manual mode.
+- [ ] **TCP payload**: the mass and centre of gravity of everything on the flange: pointer, camera sphere and LED ring
+      (manual p. 71). Weigh them. Wrong payload values cause false collision alarms.
+- [ ] **TCP offset**: the pointer tip from the flange centre (manual p. 71), or set `TROVA_ARM_TCP_MM`. Use **one**
+      of the two, not both.
+- [ ] **Collision sensitivity** 4-5. The scale is 0-5, 0 is off, and higher stops on less extra torque. The manual
+      says not to go below 3 (p. 67). Lower it only for false trips, and only after payload and mounting are confirmed
+      right.
+- [ ] **Self-collision detection** ON (manual p. 93).
+- [ ] **Collision rebound**: decide with staff. If it is ON, the arm moves backward on its own after a collision. If
+      it is OFF, the arm stays where the collision was detected (p. 93). For this run, OFF is the more predictable
+      choice.
+- [ ] **Reduced mode** ON (manual p. 81). It limits the maximum linear speed, the maximum **joint speed** and the joint
+      range. Suggested: linear ≤ 50 mm/s and joint ≤ 20°/s. This is the only limit on joint-space moves (stage 1 from
+      a tilted survey pose, and Arm home), because Trova's 20 mm/s cap only applies to straight-line moves.
+- [ ] **Safety boundary** ON (manual p. 80), at or just outside `TROVA_ARM_LIMITS`. It must include the survey pose
+      and the hover height. If the TCP leaves it, the controller stops the arm. Step 1 of the bring-up prints whether
+      it is on.
+- [ ] **Test the E-stop**: press it, then recover. It cuts arm power within 300 ms, and the manual says the arm "will
+      slightly brake and fall" (p. 20), so the tip **sags** a little. Recover by twisting the button in the arrow
+      direction (the power light comes on), then enable the arm (p. 20).
 
 ## 2. Measure and set the environment (you)
 
@@ -44,7 +68,7 @@ Put these in `.env`. Measure each value on the real arm; never copy them from an
 ```
 TROVA_ARM=xarm:<ip>
 TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax     # from the bring-up; zmax must be >= TROVA_ARM_Z_MM + hover
-TROVA_ARM_Z_MM=                                     # pointing height: tip 30-50 mm above the tallest object
+TROVA_ARM_Z_MM=                                     # pointing height: tip >= 50 mm above the tallest object (E-stop sag)
 TROVA_ARM_TCP_MM=0,0,<pointer length>
 TROVA_CAMERA_ON_ARM=1
 TROVA_CAMERA=<index from python -m trova.camera --list>
@@ -56,6 +80,9 @@ TROVA_FIRST_RUN=1
 # optional: TROVA_FIRST_RUN_SPEED_MM_S=10  TROVA_FIRST_RUN_HOVER_MM=100  TROVA_ARM_MISS_MM=10
 ```
 
+- [ ] Survey pose and target spots: keep them **away from the base axis**. When the wrist comes close to the J1 axis,
+      J1 can turn far too fast and control can be lost (singularity, manual p. 156). The manual gives no distance:
+      agree on a keep-out radius around the base with staff and put no test objects there.
 - [ ] Check that `zmax ≥ TROVA_ARM_Z_MM + 100`. The bring-up sets `zmax` to the higher of (home z, Z) + 80 mm, so the
       default hover can fall **outside** the box. The UI then shows "Safety box: … outside" and refuses. Either raise
       `zmax` (only if the space above is clear, with staff) or set `TROVA_FIRST_RUN_HOVER_MM` lower (e.g. 60).
@@ -91,7 +118,11 @@ curl -s -X POST "localhost:8000/api/arm/reset?token=$TROVA_TOKEN" -H "x-trova-op
 
 ## 6. First move: stage 1 (hover) only
 
-- [ ] Area clear. A second person watches the arm, not the screen. Your hand is **on the E-stop**.
+- [ ] Area clear. A second person watches the arm, not the screen. Your hand is **on the E-stop**. Nobody's hand is
+      under the tip (it sags on an E-stop).
+- [ ] Check whether the survey pose's flange is level (the pendant / Studio shows roll ±180, pitch 0). If it is not,
+      stage 1 is a **joint-space curve** from the survey pose, not a straight line. Watch it all the way, and be
+      ready to stop the first time it heads lower than the hover height.
 - [ ] Read the panel: the target, the height, the distance from the current pose and the speed. Then **Confirm
       stage 1**.
 - [ ] The tip ends about 100 mm above the object. Check that the audit line `arm_approach` (stage 1) shows `reached`
@@ -99,7 +130,8 @@ curl -s -X POST "localhost:8000/api/arm/reset?token=$TROVA_TOKEN" -H "x-trova-op
 
 ## 7. Stage 2, measure, repeat
 
-- [ ] Read the new panel: the height is `TROVA_ARM_Z_MM`, about 100 mm down. **Confirm stage 2**.
+- [ ] Read the new panel: the height is `TROVA_ARM_Z_MM`, about 100 mm down. **Confirm stage 2**. After stage 1 the
+      flange is level, so this is a straight line down.
 - [ ] Measure the horizontal tip-to-object-centre error with a ruler. Type it in and press **Record error**.
 - [ ] Press **Arm home**. This is a joint move from pointing height back to the survey pose. **It does not rise
       first: watch the path**, E-stop in hand.
@@ -123,7 +155,8 @@ The same data is in **history** (group "arm": `arm_approach`, `arm_accuracy`) an
 - it moves noticeably faster than 20 mm/s;
 - in stage 2 it moves sideways instead of straight down;
 - anyone enters the area, or the second person says stop;
-- the homing move swings toward the table or the camera cable.
+- the homing move swings toward the table or the camera cable;
+- stage 1 from the survey pose curves lower than the hover height.
 
 **Abandon the session (no more moves today, debrief) if:**
 
@@ -132,7 +165,11 @@ The same data is in **history** (group "arm": `arm_approach`, `arm_accuracy`) an
 - the controller reports a pose more than 10 mm from the target (`offset_mm` in the audit), or reports collision or
   protective-stop errors that you cannot explain;
 - the dry-test target and the ruler disagree by more than 10 mm after one recalibration;
-- software STOP does not hold the arm (it keeps moving after STOP).
+- software STOP does not hold the arm (it keeps moving after STOP);
+- the controller reports a joint error such as S11 overcurrent, S12 overspeed or S14 position command over-limit
+  (manual p. 162). Recovery is an E-stop restart, but the cause has to be understood before any more moves;
+- collision stops repeat with nothing touched. Check the payload and mounting direction; don't just lower the
+  sensitivity.
 
 After any E-stop: staff recover the controller, you check the area, then use the software reset (step 2). Old
 confirmations are dead; find again.
