@@ -504,3 +504,19 @@ def test_pdf_clearance_record(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
     assert r.content[:4] == b"%PDF" and len(r.content) > 5000                # images embedded
     assert (tmp_path / "records" / f"clearance_{chk['event_id']}.pdf").exists()
+
+
+# ---------------------------------------------------------------- feature 4: jury scoreboard
+def test_jury_scoreboard_and_reset(tmp_path, monkeypatch):
+    app, c = _client(tmp_path, monkeypatch)
+    assert "scoreboard" in c.get("/jury").text.lower()
+    c.post("/api/background", data={"mode": "capture"})
+    colors = [o.split()[0] for o in c.get("/api/state").json()["source"]["objects"]]
+    unique = next(col for col in colors if colors.count(col) == 1)
+    c.post("/api/find", data={"text": f"the {unique} one"})
+    c.post("/api/judge", json={"kind": "find", "correct": True})
+    m = c.get("/api/state").json()["metrics"]
+    assert m["find_ok"] == 1 and m["median_find_s"] is not None
+    c.post("/api/metrics/reset")
+    m = c.get("/api/state").json()["metrics"]
+    assert m["find_ok"] == 0 and m["median_find_s"] is None

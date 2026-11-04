@@ -175,6 +175,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def index():
         return (STATIC / "index.html").read_text()
 
+    @app.get("/jury", response_class=HTMLResponse)
+    def jury():
+        """Feature 4: full-screen live scoreboard for the projector."""
+        return (STATIC / "jury.html").read_text()
+
+    @app.post("/api/metrics/reset")
+    def api_metrics_reset():
+        st.metrics = {"find_ok": 0, "find_wrong": 0, "find_times": [], "checks": 0, "check_ok": 0, "false_alarms": 0,
+                      "missed": 0}
+        st.audit.event("metrics_reset")
+        return {"ok": True}
+
     # ------------------------------------------------------------------ live view
     @app.get("/api/frame.jpg")
     def frame_jpg(boxes: int = 1, max_w: int = 1280):
@@ -226,7 +238,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
                                                 "search": st.dog_search.as_dict() if st.dog_search else None},
             "metrics": {**{k: v for k, v in m.items() if k != "find_times"}, "find_judged": judged,
-                        "avg_find_s": round(sum(m["find_times"]) / len(m["find_times"]), 2) if m["find_times"] else None},
+                        "avg_find_s": round(sum(m["find_times"]) / len(m["find_times"]), 2) if m["find_times"] else None,
+                        "median_find_s": round(sorted(m["find_times"])[len(m["find_times"]) // 2], 2) if m["find_times"] else None},
         }
 
     # ------------------------------------------------------------------ find

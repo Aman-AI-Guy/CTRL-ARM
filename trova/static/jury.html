@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trova scoreboard</title>
+<style>
+:root{--bg:#0d0f13;--panel:#181b21;--ink:#f2f3f5;--muted:#9aa0ab;--accent:#ff54de;--ok:#48d67c;--bad:#ff6258;--line:#2a2e36}
+:root[data-theme="light"]{--bg:#f6f6f3;--panel:#fff;--ink:#16181d;--muted:#5d6370;--accent:#b4009e;--ok:#137333;--bad:#b3261e;--line:#dcdcd6}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:18px/1.35 system-ui,-apple-system,sans-serif;min-height:100vh}
+header{display:flex;align-items:center;gap:16px;padding:18px 28px}h1{margin:0;font-size:30px}.sub{color:var(--muted)}
+header .r{margin-left:auto;display:flex;gap:10px}
+button{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px 14px;font-size:15px;cursor:pointer}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;padding:0 28px}
+.k{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 22px}
+.k .v{font-size:64px;font-weight:800;letter-spacing:-1px;line-height:1.05}.k .l{color:var(--muted);font-size:17px}
+.v.accent{color:var(--accent)}.v.ok{color:var(--ok)}.v.bad{color:var(--bad)}
+.main{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:16px;padding:16px 28px 28px}
+img{width:100%;border-radius:14px;border:1px solid var(--line);display:block;background:#000}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 22px;margin-bottom:16px}
+.card .h{color:var(--muted);font-size:14px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.big{font-size:28px;font-weight:700}
+@media (max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));padding:0 16px}.main{grid-template-columns:minmax(0,1fr);padding:16px}.k .v{font-size:44px}header{padding:14px 16px;flex-wrap:wrap}}
+</style>
+</head>
+<body>
+<header><h1>Trova</h1><span class="sub">Track A · CTRL+F: SEA · live score</span>
+  <span class="r"><button onclick="theme()">Light / dark</button><button onclick="reset()">Reset score</button></span></header>
+<section class="grid">
+  <div class="k"><div class="v accent" id="found">0 / 0</div><div class="l">objects found (jury requests)</div></div>
+  <div class="k"><div class="v" id="time">–</div><div class="l">median time to find (s)</div></div>
+  <div class="k"><div class="v ok" id="fa">0</div><div class="l">false alarms in "what changed"</div></div>
+  <div class="k"><div class="v" id="checks">0 / 0</div><div class="l">change checks fully right</div></div>
+</section>
+<section class="main">
+  <div><img id="live" alt="Live camera with the latest find"></div>
+  <div>
+    <div class="card"><div class="h">Latest request</div><div class="big" id="req">–</div><div class="sub" id="ans"></div></div>
+    <div class="card"><div class="h">Line clearance</div><div class="big" id="verdict">–</div><div class="sub" id="vsum"></div></div>
+    <div class="card"><div class="h">Arm</div><div id="arm" class="sub">–</div></div>
+  </div>
+</section>
+<script>
+const $ = id => document.getElementById(id), esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+function theme() { const r = document.documentElement; r.dataset.theme = r.dataset.theme === 'light' ? '' : 'light';
+  try { localStorage.setItem('trova-jury-theme', r.dataset.theme); } catch (e) {} }
+try { document.documentElement.dataset.theme = localStorage.getItem('trova-jury-theme') || ''; } catch (e) {}
+async function reset() { if (confirm('Reset the score to zero?')) { await fetch('/api/metrics/reset', {method: 'POST'}); tick(); } }
+const live = $('live');
+function next() { live.src = '/api/frame.jpg?boxes=0&t=' + Date.now(); }
+live.onload = () => setTimeout(next, 400); live.onerror = () => setTimeout(next, 1500); next();
+async function tick() {
+  let S; try { S = await (await fetch('/api/state')).json(); } catch (e) { return; }
+  const m = S.metrics;
+  $('found').textContent = `${m.find_ok} / ${m.find_judged}`;
+  $('time').textContent = m.median_find_s ?? '–';
+  $('fa').textContent = m.false_alarms; $('fa').className = 'v ' + (m.false_alarms ? 'bad' : 'ok');
+  $('checks').textContent = `${m.check_ok} / ${m.checks}`;
+  const f = S.last_find;
+  if (f) { const r = f.result; $('req').textContent = f.request ? `“${f.request}”` : '[photo]';
+    $('ans').innerHTML = `${r.status === 'found' ? 'Found: ' + esc(r.label) : r.status === 'clarify' ? 'Asks: ' + esc(r.clarifying_question) : 'Not found'} · ${f.total_s}s<br>${esc(r.reason)}`; }
+  const c = S.last_check;
+  if (c) { const r = c.result; $('verdict').textContent = r.line_clear ? 'LINE CLEAR' : `NOT CLEAR · ${r.changes.length} change(s)`;
+    $('verdict').style.color = r.line_clear ? 'var(--ok)' : 'var(--bad)'; $('vsum').textContent = r.summary; }
+  $('arm').textContent = `${S.arm.name}: ${S.arm.state}` + (S.arm.error ? ' · ' + S.arm.error : '');
+}
+tick(); setInterval(tick, 1000);
+</script>
+</body>
+</html>
