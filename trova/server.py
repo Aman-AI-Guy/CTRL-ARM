@@ -985,6 +985,7 @@ class ProviderStation(BaseModel):
 
 class ProviderReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    reference_id: str | None = None
     snapshot_id: str
     pixel: list[float]
     measured_mm: list[float]
@@ -2011,10 +2012,11 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                            'binding_sha256': historical.binding_hash(historical.station()),
                            'image': snap['image'], 'image_sha256': sha256(st.s.data_dir / snap['image']),
                            'image_size': [snap['width'], snap['height']], 'robot': robot,
-                           'pixel': pixel.tolist(), 'measured_mm': measured.tolist(),
+                           'pixel': pixel.tolist(), 'measured_mm': measured.tolist(), 'reference_id':body.reference_id,
                            'measurement_note': body.measurement_note, 'measurement_uncertainty_mm': body.measurement_uncertainty_mm, 'recorded_at': time.time(),
                            'camera_profile': profile, 'provenance': 'operator_independent_reference'}
-                    predicted = historical.cal.pixel_to_plane(*pixel, robot['joints'], float(measured[2]))
+                    plane = historical.station()['table_plane']
+                    predicted = historical.cal.pixel_to_plane(*pixel,robot['joints'],float(plane['c']),(float(plane['a']),float(plane['b'])))
                     projection = historical.cal.robot_to_pixel(measured, robot['joints'])
                 except (ValueError, TypeError, KeyError) as exc:
                     raise HTTPException(400, str(exc)) from None

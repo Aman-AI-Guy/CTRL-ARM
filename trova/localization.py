@@ -372,6 +372,7 @@ class HistoricalProvider(ProviderOperations):
                 )
             refs = self.references()
             errors, pixels, points, joints, poses = [], [], [], [], []
+            observations = []
             binding_hash = self.binding_hash(station)
             for row in refs:
                 if (
@@ -435,13 +436,21 @@ class HistoricalProvider(ProviderOperations):
                     raise ValueError(
                         "Independent reference TCP/joints disagree with the bound flange model"
                     )
-                predicted = self.cal.pixel_to_plane(*uv, q, float(p[2]))
+                plane = station["table_plane"]
+                predicted = self.cal.pixel_to_plane(*uv,q,float(plane["c"]),(float(plane["a"]),float(plane["b"])))
+                observations.append({"reference_id":row.get("reference_id"),"image":row["image"],
+                    "predicted_mm":predicted.tolist(),"measured_mm":p.tolist(),
+                    "signed_error_mm":(predicted-p).tolist(),"error_mm":float(np.linalg.norm(predicted-p)),
+                    "measurement_uncertainty_mm":row.get("measurement_uncertainty_mm"),
+                    "joints_deg":q.tolist(),"T_base_camera":self.cal.camera_pose(q).tolist(),
+                    "plane_residual_mm":float(p[2]-(plane["a"]*p[0]+plane["b"]*p[1]+plane["c"]))})
                 projected = self.cal.robot_to_pixel(p, q)
                 errors.append(float(np.linalg.norm(predicted - p)))
                 pixels.append(float(np.linalg.norm(np.asarray(projected) - uv)))
                 points.append(p)
                 joints.append(q)
                 poses.append(row["robot"]["pose6"])
+            metrics["observations"] = observations
             metrics["independent_samples"] = len(errors)
             if len(errors) < 6:
                 reasons.append(
