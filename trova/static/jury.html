@@ -21,12 +21,14 @@ img{width:100%;border-radius:14px;border:1px solid var(--line);display:block;bac
 .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 22px;margin-bottom:16px}
 .card .h{color:var(--muted);font-size:14px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
 .big{font-size:28px;font-weight:700}
+#stop{background:#b3261e;border-color:#b3261e;color:#fff;font-weight:800}
 @media (max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));padding:0 16px}.main{grid-template-columns:minmax(0,1fr);padding:16px}.k .v{font-size:44px}header{padding:14px 16px;flex-wrap:wrap}}
 </style>
 </head>
 <body>
 <header><h1>Trova</h1><span class="sub">Track A · CTRL+F: SEA · live score</span>
-  <span class="r"><button onclick="theme()">Light / dark</button><button onclick="resetScore()">Reset score</button></span></header>
+  <span class="r"><button onclick="theme()">Light / dark</button><button onclick="resetScore()">Reset score</button>
+    <button id="stop" onclick="stopArm()" title="Space bar or Escape">STOP</button></span></header>
 <div id="alarm" style="display:none;background:var(--bad);color:#fff;font-size:28px;font-weight:700;padding:14px 24px"></div>
 <section class="grid">
   <div class="k"><div class="v accent" id="found">0 / 0</div><div class="l">objects found (jury requests)</div></div>
@@ -71,6 +73,11 @@ async function tick() {
   $('alarm').textContent = a ? `ALARM ${a.time}: ${a.summary}` : (w && w.on ? 'Watching the cleared line: ' + w.status : '');
 }
 tick(); setInterval(tick, 1000);
+// STOP from the scoreboard too (it is often the foreground window): Escape and the space bar
+const stopArm = () => fetch('/api/arm/stop', {method: 'POST'});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' || e.code === 'Space') { e.preventDefault(); stopArm(); }
+});
 </script>
 </body>
 </html>

@@ -1104,7 +1104,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         c = st.last_check
         if not c:
             raise HTTPException(400, "Run a check first")
-        pdf = build_record_pdf(c, st.s.data_dir)
+        pdf = build_record_pdf(c, st.s.data_dir, audit=st.audit.anchor())
         out = st.s.data_dir / "records"
         out.mkdir(exist_ok=True)
         (out / f"clearance_{c['event_id']}.pdf").write_bytes(pdf)

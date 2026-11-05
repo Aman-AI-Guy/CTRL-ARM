@@ -47,7 +47,7 @@ def _img(path: Path, width_mm: float):
     return Image(str(path), width=width_mm * mm, height=width_mm * mm * h / w)
 
 
-def build(check: dict, data_dir: Path) -> bytes:
+def build(check: dict, data_dir: Path, audit: dict | None = None) -> bytes:
     r = check["result"]
     clear = r["line_clear"]
     s = [Paragraph("Line clearance record", h1),
@@ -97,6 +97,9 @@ def build(check: dict, data_dir: Path) -> bytes:
         s.append(_p("Not signed off yet. Operator: ____________________   Decision: approve / reject   Time: ________", base))
     s += [Spacer(1, 10), _p("Trova assists the operator; the operator decides. Every request, Grok decision and "
                             f"sign-off is in the audit log (data/events.jsonl), check id {check['event_id']}.", small)]
+    if audit:
+        s.append(_p(f"Audit log when printed: {audit['events']} events, last hash {audit['last_hash']}. "
+                    "Verify on the history page: the log must still reach this hash.", small))
     buf = io.BytesIO()
     SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
                       title=f"Line clearance record {check['event_id']}", author="Trova").build(s)
