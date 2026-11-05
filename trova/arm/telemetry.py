@@ -43,6 +43,13 @@ class GuardedSDK:
         object.__setattr__(self, "_raw", raw)
         object.__setattr__(self, "calls", [])
 
+    def read_property(self, name):
+        if name not in {'mode', 'tcp_offset', 'world_offset'}:
+            raise TelemetryWriteRefused(f'{name} is not an allowed telemetry property')
+        self.calls.append('read_property:'+name)
+        value = getattr(self._raw,name,None)
+        return list(value) if isinstance(value,(tuple,list)) else value
+
     def __getattr__(self, name: str):
         if name not in READ_METHODS:
             def refused(*_args, **_kwargs):
@@ -145,6 +152,21 @@ class XArmTelemetry:
             "sync_precision_claimed": False,
         }
 
+    def configuration(self):
+        with self._lock:
+            return {name:self.sdk.read_property(name) for name in ('mode','tcp_offset','world_offset')}
+
+    def forward(self, joints):
+        import math
+        q = [float(v) for v in joints]
+        if len(q) != 5 or not all(math.isfinite(v) for v in q):
+            raise ValueError('Five finite joint angles in degrees are required')
+        with self._lock:
+            code, pose = _pair(self.sdk.get_forward_kinematics(q,input_is_radian=False,return_is_radian=False))
+        if code != 0 or not pose or len(pose)<6:
+            return {'ok':False,'pose6':None,'reason':f'Controller FK query returned {code}','motion_sent':False}
+        return {'ok':True,'pose6':[float(v) for v in pose[:6]],'motion_sent':False}
+
     def inverse(self, pose6, ref_joints=None) -> dict:
         """Ask the controller for joint angles. This does not move the arm."""
         from ..motion import XARM5_JOINT_LIMITS_DEG
@@ -216,6 +238,15 @@ class LazyXArmTelemetry:
         except Exception as exc:  # noqa: BLE001
             return _failed(str(exc))
         return inner.read()
+
+    def configuration(self):
+        try:
+            return self._ensure().configuration()
+        except Exception as exc:  # noqa: BLE001 - inaccessible configuration remains unknown
+            return {'mode':None,'tcp_offset':None,'world_offset':None,'error':str(exc)}
+
+    def forward(self, joints):
+        return self._ensure().forward(joints)
 
     def inverse(self, pose6, ref_joints=None) -> dict:
         try:
