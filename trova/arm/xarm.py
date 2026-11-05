@@ -1,7 +1,7 @@
 """UFactory xArm5 via the official pure-Python SDK:  pip install xarm-python-sdk
 
 No pendant: release the e-stop, power the box, put the Mac on its subnet (often 192.168.1.x).
-xArm5 is 5-axis: Cartesian moves need roll=180, pitch=0; we keep the yaw we read at connect.
+xArm5 is 5-axis: Cartesian moves need roll=180, pitch=0; each move keeps the current yaw.
 Units: mm and degrees. set_position is non-blocking with wait=False and QUEUES commands; a still-moving
 controller is refused. STOP requests SDK stop state 4, checks its result and NEVER enables/restarts motion.
 This does not command torque off. Controller recovery/enabling is a separate explicit staff operation.
@@ -48,14 +48,14 @@ class XArmBackend(CartesianBackend):
 
     def move_linear(self, x, y, z, speed_mm_s):
         with self.lock:
-            if self._moving():                  # never recover/re-enable a moving controller implicitly
+            if self._moving() or self.arm.get_state()[1] in (3, 4, 5, 6):                  # never recover/re-enable a moving controller implicitly
                 raise RuntimeError("xArm controller is still moving: STOP and explicit staff recovery required")
             # xArm 5 moves in straight lines only with the flange parallel to the base (roll +-180, pitch 0). Coming
             # from a taught pose that is not (e.g. a camera survey pose), plan this one move in joint space via IK.
             code, pose = self.arm.get_position()
             self._check(code, "get_position")
             extra = {} if self._flat(pose) else {"motion_type": 2}
-            code = self.arm.set_position(x=x, y=y, z=z, roll=180, pitch=0, yaw=self.yaw, speed=speed_mm_s,
+            code = self.arm.set_position(x=x, y=y, z=z, roll=180, pitch=0, yaw=pose[5], speed=speed_mm_s,
                                          mvacc=self.accel, wait=False, **extra)
         if code != 0:
             raise RuntimeError(f"xArm set_position returned code {code} (error {self.arm.error_code})")
@@ -83,7 +83,7 @@ class XArmBackend(CartesianBackend):
 
     def move_joints(self, q, speed_deg_s):
         with self.lock:
-            if self._moving():
+            if self._moving() or self.arm.get_state()[1] in (3, 4, 5, 6):
                 raise RuntimeError("xArm controller is still moving: STOP and explicit staff recovery required")
             code = self.arm.set_servo_angle(angle=list(q), speed=speed_deg_s, mvacc=speed_deg_s * 5, wait=False)
         if code != 0:
@@ -120,8 +120,8 @@ class XArmBackend(CartesianBackend):
         self._check(self.arm.set_state(4), "set_state(STOP)")
 
     def stop(self):
-        with self.lock:
-            self._halt()
+        # SDK motion calls can wait indefinitely on pause while holding lock. STOP must wake them directly.
+        self._halt()
 
     def tcp_mm(self):
         with self.lock:

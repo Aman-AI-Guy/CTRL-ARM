@@ -685,7 +685,7 @@ class SimXArm:
         return 0, [0.0] * 5
 
     def get_reduced_states(self):
-        return 0, [0, [0] * 6, 0, 0, 0, 0]
+        return 0, [0, [0] * 6, 0, 0, [[-360, 360]] * 5, 0, 0]
 
     def __getattr__(self, name):            # clean_warn, motion_enable, disconnect, ...
         return lambda *a, **k: 0

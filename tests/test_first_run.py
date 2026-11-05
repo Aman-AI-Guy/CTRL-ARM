@@ -307,6 +307,7 @@ def test_xarm_config_script_reads_by_default_and_never_moves():
 
         def __init__(self, ip, moving=False):
             self.calls, self.moving = [], moving
+            self.core = self
 
         def __getattr__(self, name):                 # every setter / motion call is recorded
             return lambda *a, **k: self.calls.append((name, a)) or 0
@@ -335,7 +336,7 @@ def test_xarm_config_script_reads_by_default_and_never_moves():
     calls = dict(made[-1].calls)
     assert calls["set_tcp_offset"] == ([60, 0, 85, 0, 0, 0],) and calls["set_tcp_load"] == (0.25, [0, 0, 0])
     assert calls["set_reduced_tcp_boundary"] == ([600, 0, 300, -300, 500, 50],)   # SDK order: max, min
-    assert calls["set_collision_sensitivity"] == (4,) and calls["set_collision_rebound"] == (False,)
+    assert calls["set_collis_sens"] == (4,) and calls["set_collision_rebound"] == (False,)
     assert [c for c, _ in made[-1].calls][-2:] == ["save_conf", "disconnect"]
     motion = {"set_position", "set_servo_angle", "set_state", "set_mode", "motion_enable", "move_gohome",
               "clean_error", "set_tool_position", "vc_set_cartesian_velocity", "vc_set_joint_velocity"}
