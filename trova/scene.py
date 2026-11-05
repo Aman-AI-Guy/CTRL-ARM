@@ -329,6 +329,9 @@ def pack(decision: Decision, objects: list[dict], authoritative: bool, snapshot_
     else:
         shown = candidates
     reason = decision.reason or "no match"
+    if chosen and chosen.get('label_authoritative') is False:
+        authoritative = False
+        reason += '. The selected object has no authoritative live label'
     reason = f"{reason}. selection does not move the arm"
     if not authoritative:
         reason += ". Names are from mock or offline recognition and cannot authorize motion"

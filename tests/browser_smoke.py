@@ -105,6 +105,16 @@ def main() -> int:
                                                    pg.wait_for_timeout(600), text("#armst"))[6])
             step("what's on the table", lambda: (press("What's on the table?"), wait_text("#findres", "Naming every"),
                                                  text("#findres")[:60])[2])
+            step("spoken selection + approach refusal", lambda: (
+                pg.evaluate("async () => { const s = await (await fetch('/api/state')).json(); await runSpoken('seleziona oggetto ' + s.inventory.snapshot.objects[0].track_id); }"),
+                pg.evaluate("runSpoken('Ora posizionati sopra.')"), text('#agentblocker'))[2])
+            if not pg.locator('#agentblocker').count() or 'calibrazione' not in text('#agentblocker'):
+                problems.append('uncalibrated spoken approach did not explain its calibration blocker')
+            step("confirmation refused without proposal", lambda: (pg.evaluate("runSpoken('Sì, procedi.')"), text('#agentblocker'))[1])
+            if pg.get_by_role('button', name='Confirm validated motion', exact=True).count():
+                problems.append('confirmation button exists without a valid trajectory')
+            step("scan next view remains blocked", lambda: (press('Plan next scan view'), pg.wait_for_timeout(300), text('#agentblocker'))[2])
+            step("reconstruction capability", lambda: pg.request.get(base + '/api/reconstruction/capabilities').json()['reason'])
             step("save reference", lambda: (press("Save reference"), pg.wait_for_timeout(1500), text("#refinfo"))[2])
             step("set batch + old-lot carton", lambda: (pg.fill("#lot", "A123"), press("Set batch"),
                                                         press("+ old-lot carton"), pg.wait_for_timeout(600),

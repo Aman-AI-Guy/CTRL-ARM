@@ -185,6 +185,16 @@ def qualification_blockers(host, task) -> list[str]:
         reasons.append(f"controller error code {robot.get('error_code')}")
     if gateway is not None and gateway.mode == "hardware" and not task.get("ik_verified"):
         reasons.append("controller inverse kinematics has not confirmed the observation pose")
+    if gateway is not None and gateway.mode == 'hardware':
+        orientation = robot.get('cartesian_target_orientation_deg')
+        pose = robot.get('pose6')
+        if not orientation or not pose:
+            reasons.append('the driver target orientation is unavailable')
+        elif (abs(abs(pose[3]) - abs(orientation[0])) > .1 or abs(pose[4] - orientation[1]) > .1
+              or abs((pose[5] - orientation[2] + 180) % 360 - 180) >= .1):
+            reasons.append('the Cartesian driver would reorient the tool; establish the pointing orientation before planning')
+        if not task.get('path_ik_verified'):
+            reasons.append('controller inverse kinematics has not validated the sampled path')
     if gateway is not None and gateway.mode == "hardware" and not getattr(gateway, "keepout_assessed", False):
         reasons.append("keep-out regions are not assessed; set TROVA_ARM_KEEP_OUT to measured boxes, "
                        "or to none after checking the path")
@@ -215,6 +225,9 @@ def _target_from_location(host, task) -> tuple[dict, str | None]:
     pose = robot.get("pose6")
     yaw = None if not pose or len(pose) < 6 else float(pose[5])
     goal = host.vision.observation_target(location.get("point_mm"), host.observe_clearance_mm, yaw_deg=yaw)
+    if task.get("scan_viewpoint") and yaw is not None:
+        from .scanning import view_goal
+        goal = view_goal(host, location, task["scan_viewpoint"], yaw)
     if not goal.get("ok"):
         return goal, goal.get("reason")
     return goal, None
@@ -245,6 +258,7 @@ def _pack_proposal(decision, goal, robot, start, task=None) -> dict:
     if begin and end:
         packed["trajectory_mm"] = _thin_points(sample_segment(begin, end))
     packed["ik_verified"] = bool(goal.get("ik_verified"))
+    packed['path_ik_verified'] = bool((task or {}).get('path_ik_verified'))
     packed["ik_joints_deg"] = None if not goal.get("ik") else goal["ik"].get("joints")
     packed["ik_reason"] = None if not goal.get("ik") else goal["ik"].get("reason")
     packed["geometry_source"] = "telemetry" if start is not None else (robot.get("source") or "unavailable")
@@ -315,6 +329,7 @@ def _mark_authorized(host, task, packed) -> dict:
         and gateway is not None
         and not gateway.simulated
         and not os.environ.get("PYTEST_CURRENT_TEST")
+        and (not getattr(host, "confirmation_required", False) or bool(task.get("_confirmed")))
         and execution_block(host, task) is None)
     return packed
 
@@ -325,6 +340,8 @@ def _selection_unreliable(task) -> str | None:
         return None
     if chosen.get("identity_uncertain") or chosen.get("association") == "uncertain":
         return "the viewpoint changed and the selection is no longer reliable; select the object again"
+    if chosen.get('label_authoritative') is False:
+        return 'the selected object has no authoritative name from live recognition'
     return None
 
 
@@ -478,8 +495,15 @@ def _settled(host):
         time.sleep(host.settle_s)
         if host.robot().get("moving"):
             return None, "the robot moved during settle"
+    if host.cancel.is_set():
+        return None, "STOP or cancellation requested"
     stopped_at = time.time()
     frame, meta = host.read_frame()
+    after = host.robot()
+    if host.cancel.is_set() or after.get("moving") or pose_changed(robot.get("pose6"), after.get("pose6")):
+        return None, "the robot moved or the task was cancelled during capture"
+    if after.get("error_code"):
+        return None, "controller fault during capture"
     meta = dict(meta or {})
     meta.setdefault("stopped_at", stopped_at)
     requested = meta.get("requested_at")
@@ -545,6 +569,21 @@ def skill_plan(host, task, argument: str) -> dict:
     goal["ik"] = ik
     goal["ik_verified"] = bool(ik.get("ik_verified"))
     task["ik_verified"] = goal["ik_verified"]
+    task['path_ik_verified'] = False
+    if host.gateway is not None and host.gateway.mode == 'hardware' and goal['ik_verified'] and robot.get('xyz_mm'):
+        reference = robot.get('joints')
+        path_ok = True
+        for point in sample_segment(robot['xyz_mm'], goal['target_mm']):
+            if host.cancel.is_set():
+                path_ok = False
+                break
+            query = ask([*point, *goal['pose6'][3:]], reference)
+            if not query.get('ik_verified'):
+                path_ok = False
+                break
+            reference = query.get('joints')
+        task['path_ik_verified'] = path_ok
+        goal['path_ik_verified'] = path_ok
     if getattr(host, "gateway", None) is None:
         task["motion_lock"] = "this arm has no motion gateway"
         task["phase"] = "blocked"
@@ -646,18 +685,18 @@ def _move(host, task, skill: str) -> dict:
         task["phase"] = "blocked"
         return _result(skill, False, "STOP or cancellation requested", task, terminal=True, executed=False)
     task["workflow_state"] = "movement_executing"
-    publish = getattr(host, "publish", None)
-    if publish:
-        publish(task)
+    host.active_task = task
     outcome = host.execute(target)
     task.pop("_confirmed", None)
     task.pop("confirmation", None)
     moved = bool(outcome.get("ok"))
+    task['movement_status_unknown'] = bool(outcome.get('movement_status_unknown'))
     task["phase"] = "moved" if moved else "blocked"
     if not moved:
         task["motion_lock"] = outcome.get("reason") or "the arm did not complete the approach"
     return _result(skill, moved, outcome.get("reason") or ("moved" if moved else "not moved"), task,
-                   motion=task["proposal"], executed=moved, final_mm=outcome.get("final_mm"),
+                   motion=task["proposal"], executed=moved or bool(outcome.get('motion_observed')),
+                   movement_status_unknown=task['movement_status_unknown'], final_mm=outcome.get("final_mm"),
                    verified_tool_position=False)
 
 
@@ -676,10 +715,25 @@ def skill_capture(host, task, argument: str) -> dict:
         task["phase"] = "blocked"
         return _result("capture_image", False, err, task, rejection=err)
     frame, meta = packed
+    if task.get("scan_session"):
+        objects = host.redetect(frame)
+        selected_id = (task.get("selected") or {}).get("track_id")
+        hit = next((obj for obj in objects if obj.get("track_id") == selected_id), None)
+        meta["quality_required"] = True
+        meta["object_visible"] = bool(hit and not hit.get("identity_uncertain")
+                                      and hit.get("association") in {"same_view", "geometric"})
+        meta["viewpoint_candidate"] = task.get("scan_viewpoint")
+        if hit:
+            task["selected"] = {**task["selected"], **hit}
     task["last_capture"] = {k: v for k, v in meta.items() if k != "frame"}
     task["phase"] = "observed"
     if getattr(host, "record_capture", None):
         task["acquisition"] = host.record_capture(frame, meta, task.get("selected"))
+        if task.get("scan_session") and task.get("acquisition") and not task["acquisition"].get("accepted"):
+            task["phase"] = "blocked"
+            task["motion_lock"] = task["acquisition"].get("reject_reason") or "scan capture was rejected"
+            return _result("capture_image", False, task["motion_lock"], task, terminal=True,
+                           acquisition=task["acquisition"], motion_allowed=False)
     return _result("capture_image", True, "fresh frame after settle", task, capture=task["last_capture"],
                    motion_allowed=False)
 
@@ -850,6 +904,31 @@ def skill_angle(host, task, argument: str) -> dict:
                    motion=packed, target=goal, executed=False, motion_allowed=False)
 
 
+def skill_scan_plan(host, task, argument):
+    from .scanning import rank_views
+    book = getattr(host, "scan_book", None)
+    if book is None or not book.active:
+        task["phase"] = "blocked"
+        return _result("plan_scan_view", False, "No scan session is open", task, terminal=True)
+    task["scan_session"] = book.active
+    session = book._session(None)
+    expected_track = str(session.get('orientation_track_id', session['object_id']))
+    if expected_track != str((task.get('selected') or {}).get('track_id')) or session.get('needs_reselection'):
+        task['phase'] = 'blocked'
+        return _result('plan_scan_view', False, 'The selected object does not match this scan orientation group.',
+                       task, terminal=True, executed=False)
+    views = [v for v in book.list_views() if v.get("orientation") == book._session(None)["orientation"]]
+    report = rank_views(host, task, views)
+    task["scan_plan"] = report
+    if not report.get("next"):
+        task["phase"] = "blocked"
+        task["motion_lock"] = report["reason"]
+        return _result("plan_scan_view", False, report["reason"], task, terminal=True,
+                       scan_plan=report, executed=False)
+    task["scan_viewpoint"] = report["next"]["id"]
+    return skill_plan(host, task, "")
+
+
 def skill_clarify(host, task, argument: str) -> dict:
     task["phase"] = "clarify"
     question = task.get("question") or "Which object?"
@@ -868,6 +947,7 @@ def skill_report(host, task, argument: str) -> dict:
 
 
 SKILL_FN = {
+    "plan_scan_view": skill_scan_plan,
     "inspect_scene": skill_inspect, "list_objects": skill_list, "select_object": skill_select,
     "locate_object": skill_locate, "observe_object": skill_observe, "plan_approach": skill_plan,
     "move_towards_object": skill_move_towards, "move_above_object": skill_move_above,
@@ -893,12 +973,14 @@ def _resume_task(task: dict) -> dict:
     keys = ("goal", "phase", "selected", "objects", "location", "planned_target", "proposal",
             "motion_lock", "evaluation", "question", "authoritative", "calibration_valid",
             "calibration", "last_reason", "steps", "replans", "grok_mode", "snapshot_pose",
-            "snapshot_id", "ik_verified", "timings", "summary", "confirmation", "workflow_state", "workflow_events")
+            "snapshot_id", "ik_verified", "timings", "summary", "confirmation", "workflow_state", "workflow_events",
+            "scan_session", "scan_viewpoint", "scan_plan", "path_ik_verified")
     return {key: task.get(key) for key in keys}
 
 
 def run(host, text: str, *, step: bool = False, continued: dict | None = None,
-        confirm_id: str | None = None, selected_context: dict | None = None) -> dict:
+        confirm_id: str | None = None, selected_context: dict | None = None,
+        skill_sequence: list[str] | None = None) -> dict:
     """Bounded observe-plan-act-observe loop. Hardware moves only when every qualification passes.
 
     step=True runs one skill and returns. The caller may pass the previous resume dict.
@@ -940,7 +1022,9 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
             task["last_reason"] = "the task reached its time limit"
             break
         # Confirmation executes the bound proposal; the model cannot substitute another skill.
-        if task.get("requested_track_id") is not None and task["phase"] == "start":
+        if skill_sequence and _step < len(skill_sequence):
+            choice = {"skill": skill_sequence[_step], "argument": "", "ok": True}
+        elif task.get("requested_track_id") is not None and task["phase"] == "start":
             choice = {"skill": "inspect_scene", "argument": "", "ok": True}
         elif task.get("_confirmed"):
             choice = {"skill": "move_above_object", "argument": "", "ok": True}
@@ -1003,7 +1087,7 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
             task["phase"] = "blocked"
             status = "blocked"
             break
-        if result.get("terminal") or choice.get("stop") or task["phase"] == "reported":
+        if result.get("terminal") or choice.get("stop") or task["phase"] in {"reported", "blocked"}:
             if task["phase"] == "clarify":
                 status = "clarify"
             elif task.get("motion_lock") and task["phase"] in ("blocked", "held"):
@@ -1060,9 +1144,12 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
         "authoritative": task.get("authoritative"), "grok_mode": task.get("grok_mode"),
         "hardware_moved": moved and not simulated,
         "simulation_moved": moved and simulated,
+        "movement_status_unknown": bool(task.get('movement_status_unknown')),
         "workflow_state": state,
         "workflow_events": task["workflow_events"],
         "execution_mode": getattr(getattr(host, "gateway", None), "mode", None),
+        "scan_session": task.get("scan_session"), "scan_plan": task.get("scan_plan"),
+        "acquisition": task.get("acquisition"),
         "confirmation": {k: v for k, v in (task.get("confirmation") or {}).items()
                          if k in {"id", "expires_at", "target_mm", "object_id"}} or None,
         "motion_proposed": task.get("planned_target") is not None,

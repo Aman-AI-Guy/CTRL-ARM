@@ -37,7 +37,8 @@ const TrovaSpeech = (() => {
       return RULES[1][1].test(t) ? {cmd: 'stop', also: 'watch_off'} : {cmd: 'stop'};
     if (/^(s[iì]|yes|ok|procedi|proceed|go ahead)([,! .]+(procedi|proceed))?[.! ]*$/.test(t.trim())) return {cmd: 'confirm'};
     if (/\b(cancel( the)? task|annulla|non procedere)\b/.test(t)) return {cmd: 'cancel'};
-    if (/\b(scansionalo|scansiona|scan it|scan the|reconstruct|ricostruisci)\b/.test(t)) return {cmd: 'agent', text: t.trim()};
+    if (/\b(scansionalo|scansiona|scan it|scan the|reconstruct\w*|ricostru\w*)\b/.test(t)) return {cmd: 'agent', text: t.trim()};
+    if (/\b(ho (capovolto|girato|ruotato)|i (flipped|turned|rotated))\b/.test(t)) return {cmd: 'agent', text: t.trim()};
     const q = t.trim().replace(/^(trova|find|where is|where's|dov'?(è|e)|cerca|show me|mostrami)\s+/, '');
     if (new RegExp(ROOM.source).test(t)) return {cmd: 'room', text: q.replace(ROOM, ' ').replace(/\s+/g, ' ').trim()};
     for (const [cmd, re] of RULES) if (re.test(t)) return {cmd};

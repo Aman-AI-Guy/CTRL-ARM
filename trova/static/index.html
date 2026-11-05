@@ -165,7 +165,10 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <div class="row" style="margin-top:8px"><input type="text" id="scanobj" placeholder="object id" style="max-width:140px">
       <button onclick="startScan()">Start scan</button><button onclick="captureView()">Capture view</button>
       <button onclick="finishScan()">Finish scan</button><button onclick="exportScan()">Export poses</button></div>
+    <div class="row"><button onclick="nextScanView()">Plan next scan view</button><button onclick="markOrientation()">Object turned / flipped</button>
+      <button onclick="startReconstruction()">Reconstruct dataset</button><button onclick="cancelReconstruction()">Cancel reconstruction</button></div>
     <div id="scanres" class="muted"></div>
+    <div id="reconstructionres" role="status" class="muted"></div>
   </div>
 
   <div class="panel"><h2>Score</h2>
@@ -251,7 +254,7 @@ function showFind(d) {
   } else h = `<div class="big">Not found on the table</div><div>${esc(r.reason)}</div>` +
       (S && S.dog ? `<div class="row"><button onclick="sendDog()">Send the dog to look in the other rooms</button></div>` : '');
   h += `<div class="muted">${r.mode === 'direct' ? 'Grok direct box · ' : r.mode === 'offline' ? '<b style="color:var(--warn)">offline: local colour match</b> · ' : ''}${r.n_candidates} candidates · confidence ${r.confidence} · Grok ${r.grok_latency_s}s · total ${d.total_s}s${d.table_mm ? ' · arm → ' + d.table_mm.join(', ') + ' mm' : ''}</div>` + (d.arm_blocked ? `<div style="color:var(--warn)">Arm not moved: ${esc(d.arm_blocked)}</div>` : '');
-  h += `<div class="thumbs"><a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>${d.query ? `<a href="/files/${d.query}" target="_blank"><img src="/files/${d.query}"></a>` : ''}</div>`;
+  h += `<div class="thumbs">${d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>` : ""}${d.query ? `<a href="/files/${d.query}" target="_blank"><img src="/files/${d.query}"></a>` : ''}</div>`;
   el.innerHTML = h;
   if (speakOn()) TrovaSpeech.say(TrovaSpeech.phraseFind(d, TrovaSpeech.italian(d.request || '')), sayLang(d.request));
 }
@@ -339,7 +342,7 @@ function showLabels(d) {
   const el = $('checkres'); el.className = 'result show ' + (d.ok ? 'st-found' : 'st-not_found');
   el.innerHTML = `<div class="big" style="color:var(${d.ok ? '--ok' : '--bad'})">${d.ok ? 'Labels OK' : d.problems.length + ' label problem(s)'}</div>` +
     (d.items.length ? '' : '<div class="muted">No labels seen.</div>') + labelList(d) +
-    `<div class="muted">${d.codes.length} code(s) decoded · Grok ${d.latency_s}s${d.offline ? ' · offline' : ''}</div><div class="thumbs"><a href="/files/${d.image}" target="_blank"><img src="/files/${d.image}"></a></div>`;
+    `<div class="muted">${d.codes.length} code(s) decoded · Grok ${d.latency_s}s${d.offline ? ' · offline' : ''}</div><div class="thumbs">${d.image ? `<a href="/files/${d.image}" target="_blank"><img src="/files/${d.image}"></a>` : ""}</div>`;
   if (speakOn()) TrovaSpeech.say(d.ok ? 'Labels OK.' : d.problems.map(p => p.text).join('. '), 'en-US');
 }
 async function readLabels() {
@@ -437,7 +440,7 @@ function showFindAll(d) {
   el.innerHTML = `<div class="big">${r.count ? r.count + ' found: ' + esc(r.label) : 'None found'}</div><div>${esc(r.reason)}</div>` +
     (r.count && !d.moved && !d.arm_blocked && d.targets.length ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at all</button></div>` : '') +
     (d.arm_blocked ? `<div style="color:var(--warn)">Arm not moved: ${esc(d.arm_blocked)}</div>` : '') +
-    `<div class="muted">${r.n_candidates} candidates · Grok ${r.grok_latency_s}s · total ${d.total_s}s</div><div class="thumbs"><a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a></div>`;
+    `<div class="muted">${r.n_candidates} candidates · Grok ${r.grok_latency_s}s · total ${d.total_s}s</div><div class="thumbs">${d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>` : ""}</div>`;
 }
 
 // ---- feature 1: inventory map
@@ -573,9 +576,46 @@ async function cancelAgent() {
   await post('/api/agent/cancel');
   await refresh();
 }
+async function nextScanView() {
+  const d = await json('/api/scan/next', {});
+  showAgent(d);
+  if (speakOn()) TrovaSpeech.say(d.spoken_message || d.reason, $('pttlang').value);
+}
+async function markOrientation() {
+  const orientation = prompt('New object orientation name (old localization will be invalidated):');
+  if (!orientation) return;
+  const d = await json('/api/scan/orientation', {orientation});
+  agentProposal = null;
+  $('scanres').textContent = d.reason || 'Select the object again in its new orientation.';
+}
+let reconstructionJob = null;
+async function startReconstruction() {
+  const d = await json('/api/reconstruction/start', {});
+  reconstructionJob = d.id;
+  showReconstruction(d);
+  if (reconstructionJob) pollReconstruction();
+}
+function showReconstruction(d) {
+  const links = Object.keys(d.artifacts || {}).map(name => `<a href="/api/reconstruction/${encodeURIComponent(d.id)}/artifacts/${encodeURIComponent(name)}" target="_blank">${esc(name)}</a>`).join(' · ');
+  $('reconstructionres').innerHTML = `<b>${esc(d.status)} · ${esc(d.stage || '')}</b> ${esc(d.reason || '')}<br>` +
+    `mesh ${d.reconstructed ? 'generated' : 'not generated'} · textured ${d.textured_mesh ? 'yes' : 'no'} · surface completeness unverified<br>` +
+    `<div style="overflow-wrap:anywhere">${esc(JSON.stringify(d.quality || {}))}</div>${links}`;
+}
+async function pollReconstruction() {
+  if (!reconstructionJob) return;
+  try {
+    const d = await call('/api/reconstruction/' + encodeURIComponent(reconstructionJob));
+    showReconstruction(d);
+    if (['queued', 'running'].includes(d.status)) setTimeout(pollReconstruction, 1000);
+  } catch (e) { $('reconstructionres').textContent = 'Unable to read reconstruction status: ' + e; }
+}
+async function cancelReconstruction() {
+  if (reconstructionJob) await post('/api/reconstruction/' + encodeURIComponent(reconstructionJob) + '/cancel');
+}
 function showAgent(d) {
   if (!d || !d.status) return;
-  agentProposal = d.confirmation || null;
+  agentProposal = d.confirmation && d.confirmation.expires_at * 1000 > Date.now() ? d.confirmation : null;
+  if (d.reconstruction) { reconstructionJob = d.reconstruction.id; showReconstruction(d.reconstruction); pollReconstruction(); }
   const el = $('agentres');
   el.className = 'result show st-' + (d.goal_achieved ? 'found' : d.status === 'clarify' ? 'clarify' : 'not_found');
   const steps = (d.steps || []).map(s => `<li><b>${esc(s.skill)}</b> ${esc(s.reason || '')}</li>`).join('');
@@ -596,6 +636,8 @@ function showAgent(d) {
     (d.timings ? `<div class="muted">stage times ${esc(Object.keys(d.timings).filter(k => d.timings[k] && d.timings[k].last_s != null).map(k => k + ' ' + d.timings[k].last_s + 's').join(' · '))} · realtime not claimed</div>` : '') +
     (traj.length ? `<div class="muted">straight-line samples ${esc(traj.map(p => p.join(', ')).join(' → '))} mm</div>` : '') +
     (safety ? `<div class="muted">gateway ${esc(d.proposal.status || '')}: workspace ${esc(safety.workspace || '')} · clearance ${esc(safety.clearance || '')} · keep-out ${esc(safety.keep_out || 'not_assessed')} · motion ${d.proposal.allow_motion ? 'allowed' : 'not sent'} · collision avoidance: no</div>` : '') +
+    (d.scan_plan ? `<div><b>Scan viewpoints</b>: ${esc(d.scan_plan.reason)} · surface coverage unknown</div><ul>` + (d.scan_plan.candidates || []).map(v =>
+      `<li>${esc(v.id)} · ${v.validated ? 'validated' : 'blocked'} · IK ${v.ik_verified ? 'checked' : 'unverified'} · plane overlap ${v.plane_overlap_fraction == null ? 'unknown' : Math.round(v.plane_overlap_fraction * 100) + '%'} · ${esc(v.reason || '')}</li>`).join('') + '</ul>' : '') +
     (steps ? `<ul class="changes">${steps}</ul>` : '');
 }
 function showBoard(d) {
@@ -701,7 +743,7 @@ async function exportScan() {
 function showScan(session) {
   if (!session) return;
   const views = session.views || [];
-  $('scanres').innerHTML = `${esc(session.id || '')} · ${esc(session.status || '')} · ${session.n_views || views.length} views · reconstructed: no` +
+  $('scanres').innerHTML = `${esc(session.id || '')} · ${esc(session.status || '')} · ${session.n_views || views.length} views · orientation ${esc(session.orientation || '')} · acquisition dataset; reconstruction results shown separately` +
     (views.length ? '<ul class="changes">' + views.map(v => `<li>${esc(v.viewpoint_id)} ${v.accepted ? 'accepted' : 'rejected'} ${esc(v.reject_reason || '')} pose ${esc((v.robot_tcp_mm || []).join(', '))}</li>`).join('') + '</ul>' : '');
 }
 

@@ -12,6 +12,7 @@ const TrovaVoice = (() => {
   let lastStop = 0, userLine = '', botLine = '', buf = [], bufLen = 0;
   let proposal = null, confirmationHeard = false, serialTools = Promise.resolve();
   let selectionQuestion = false;
+  let tourPending = false;
 
   const WORKLET = `class Cap extends AudioWorkletProcessor {
     process(inputs) { const c = inputs[0] && inputs[0][0]; if (c) this.port.postMessage(c.slice(0)); return true; }
@@ -49,6 +50,7 @@ const TrovaVoice = (() => {
   // ---- tools Grok can call: each returns a small JSON for the model to talk about
   const tools = {
     async find_object({description}) {
+      tourPending = false;
       const d = await api('/api/find', {text: description, move: 'false'});
       if (d.error) return {error: d.error};
       h.onFind && h.onFind(d);
@@ -64,8 +66,12 @@ const TrovaVoice = (() => {
       const r = d.result;
       return {status: r.status, label: r.label, reason: r.reason, clarifying_question: r.clarifying_question};
     },
-    async point_at_found() { return tools.run_vision_task({text: 'move above the selected object'}); },
+    async point_at_found() {
+      if (tourPending) return {status: 'refused', spoken_message: 'Select one object, then request its approach. An automatic voice tour has no validated proposal.'};
+      return tools.run_vision_task({text: 'move above the selected object'});
+    },
     async find_all({description}) {
+      tourPending = true;
       const d = await api('/api/find_all', {text: description, move: 'false'});
       if (d.error) return {error: d.error};
       h.onFindAll && h.onFindAll(d);
@@ -81,6 +87,7 @@ const TrovaVoice = (() => {
                                        confidence: o.confidence}))};
     },
     async select_object({description, track_id}) {
+      tourPending = false;
       const body = {};
       if (description) body.text = description;
       if (track_id != null && track_id !== '') body.track_id = String(track_id);
@@ -146,6 +153,9 @@ const TrovaVoice = (() => {
       return d;
     },
     async jog_relative({direction, distance_mm}) {
+      const heard = typeof TrovaSpeech !== 'undefined' && TrovaSpeech.parse(userLine, cfg.stop_words || []);
+      if (!heard || heard.cmd !== 'jog' || heard.direction !== direction || heard.distance_mm !== Number(distance_mm))
+        return {ok: false, status: 'refused', reason: 'A jog needs an explicit direction and distance in the operator transcript.'};
       const d = await api('/api/arm/jog', {direction, distance_mm: Number(distance_mm)}, true);
       h.onRefresh && h.onRefresh();
       return {ok: !!d.ok, status: d.status, reason: d.reason || d.error, mode: d.mode,

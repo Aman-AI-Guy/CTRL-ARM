@@ -17,7 +17,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
@@ -39,8 +39,9 @@ from .scene import (
 )
 from .geom import VisionStore, annotate_checkerboard, pose_changed, reference_error
 from .motion import apply_operator_safety, safety_report
-from .arm.telemetry import observation_record, open_reader
+from .arm.telemetry import observation_record, open_reader, XArmTelemetry
 from .acquire import ScanBook
+from .reconstruction import ReconstructionJobs
 from . import agent as agent_mod
 from .workflow import feedback, receipt_error, refers_to_selection
 from . import failures as fail_log
@@ -301,6 +302,9 @@ class State:
         self.room: dict | None = None          # feature 14: last room scan (status, views, result)
         self.vision = VisionStore.load(s.data_dir / "vision_calib.json")
         self.scans = ScanBook(s.data_dir / "scans")
+        self.reconstruction = ReconstructionJobs(s.data_dir / "reconstructions", on_done=lambda job:
+            self.audit.event('scan', action='reconstruction_finished', job=job['id'], status=job['status'],
+                             reconstructed=job['reconstructed'], textured_mesh=job['textured_mesh'], reason=job['reason']))
         self.last_agent: dict | None = None
         self.task_resume: dict | None = None
         self.last_reference: dict | None = None
@@ -314,6 +318,14 @@ class State:
     def note_stage(self, stage: str, seconds: float) -> None:
         self.stage_samples.append({"stage": stage, "seconds": round(float(seconds), 3), "at": time.time()})
         del self.stage_samples[:-200]
+
+    def invalidate_pending(self, reason):
+        self.pending_motion = None
+        self.task_resume = None
+        if self.last_agent and self.last_agent.get('confirmation'):
+            self.last_agent.update(confirmation=None, status='refused',
+                                   workflow_state='movement_refused_or_failed', reason=reason)
+            feedback(self.last_agent, self.last_agent.get('goal', ''))
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
@@ -496,12 +508,28 @@ class State:
             time.sleep(0.4)
         return f, boxes, True
 
+    def controller_reader(self):
+        if self.reader is not None:
+            return self.reader
+        backend = getattr(self.arm, 'backend', None)
+        if type(backend).__name__ == 'XArmBackend':
+            # Reuse the operator-opened connection through the same read-only guard.
+            # Never create another driver or disconnect the shared SDK.
+            queries = XArmTelemetry(backend.arm)
+            queries._lock = backend.lock
+            return queries
+        return None
+
     def robot_telemetry(self) -> dict:
         """Read the pose. Does not enable motors, clear errors, or send a motion command."""
-        reader = getattr(self, "reader", None)
+        backend = getattr(self.arm, "backend", None)
+        target_orientation = ([180.0, 0.0, float(backend.yaw)]
+                              if type(backend).__name__ == "XArmBackend" else None)
+        reader = self.controller_reader()
         if reader is not None:
             reading = reader.read()
-            reading["arm_state"] = "read-only"
+            reading["cartesian_target_orientation_deg"] = target_orientation
+            reading["arm_state"] = "read-only" if self.reader is not None else ('moving' if reading.get('moving') else 'idle')
             reading["tip_mm"] = reading.get("xyz_mm")
             reading["status_tcp_mm"] = reading.get("xyz_mm")
             # This connection never enables motion. process_can_move is the motion driver, separately.
@@ -511,6 +539,7 @@ class State:
             reading["read_only"] = not reading["process_can_move"]
             return reading
         out = {"xyz_mm": None, "pose6": None, "joints": None, "moving": None,
+               "cartesian_target_orientation_deg": target_orientation,
                "source": "unavailable", "simulated": None, "error": None,
                "motion_sent": False, "movements_enabled": False, "motors_enabled_by_trova": False,
                "tcp_changed": False, "sync_precision_claimed": False,
@@ -568,6 +597,7 @@ class State:
         """One fresh picture, proposals, names, and stable ids. home=True parks a real arm first (existing inventory).
         An agent snapshot leaves the arm where it is."""
         with self.lock:
+            self.invalidate_pending('A new scene snapshot invalidated the previous proposal.')
             if home:
                 self.clear_view()
             capture_s = 0.0
@@ -655,6 +685,7 @@ class AgentHost:
         self._jpeg: bytes | None = None
         self.confirmation_required = True
         self.started_at = time.time()
+        self.scan_book = st.scans
 
     def publish(self, task):
         self.st.last_agent = feedback({"status": "executing", "workflow_state": "movement_executing",
@@ -676,7 +707,7 @@ class AgentHost:
         self.st.note_stage(stage, seconds)
 
     def inverse(self, pose6, ref_joints=None) -> dict:
-        reader = getattr(self.st, "reader", None)
+        reader = self.st.controller_reader()
         if reader is None or not hasattr(reader, "inverse"):
             return {"ok": False, "ik_verified": False, "joints": None, "motion_sent": False,
                     "reason": "inverse kinematics was not asked of the controller"}
@@ -730,22 +761,36 @@ class AgentHost:
         if gateway is None:
             return {"ok": False, "reason": "this arm has no motion gateway"}
         holder: dict = {}
+        start = gateway.current_pose()
+        if start is None:
+            return {'ok': False, 'reason': 'Current pose is unavailable; approach not started.'}
+        target_distance = float(np.linalg.norm(np.asarray(target) - np.asarray(start)))
+        deadline = 30 + target_distance / max(1.0, gateway.max_speed_mm_s)
 
         def go():
-            holder["ok"] = bool(gateway._execute_cartesian(tuple(target)))
-            holder["final"] = gateway.current_pose()
-            holder["error"] = getattr(self.st.arm, "last_error", None)
+            try:
+                holder["ok"] = bool(gateway._execute_cartesian(tuple(target)))
+                holder["error"] = getattr(self.st.arm, "last_error", None)
+            except Exception as exc:
+                holder['ok'], holder['error'] = False, str(exc)
+            finally:
+                holder["final"] = gateway.current_pose()
 
         if self.cancel.is_set() or not self.st.start_arm(go, job="approach", since=self.started_at):
             return {"ok": False, "reason": "STOP is latched. The approach was not started."}
+        if getattr(self, 'active_task', None) and holder.get('ok') is not False:
+            self.publish(self.active_task)
         if self.st.arm_thread is not None:
-            target_distance = np.linalg.norm(np.asarray(target) - np.asarray(gateway.current_pose()))
-            deadline = 30 + float(target_distance) / max(1.0, gateway.max_speed_mm_s)
             self.st.arm_thread.join(timeout=deadline)
         if "ok" not in holder:
             self.st.stop_arm()
-            return {"ok": False, "reason": holder.get("error") or "the approach did not finish"}
+            final = gateway.current_pose()
+            return {"ok": False, "reason": holder.get("error") or "the approach did not finish",
+                    'motion_observed': final is not None and float(np.linalg.norm(np.asarray(final) - start)) > 1,
+                    'movement_status_unknown': final is None}
         return {"ok": bool(holder["ok"]), "final_mm": holder.get("final"),
+                'motion_observed': holder.get('final') is not None and float(np.linalg.norm(np.asarray(holder['final']) - start)) > 1,
+                'movement_status_unknown': holder.get('final') is None,
                 "reason": "moved" if holder["ok"] else (holder.get("error") or "the arm did not complete the approach")}
 
     def record_capture(self, frame, meta, selected):
@@ -764,11 +809,17 @@ class AgentHost:
         packed.setdefault("robot_rpy_deg", None if not robot.get("pose6") else list(robot["pose6"][3:]))
         packed.setdefault("joints_deg", robot.get("joints"))
         packed.setdefault("moving", robot.get("moving"))
+        packed.setdefault("pose_source", robot.get("source"))
+        packed.setdefault("error_code", robot.get("error_code"))
+        packed.setdefault("state_code", robot.get("state_code"))
+        packed.setdefault("read_finished_at", robot.get("read_finished_at"))
         if self.vision.hand_eye:
             packed.setdefault("tool_camera", self.vision.hand_eye["matrix"])
         packed.setdefault("calibration_version", self.vision.version)
         packed.setdefault("calibration_valid", bool(self.vision.assess(self.image_size)["valid"]))
         record = self.st.scans.capture(data, packed, detection)
+        self.st.audit.event('scan', action='capture', session=record['session_id'], viewpoint=record['viewpoint_id'],
+                            accepted=record['accepted'], reason=record['reject_reason'])
         return {k: record.get(k) for k in ("viewpoint_id", "accepted", "reject_reason", "session_id")}
 
 
@@ -860,6 +911,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/state")
     def state():
+        receipt = (st.pending_motion or {}).get('confirmation') or {}
+        if receipt and time.time() >= receipt.get('expires_at', 0):
+            st.invalidate_pending('The motion proposal expired. Request a new plan.')
         info = st.source.info()
         # A Pi snapshot waits for a new frame on the camera. The status poll must not take one.
         if info.get("kind") == "pi":
@@ -873,6 +927,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         m = st.metrics
         judged = m["find_ok"] + m["find_wrong"]
         lf = {k: v for k, v in (st.last_find or {}).items() if k not in ("box",)}
+        reconstruction = (st.last_agent or {}).get('reconstruction')
+        if reconstruction and reconstruction.get('id') in st.reconstruction.jobs:
+            current = st.reconstruction.get(reconstruction['id'])
+            st.last_agent['reconstruction'] = current
+            st.last_agent['status'] = 'reconstruction_' + current['status']
+            st.last_agent['spoken_message'] = ('Ricostruzione: ' + current['status'] + '. ' + current['reason'])
         return {
             "mock": st.grok.mock, "grok": st.grok.stats(), "source": st.source.info(),
             "override": st.override is not None, "frame_size": size, "camera_error": st.camera_error,
@@ -910,7 +970,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ find
     def do_find(request: str, query_img, history, move: bool = True, reuse: dict | None = None):
+        if not st.agent_lock.acquire(blocking=False):
+            raise ArmBusy('An autonomous task is running; cancel it before changing the target')
+        try:
+            return _do_find(request, query_img, history, move, reuse)
+        finally:
+            st.agent_lock.release()
+
+    def _do_find(request, query_img, history, move, reuse):
         with st.lock:
+            st.invalidate_pending('A new find invalidated the previous proposal.')
+            st.selected_context = None
             t0, asked = time.perf_counter(), time.time()
             if reuse:                       # a clarify answer: same frame and box numbers as the question
                 frame, boxes, occluded = reuse["frame"], reuse["boxes"], reuse["occluded"]
@@ -918,6 +988,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 st.clear_view()
                 frame = st.frame()
                 boxes, occluded = st.proposals(frame)
+            captured_pose = (reuse or {}).get('pose') or st.robot_telemetry()
             res = grok_find(st.grok, frame, boxes, request, query_img, history)
             hi = res.box.id if res.box and res.box.source != "grok" else None
             marked = draw_marks(frame, boxes, highlight=hi)
@@ -926,6 +997,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 cv2.rectangle(marked, (int(b.x0), int(b.y0)), (int(b.x1), int(b.y1)), HIGHLIGHT, 5)
             paths = {"frame": st.audit.save_image("frame", frame), "marked": st.audit.save_image("find", marked),
                      "query": st.audit.save_image("query", query_img) if query_img is not None else None}
+            if res.status == 'found' and res.box is not None:
+                candidates = [res.box] if res.box.source == 'grok' else boxes
+                tracked, reset = assign_tracks(st.tracks, candidates, frame,
+                                               pose_mm=captured_pose.get('xyz_mm') if st.vision.assess(st.frame_size)['valid'] else None)
+                live = not st.grok.mock and res.mode != 'offline'
+                labels = {res.box.id: {'name': res.label, 'category': 'other', 'note': res.reason,
+                                       'name_from_model': bool(res.label), 'label_authoritative': live}}
+                objects = build_objects(tracked, frame, labels)
+                chosen = next((obj for obj in objects if obj['box_id'] == res.box.id), None)
+                snapshot = {'id': paths['frame'], 'image': paths['frame'], 'map': paths['marked'],
+                            'width': frame.shape[1], 'height': frame.shape[0], 'pose': captured_pose,
+                            'objects': objects, 'grok_mode': 'live' if live else ('mock' if st.grok.mock else 'offline'),
+                            'authoritative': live, 'motion_allowed': False, 'tracks_reset': reset}
+                st.scene_frame, st.scene_boxes = frame, tracked
+                st.inventory = {'snapshot': snapshot, 'objects': objects, 'summary': res.label, 'map': paths['marked']}
+                st.selected_context = {'selected': chosen, 'objects': objects, 'snapshot_id': snapshot['id'],
+                                       'snapshot_pose': captured_pose, 'grok_mode': snapshot['grok_mode'],
+                                       'authoritative': live and chosen.get('label_authoritative', False), 'phase': 'selected'} if chosen else None
             table_mm, arm_blocked = None, None
             if res.status == "found" and st.calib and st.calib.ok:
                 table_mm = [round(v, 1) for v in st.calib.pixel_to_table(*res.box.center)]
@@ -948,7 +1037,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if res.status == "clarify":
                 st.pending = {"request": request, "query_image": query_img, "history": history, "move": move,
                               "question": res.clarifying_question, "candidates": res.candidate_ids,
-                              "reuse": {"frame": frame, "boxes": boxes, "occluded": occluded}}
+                              "reuse": {"frame": frame, "boxes": boxes, "occluded": occluded, 'pose': captured_pose}}
             st.label_wait = None
             return {k: v for k, v in st.last_find.items() if k != "box"}
 
@@ -1549,8 +1638,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         except GrokError as e:
             return fail(e, "inventory")
 
-    @app.post("/api/select")
-    def api_select(text: str = Form(""), track_id: str = Form(""), box_id: str = Form("")):
+    def _select_object(text: str, track_id: str, box_id: str):
         """Pick one object in the current snapshot. This route never calls the arm."""
         with st.lock:
             snap = (st.inventory or {}).get("snapshot")
@@ -1602,18 +1690,32 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             else:
                 st.select_history = []
             out = pack(decision, objects, authoritative, snap["id"])
-            st.pending_motion = None
-            st.task_resume = None
+            st.invalidate_pending('Selection changed. Request a new plan for this object.')
             st.selected_context = ({"selected": out["object"], "snapshot_id": snap["id"],
                                     "snapshot_pose": snap.get("pose"), "objects": objects,
                                     "authoritative": out["authoritative"], "grok_mode": snap.get("grok_mode"),
                                     "phase": "selected"} if out.get("object") else None)
+            if out.get('object') and st.scans.active:
+                session = st.scans._session(None)
+                if session.get('needs_reselection'):
+                    session['orientation_track_id'] = str(out['object']['track_id'])
+                    session['needs_reselection'] = False
+                    st.scans._write_index(session)
             out["spoken_message"] = feedback({"workflow_state": "object_selected", "selected": out.get("object"),
                                                "question": out.get("question"), "reason": out.get("reason")}, text)["spoken_message"]
             st.audit.event("select", status=out["status"], snapshot_id=snap["id"],
                            track_id=None if not out["object"] else out["object"]["track_id"],
                            authoritative=out["authoritative"], motion_allowed=False)
             return out
+
+    @app.post("/api/select")
+    def api_select(text: str = Form(""), track_id: str = Form(""), box_id: str = Form("")):
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409, "A task is running; cancel it before changing selection")
+        try:
+            return _select_object(text, track_id, box_id)
+        finally:
+            st.agent_lock.release()
 
     # ------------------------------------------------------------------ feature 2: zones
     @app.get("/api/zones")
@@ -2098,16 +2200,37 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             st.pending_motion = None
             st.task_cancel = threading.Event()
             host = AgentHost(st)
+            if re.search(r"(?i)\b(ho (capovolto|girato|ruotato)|i (flipped|turned|rotated))\b", text):
+                if not st.scans.active:
+                    return _refused("No scan session is open.", text)
+                changed = api_scan_orientation(OrientReq(orientation='reoriented-' + str(time.time_ns())))
+                return _agent_result({"ok": True, "status": "awaiting_reselection", "workflow_state": "object_reoriented",
+                                      "reason": changed['reason'], "hardware_moved": False, "confirmation": None,
+                                      "spoken_message": "Ho aperto un nuovo gruppo di acquisizione. Ora seleziona di nuovo l'oggetto; la posizione precedente non è più valida."}, text)
             if re.search(r"(?i)\b(scan\w*|scansion\w*|reconstruct\w*|ricostru\w*)\b", text):
-                # Scanning is a separate intent, never a generic permission to approach.
-                report = st.vision.assess(host.image_size)
-                return _agent_result({"ok": False, "status": "held", "workflow_state": "localization_blocked",
-                                      "selected": (st.selected_context or {}).get("selected"),
-                                      "calibration_valid": report["valid"], "calibration": report,
-                                      "reason": "Scanning requires validated localization and separately planned viewpoints. "
-                                                + "; ".join(report.get("reasons") or []),
-                                      "hardware_moved": False, "motion_proposed": False,
-                                      "confirmation": None}, text)
+                if re.search(r"(?i)\b(reconstruct\w*|ricostru\w*)\b", text):
+                    if not st.scans.last:
+                        return _refused("No scan dataset exists. Acquire overlapping views first.", text)
+                    job = st.reconstruction.start(st.scans._session(st.scans.last))
+                    return _agent_result({"ok": True, "status": "reconstruction_queued",
+                                          "workflow_state": "reconstruction_queued", "reconstruction": job,
+                                          "spoken_message": "Ricostruzione avviata; il risultato non è ancora disponibile.",
+                                          "reason": "Reconstruction queued; no model is claimed yet.",
+                                          "hardware_moved": False, "confirmation": None}, text)
+                context = st.selected_context
+                if not context or not context.get("selected"):
+                    return _refused("Select the object before starting a scan.", text)
+                object_id = str(context["selected"]["track_id"])
+                active = st.scans._session(st.scans.active) if st.scans.active else None
+                if active and str(active.get('orientation_track_id', active['object_id'])) != object_id:
+                    return _refused("Finish the open scan before selecting another scan object.", text)
+                if not active:
+                    session = st.scans.start(object_id)
+                    if st.vision.intrinsics:
+                        st.scans._session(session['id'])["intrinsics"] = st.vision.intrinsics
+                result = agent_mod.run(host, text, selected_context=context,
+                                       skill_sequence=["inspect_scene", "locate_object", "plan_scan_view", "move_above_object"])
+                return _agent_result(result, text)
             context = st.selected_context if refers_to_selection(text) else None
             if context and context.get("snapshot_id") != ((st.inventory or {}).get("snapshot") or {}).get("id"):
                 return _refused("The scene changed. Select the object in the current snapshot.", text)
@@ -2115,6 +2238,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                                    continued=st.task_resume if body.step else None, selected_context=context)
             return _agent_result(result, text)
         except GrokError as exc:
+            return _refused(str(exc), text)
+        except (KeyError, ValueError, RuntimeError) as exc:
             return _refused(str(exc), text)
         finally:
             st.agent_lock.release()
@@ -2128,6 +2253,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             st.pending_motion = None  # Single use, including rejected confirmations.
             if not pending:
                 return _refused("No validated motion proposal is awaiting confirmation.", "procedi")
+            if pending.get("scan_session") and pending['scan_session'] != st.scans.active:
+                return _refused("The scan session changed or finished. Request a new viewpoint.", pending['goal'])
             if pending.get("snapshot_id") != ((st.inventory or {}).get("snapshot") or {}).get("id"):
                 return _refused("The scene changed. Select the object and request a new plan.", pending["goal"])
             host = AgentHost(st)
@@ -2175,6 +2302,9 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/scan/start")
     def api_scan_start(body: ScanStartReq):
+        if st.agent_lock.locked():
+            raise HTTPException(409, 'Wait for the task to finish or cancel it before changing scan sessions')
+        st.invalidate_pending('The scan session changed. Request a new viewpoint.')
         session = st.scans.start(body.object_id)
         if st.vision.intrinsics:
             st.scans.sessions[session["id"]]["intrinsics"] = st.vision.intrinsics
@@ -2184,10 +2314,19 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     @app.post("/api/scan/capture")
     def api_scan_capture():
         try:
-            robot = st.robot_telemetry()
-            settled_at = None if robot.get("moving") else time.time()
-            _frame, data, meta = _fresh_frame()
-            record = st.scans.capture(data, _scan_meta(meta, robot, settled_at))
+            host = AgentHost(st)
+            packed, error = agent_mod._settled(host)
+            if error:
+                raise RuntimeError(error)
+            frame, meta = packed
+            selected = (st.selected_context or {}).get("selected")
+            objects = host.redetect(frame)
+            hit = next((obj for obj in objects if selected and obj.get("track_id") == selected.get("track_id")), None)
+            meta["quality_required"] = True
+            meta["object_visible"] = bool(hit and not hit.get("identity_uncertain")
+                                          and hit.get("association") in {"same_view", "geometric"})
+            data = host._jpeg or jpeg(frame, 90)
+            record = st.scans.capture(data, _scan_meta(meta, host.robot(), meta.get("stopped_at")), hit)
         except KeyError as exc:
             raise HTTPException(400, str(exc)) from None
         except RuntimeError as exc:
@@ -2216,15 +2355,28 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/scan/orientation")
     def api_scan_orientation(body: OrientReq):
+        if st.arm.status().get('state') == 'moving':
+            raise HTTPException(409, 'Stop the arm before reorienting the object')
         try:
-            return st.scans.mark_orientation(body.orientation)
+            result = st.scans.mark_orientation(body.orientation)
+            st.selected_context = None
+            st.invalidate_pending('Object reorientation invalidated the proposal. Select the object again.')
+            st.task_cancel.set()
+            result['requires_reselection'] = True
+            result['old_object_frame_valid'] = False
+            result['reason'] = 'Object reorientation invalidated localization. Capture the scene and select the object again.'
+            st.audit.event('scan', action='orientation', orientation=body.orientation, registration='not run')
+            return result
         except KeyError as exc:
             raise HTTPException(400, str(exc)) from None
 
     @app.post("/api/scan/finish")
     def api_scan_finish():
+        if st.arm_job == 'approach' and st.arm_thread and st.arm_thread.is_alive():
+            raise HTTPException(409, 'Wait for the approach to finish or cancel it before finishing the scan')
         try:
             done = st.scans.finish()
+            st.invalidate_pending('The scan session finished. Its pending viewpoint is no longer valid.')
         except KeyError as exc:
             raise HTTPException(400, str(exc)) from None
         st.audit.event("scan", action="finish", session=done["id"], n_views=done["n_views"],
@@ -2237,5 +2389,43 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             return st.scans.export_colmap()
         except KeyError as exc:
             raise HTTPException(400, str(exc)) from None
+
+    @app.post("/api/scan/next")
+    def api_scan_next():
+        return api_agent_task(AgentReq(text="Scansionalo: pianifica la prossima vista."))
+
+    @app.get("/api/reconstruction/capabilities")
+    def api_reconstruction_capabilities():
+        return st.reconstruction.capabilities()
+
+    @app.post("/api/reconstruction/start")
+    def api_reconstruction_start():
+        try:
+            job = st.reconstruction.start(st.scans._session(None))
+            st.audit.event('scan', action='reconstruction_start', job=job['id'], reconstructed=False)
+            return job
+        except (KeyError, RuntimeError) as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.get("/api/reconstruction/{job_id}")
+    def api_reconstruction_status(job_id: str):
+        try:
+            return st.reconstruction.get(job_id)
+        except KeyError:
+            raise HTTPException(404, 'Unknown reconstruction job') from None
+
+    @app.post("/api/reconstruction/{job_id}/cancel")
+    def api_reconstruction_cancel(job_id: str):
+        try:
+            return st.reconstruction.cancel(job_id)
+        except KeyError:
+            raise HTTPException(404, 'Unknown reconstruction job') from None
+
+    @app.get("/api/reconstruction/{job_id}/artifacts/{name}")
+    def api_reconstruction_artifact(job_id: str, name: str):
+        try:
+            return FileResponse(st.reconstruction.artifact(job_id, name), filename=name)
+        except KeyError:
+            raise HTTPException(404, 'Unknown reconstruction artifact') from None
 
     return app

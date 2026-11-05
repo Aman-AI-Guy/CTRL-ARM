@@ -9,12 +9,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from pathlib import Path
 
 import numpy as np
+import cv2
 
 from .geom import camera_pose_matrix
+
+
+def _finite_values(values, count):
+    try:
+        return len(values) == count and all(math.isfinite(float(value)) for value in values)
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def viewpoint_candidates(object_mm, clearance_mm: float | None) -> list[dict]:
@@ -91,6 +100,18 @@ class ScanBook:
         self.sessions: dict[str, dict] = {}
         self.active: str | None = None
         self.last: str | None = None
+        for index in sorted(self.root.glob('*/session.json')):
+            try:
+                session = json.loads(index.read_text())
+                if session.get('id') != index.parent.name or not isinstance(session.get('views'), list):
+                    continue
+                session['folder'] = str(index.parent)
+                self.sessions[session['id']] = session
+                self.last = session['id']
+                if session.get('status') == 'open':
+                    self.active = session['id']
+            except (OSError, ValueError, TypeError):
+                continue
 
     def start(self, object_id: str) -> dict:
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -101,6 +122,7 @@ class ScanBook:
             "id": session_id, "object_id": str(object_id or ""), "status": "open",
             "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "views": [], "orientation": "as_found",
             "registration": "not run", "reconstructed": False, "folder": str(folder),
+            "orientation_track_id": str(object_id), "needs_reselection": False,
         }
         self.sessions[session_id] = session
         self.active = session_id
@@ -121,6 +143,37 @@ class ScanBook:
         meta = dict(meta or {})
         detection = dict(detection or {})
         reasons = []
+        quality = {}
+        if meta.get("quality_required"):
+            pose6 = meta.get('pose6')
+            joints = meta.get('joints_deg')
+            if not _finite_values(pose6, 6):
+                reasons.append('a finite six-value tool pose is required')
+            if not _finite_values(joints, 5):
+                reasons.append('five finite joint angles are required')
+            if meta.get('pose_source') != 'telemetry':
+                reasons.append('controller telemetry is required')
+            if meta.get('requested_at') is None or meta.get('stopped_at') is None:
+                reasons.append('capture timing metadata is missing')
+            decoded = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR) if jpeg else None
+            if decoded is None:
+                reasons.append("the JPEG cannot be decoded")
+            else:
+                gray = cv2.cvtColor(decoded, cv2.COLOR_BGR2GRAY)
+                focus = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                clipped = float(np.mean((gray < 5) | (gray > 250)))
+                quality = {"laplacian_variance": round(focus, 2), "clipped_fraction": round(clipped, 3),
+                           "focus_threshold": 20.0, "policy": "heuristic_not_reconstruction_quality"}
+                if focus < 20:
+                    reasons.append("the image is blurry or has insufficient texture")
+                if clipped > .98:
+                    reasons.append("the image is almost entirely underexposed or overexposed")
+                if [decoded.shape[1], decoded.shape[0]] != [meta.get("width"), meta.get("height")]:
+                    reasons.append("decoded image size does not match capture metadata")
+            if not meta.get("object_visible"):
+                reasons.append("the selected object is missing or its identity is uncertain")
+            if not meta.get("calibration_valid"):
+                reasons.append("calibration was not valid for this capture")
         if not jpeg or not jpeg.startswith(b"\xff\xd8") or not jpeg.endswith(b"\xff\xd9"):
             reasons.append("the image is not a complete JPEG")
         if meta.get("moving"):
@@ -158,6 +211,7 @@ class ScanBook:
         record = {
             "viewpoint_id": view_id, "session_id": session["id"], "object_id": session["object_id"],
             "orientation": session["orientation"],
+            "viewpoint_candidate": meta.get("viewpoint_candidate"), "quality": quality,
             "viewpoint": {"id": view_id, "object_id": session["object_id"],
                           "orientation": session["orientation"]},
             "image": str(image_path), "sha256": hashlib.sha256(jpeg or b"").hexdigest(),
@@ -194,6 +248,8 @@ class ScanBook:
         """The operator turned or flipped the object. Registration between groups is not run."""
         session = self._session(session_id)
         session["orientation"] = name.strip() or "turned"
+        session['orientation_track_id'] = None
+        session['needs_reselection'] = True
         self._write_index(session)
         return {"orientation": session["orientation"], "registration": "not run", "automatic_flip": False,
                 "reconstructed": False}
@@ -215,12 +271,17 @@ class ScanBook:
         """Write images and, when a solved camera pose exists, a COLMAP images.txt. No reconstruction."""
         session = self._session(session_id)
         folder = Path(dest) if dest else Path(session["folder"]) / "colmap"
+        # Separate frames after an object is turned; registration has not been solved.
+        orientations = {view.get('orientation') for view in session['views']}
+        if len(orientations) > 1:
+            label = hashlib.sha256(session['orientation'].encode()).hexdigest()[:12]
+            folder = folder / ('orientation-' + label)
         images = folder / "images"
         images.mkdir(parents=True, exist_ok=True)
         posed = 0
         lines = []
         for view in session["views"]:
-            if not view.get("accepted"):
+            if not view.get("accepted") or view.get('orientation') != session['orientation']:
                 continue
             source = Path(view["image"])
             if source.exists():
@@ -245,13 +306,19 @@ class ScanBook:
         intrinsics = session.get("intrinsics")
         if intrinsics and intrinsics.get("k"):
             k = intrinsics["k"]
+            distortion = list(intrinsics.get('dist') or [])
             cameras = (f"1 PINHOLE {intrinsics['width']} {intrinsics['height']} "
                        f"{k[0][0]} {k[1][1]} {k[0][2]} {k[1][2]}\n")
+            if any(distortion):
+                params = [k[0][0], k[1][1], k[0][2], k[1][2], *(distortion + [0] * 8)[:8]]
+                cameras = (f"1 FULL_OPENCV {intrinsics['width']} {intrinsics['height']} "
+                           + ' '.join(map(str, params)) + '\n')
         else:
             cameras = "# camera model unknown: intrinsics were not valid for this session\n"
         (folder / "cameras.txt").write_text(cameras)
         return {"reconstructed": False, "images": len(session["views"]), "posed": posed,
                 "folder": str(folder), "textured_mesh": False, "cad": False,
+                "orientation": session['orientation'], "cross_orientation_registration": False,
                 "note": "images and optional poses only; COLMAP has not been run"}
 
     def public(self, session: dict) -> dict:

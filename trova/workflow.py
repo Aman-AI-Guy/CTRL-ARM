@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import math
 import re
 import time
 import uuid
@@ -45,11 +46,29 @@ def receipt_error(host, task, proposal_id):
         return "Calibration, camera or safety settings changed. Request a new plan."
     robot = host.robot()
     previous = pending["robot"]
+    pose = robot.get('pose6')
+    try:
+        valid_pose = bool(pose) and len(pose) == 6 and all(math.isfinite(float(value)) for value in pose)
+    except (TypeError, ValueError, OverflowError):
+        valid_pose = False
+    if not valid_pose:
+        return 'The controller returned an invalid tool pose. Request a new plan.'
     if (robot.get("moving") or robot.get("error_code") or robot.get("error")
             or robot.get("source") != previous.get("source")
             or not robot.get("pose6")
             or pose_changed(previous.get("pose6"), robot.get("pose6"), mm=1.0, deg=0.1)):
         return "The robot pose or controller state changed. Request a new plan."
+    if previous.get('state_code') is not None and robot.get('state_code') != previous['state_code']:
+        return 'The controller state changed. Request a new plan.'
+    before_joints, now_joints = previous.get('joints'), robot.get('joints')
+    try:
+        changed_joints = bool(before_joints) and (not now_joints or len(now_joints) != len(before_joints)
+                          or any(not math.isfinite(float(b)) or abs(float(a) - float(b)) > .1
+                                 for a, b in zip(before_joints, now_joints)))
+    except (TypeError, ValueError, OverflowError):
+        changed_joints = True
+    if changed_joints:
+        return 'The robot joints changed. Request a new plan.'
     if (pending["target_mm"] != task.get("planned_target")
             or pending["object_id"] != (task.get("selected") or {}).get("track_id")):
         return "The selected object or target changed. Request a new plan."
@@ -87,19 +106,27 @@ def feedback(result, text=""):
     elif state == "movement_completed_verified":
         message = ("Movimento completato e verificato con telemetria e una nuova immagine." if it else
                    "Movement completed and verified with telemetry and a fresh image.")
+    elif result.get('movement_status_unknown'):
+        message = ("Non posso verificare se il robot si è mosso: la posizione finale non è disponibile. " if it else
+                   "I cannot verify whether the robot moved: its final pose is unavailable. ") + reason
     elif result.get("simulation_moved"):
         message = ("Movimento eseguito in simulazione. Il robot fisico non si è mosso." if it else
                    "Movement executed in simulation. The physical robot has not moved.")
+        if result.get('motion_lock'):
+            message += ' ' + reason
     elif state == "movement_executing":
         message = ("Movimento in simulazione." if it else "Movement executing in simulation.") if result.get("execution_mode") == "simulation" else ("Movimento in esecuzione." if it else "Movement is executing.")
     elif result.get("hardware_moved"):
         message = ("Il movimento è terminato, ma il risultato non è ancora verificato." if it else
                    "The movement finished, but its result is not yet verified.")
+        if result.get('motion_lock'):
+            message += ' ' + reason
     elif state == "object_selected":
         message = f"Ho selezionato {name}." if it else f"Selected {name}."
     else:
         message = (("Movimento non eseguito. " if it else "Movement not executed. ") + reason)
-    result["spoken_message"] = result.get("question") or message
+    custom = result.get('spoken_message') if state in {'reconstruction_queued', 'object_reoriented'} else None
+    result["spoken_message"] = result.get("question") or custom or message
     result["blocker"] = reason if state in {"localization_blocked", "movement_refused_or_failed",
-                                            "hardware_authorization_missing"} else None
+                                            "hardware_authorization_missing"} or result.get('motion_lock') else None
     return result

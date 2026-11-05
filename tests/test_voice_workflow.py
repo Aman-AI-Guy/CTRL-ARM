@@ -42,7 +42,7 @@ def setup_scene(tmp_path, monkeypatch, calibrated=False):
     def robot():
         pose = list(st.arm.backend.tcp_pose())
         return {"xyz_mm": pose[:3], "pose6": pose, "source": "telemetry", "moving": False,
-                "joints": list(st.arm.backend.joints()), "error_code": 0}
+                "joints": list(st.arm.backend.joints()), "error_code": 0, "state_code": 2}
 
     st.robot_telemetry = robot
     obj = {"track_id": 7, "box_id": 1, "name": "mouse rosso", "color": "red",
@@ -101,7 +101,24 @@ def test_valid_simulation_requires_specific_confirmation(tmp_path, monkeypatch):
     assert not c.post('/api/agent/confirm', json={"proposal_id": receipt["id"]}).json()["ok"]
 
 
-@pytest.mark.parametrize('change', ['expired', 'pose', 'rotation', 'calibration', 'safety', 'stop', 'cancel', 'selection', 'scene'])
+@pytest.mark.parametrize('unknown', [False, True])
+def test_failed_execution_reports_partial_or_unknown_movement(tmp_path, monkeypatch, unknown):
+    from trova.server import AgentHost
+    st, c = setup_scene(tmp_path, monkeypatch, True)
+    planned = select_and_plan(st, c)
+    monkeypatch.setattr(AgentHost, 'execute', lambda host, target: {
+        'ok': False, 'motion_observed': not unknown, 'movement_status_unknown': unknown,
+        'reason': 'Execution interrupted; final position unavailable' if unknown else 'Execution interrupted after partial travel'})
+    result = c.post('/api/agent/confirm', json={'proposal_id': planned['confirmation']['id']}).json()
+    assert not result['goal_achieved'] and not result['hardware_moved']
+    assert result['movement_status_unknown'] is unknown
+    if unknown:
+        assert 'Non posso verificare' in result['spoken_message']
+    else:
+        assert result['simulation_moved'] and 'partial travel' in result['spoken_message']
+
+
+@pytest.mark.parametrize('change', ['expired', 'pose', 'rotation', 'joints', 'controller_state', 'invalid_pose', 'calibration', 'safety', 'stop', 'cancel', 'selection', 'scene'])
 def test_stale_confirmation_never_moves(tmp_path, monkeypatch, change):
     st, c = setup_scene(tmp_path, monkeypatch, True)
     result = select_and_plan(st, c)
@@ -120,6 +137,18 @@ def test_stale_confirmation_never_moves(tmp_path, monkeypatch, change):
         def changed():
             robot = original()
             robot["pose6"][5] += 1
+            return robot
+        st.robot_telemetry = changed
+    elif change in {'joints', 'controller_state', 'invalid_pose'}:
+        original = st.robot_telemetry
+        def changed():
+            robot = original()
+            if change == 'joints':
+                robot['joints'][0] += 1
+            elif change == 'controller_state':
+                robot['state_code'] = 3
+            else:
+                robot['pose6'][0] = float('nan')
             return robot
         st.robot_telemetry = changed
     elif change == 'calibration':
@@ -165,6 +194,21 @@ def test_scan_reference_preserves_selection_without_approaching(tmp_path, monkey
     assert result["selected"]["track_id"] == 7
     assert not result["motion_proposed"] and not result["hardware_moved"]
     assert np.allclose(st.arm.tcp_mm(), before)
+
+
+def test_legacy_find_retains_its_target_for_a_followup_approach(tmp_path, monkeypatch):
+    from trova.server import AgentHost
+    st, c = setup_scene(tmp_path, monkeypatch)
+    st.frame = lambda: st.scene_frame
+    st.proposals = lambda frame: (st.scene_boxes, False)
+    monkeypatch.setattr(AgentHost, 'snapshot', lambda host: st.inventory['snapshot'])
+    found = c.post('/api/find', data={'text': 'the black one', 'move': 'false'}).json()
+    assert found['result']['status'] == 'found'
+    chosen = st.selected_context['selected']
+    result = c.post('/api/agent/task', json={'text': 'Ora posizionati sopra.'}).json()
+    assert result['selected']['track_id'] == chosen['track_id']
+    assert result['workflow_state'] == 'localization_blocked'
+    assert not result['hardware_moved']
 
 
 def test_spoken_reporting_never_promotes_unverified_movement():
