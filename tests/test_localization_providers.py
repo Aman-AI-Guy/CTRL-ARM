@@ -79,11 +79,13 @@ def qualified(tmp_path):
                     camera_profile=camera,
                     provenance="operator_independent_reference",
                     measurement_note="synthetic",
+                    measurement_uncertainty_mm=0.1,
                 )
             )
     (tmp_path / "calibration_references.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in refs)
     )
+    provider.qualify([1600, 900], operator="synthetic_test_only", confirm=True)
     return provider
 
 
@@ -96,7 +98,8 @@ def test_real_saved_calibration_is_not_activated_by_replay(tmp_path):
     report = router.assess([1600, 900])
     assert not report["valid"] and report["active_provider"] == "image_space"
     assert len(report["providers"]) == 3
-    assert any("6.148" in reason for reason in report["reasons"])
+    assert any("operator-approved" in reason for reason in report["reasons"])
+    assert report["providers"][1]["historical_quality"]["reprojection_rms_px"] == 6.148
     assert any("independent" in reason for reason in report["reasons"])
     assert router.current.hand_eye is None
     result = router.localize_observation(
@@ -306,3 +309,69 @@ def test_uploaded_scene_never_becomes_live_reference_evidence(tmp_path, monkeypa
     )
     assert result.status_code == 400
     assert not (tmp_path / "calibration_references.jsonl").exists()
+
+
+def test_imported_bundle_rms_does_not_inherit_checkerboard_gate(tmp_path):
+    provider = qualified(tmp_path)
+    data = json.loads(provider.path.read_text())
+    data["quality"]["reprojection_rms_px"] = 6.148
+    provider.path.write_text(json.dumps(data))
+    station_path = tmp_path / "calibration_station.json"
+    station = json.loads(station_path.read_text())
+    station["calibration_sha256"] = sha256(provider.path)
+    station_path.write_text(json.dumps(station))
+    provider = HistoricalProvider(provider.path, tmp_path)
+    provider.camera = dict(
+        kind="pi", host="test-camera", rotate_reported=180, extra_rotate=0
+    )
+    provider.robot = robot([0] * 5)
+    ledger = tmp_path / "calibration_references.jsonl"
+    rows = [json.loads(row) for row in ledger.read_text().splitlines()]
+    for row in rows:
+        row["calibration_sha256"] = provider.digest
+        row["binding_sha256"] = provider.binding_hash(station)
+    ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert not provider.assess([1600, 900])[
+        "valid"
+    ]  # old approval cannot authorize new evidence
+    provider.qualify(
+        [1600, 900], operator="synthetic-independent-validation", confirm=True
+    )
+    report = provider.assess([1600, 900])
+    assert (
+        report["valid"] and report["historical_quality"]["reprojection_rms_px"] == 6.148
+    )
+    assert not report["validation_policy"]["checkerboard_pixel_gate_applied"]
+    assert report["validation"]["reference_p95_mm"] < 1e-6
+    ledger.write_text(ledger.read_text() + "\n")
+    assert not provider.assess([1600, 900])["valid"]
+
+
+def test_known_height_reference_roundtrip_and_identity_metadata(tmp_path):
+    p = qualified(tmp_path)
+    router = CalibrationRouter(VisionStore(), p)
+    selected = {
+        "track_id": 9,
+        "box": [700, 350, 900, 550],
+        "geometric_reference": {
+            "kind": "known_height_point",
+            "pixel": [800, 450],
+            "height_mm": 35,
+            "height_uncertainty_mm": 1,
+            "snapshot_id": "measured-image",
+        },
+    }
+    located = router.localize_region(p.robot, selected, [1600, 900])
+    assert located["ok"] and located["object_height_measured"]
+    assert located["point_mm"][2] == pytest.approx(35)
+    assert located["object_id"] == 9 and located["source_image"] == "measured-image"
+    assert located["robot_joints_deg"] == [0] * 5
+    np.testing.assert_allclose(
+        router.base_to_pixel(located["point_mm"], p.robot, [1600, 900]),
+        [800, 450],
+        atol=0.001,
+    )
+    assert p.is_compatible({"size": [1600, 900], **p.camera}, p.robot)["compatible"]
+    assert not p.is_compatible({"size": [1640, 1232], **p.camera}, p.robot)[
+        "compatible"
+    ]

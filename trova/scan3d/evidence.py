@@ -51,12 +51,12 @@ def calibration_report(image_size=None, rotation=180, root=None):
     if rotation != 180:
         reasons.append('The retained images used the 180-degree server rotation; extra rotation is incompatible.')
     rms = data['quality']['reprojection_rms_px']
-    if rms > 1.5:
-        reasons.append(f'Historical reprojection RMS {rms:g} px exceeds the existing 1.5 px active-calibration gate.')
+    reasons.append('Imported bundle-fit pixel RMS is diagnostic; current independent metric qualification is required (not the checkerboard pixel gate).')
     return {'available': True, 'active': False, 'valid_for_motion': False, 'provenance': 'historical_recording',
             'image_size': data['image_size'], 'rotation_deg': 180, 'distortion': 'OpenCV k1,k2,p1,p2,k3',
             'units': 'mm', 'frame': 'robot_base', 'pose_relation': 'T_base_camera = FK_flange(joints_deg) @ T_flange_camera',
-            'tool_pose_is_not_flange_pose': True, 'quality_reported': data['quality'],
+            'tool_pose_is_not_flange_pose': True, 'quality_reported': data['quality'], 'pixel_rms_diagnostic': rms,
+            'validation_policy': 'independent_metric_references_v1',
             'table_z_mm': data['table_z_mm'], 'sha256': sha256(path), 'reasons': reasons}
 
 

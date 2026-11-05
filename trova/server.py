@@ -912,12 +912,19 @@ class AgentHost:
         return {k: record.get(k) for k in ("viewpoint_id", "accepted", "reject_reason", "session_id")}
 
 
+class ProviderQualification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operator: str
+    confirm: bool = False
+
+
 class ProviderReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
     snapshot_id: str
     pixel: list[float]
     measured_mm: list[float]
     measurement_note: str
+    measurement_uncertainty_mm: float | None = None
 
 
 class ObjectReference(BaseModel):
@@ -926,6 +933,8 @@ class ObjectReference(BaseModel):
     track_id: int
     pixel: list[float]
     kind: str
+    height_mm: float | None = None
+    height_uncertainty_mm: float | None = None
     confirm: bool = False
 
 
@@ -1841,6 +1850,25 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         st.vision.set_context(st.source.info(), st.robot_telemetry())
         return st.vision.assess(st.frame_size)
 
+    @app.post('/api/vision/provider/qualify')
+    def api_provider_qualify(body: ProviderQualification):
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409, 'A task is running')
+        try:
+            with st.lock:
+                if not st.vision.historical:
+                    raise HTTPException(400, 'Imported provider is not available')
+                st.vision.set_context(st.source.info(), st.robot_telemetry())
+                try:
+                    result = st.vision.historical.qualify(st.frame_size, operator=body.operator, confirm=body.confirm)
+                except (ValueError, OSError) as exc:
+                    raise HTTPException(400, str(exc)) from None
+                st.invalidate_pending('Calibration qualification changed; request a fresh proposal.')
+                st.audit.event('calibration_qualification', qualification=result, motion_allowed=False)
+                return {'qualification': result, 'hardware_authorized': False, 'motion_allowed': False}
+        finally:
+            st.agent_lock.release()
+
     @app.post("/api/vision/provider/reference")
     def api_provider_reference(body: ProviderReference):
         """Store a current independent ruler/reference comparison; never select/activate a provider."""
@@ -1857,6 +1885,9 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 try:
                     measured = finite(body.measured_mm, 3)
                     pixel = finite(body.pixel, 2)
+                    if (body.measurement_uncertainty_mm is None or not np.isfinite(body.measurement_uncertainty_mm)
+                            or not 0 <= body.measurement_uncertainty_mm <= 2):
+                        raise ValueError('Supply the independent reference measurement uncertainty, between 0 and 2 mm.')
                     if not body.measurement_note.strip():
                         raise ValueError('Describe the independent physical measurement')
                     if not (0 <= pixel[0] < snap['width'] and 0 <= pixel[1] < snap['height']):
@@ -1881,7 +1912,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                            'image': snap['image'], 'image_sha256': sha256(st.s.data_dir / snap['image']),
                            'image_size': [snap['width'], snap['height']], 'robot': robot,
                            'pixel': pixel.tolist(), 'measured_mm': measured.tolist(),
-                           'measurement_note': body.measurement_note, 'recorded_at': time.time(),
+                           'measurement_note': body.measurement_note, 'measurement_uncertainty_mm': body.measurement_uncertainty_mm, 'recorded_at': time.time(),
                            'camera_profile': profile, 'provenance': 'operator_independent_reference'}
                     predicted = historical.cal.pixel_to_plane(*pixel, robot['joints'], float(measured[2]))
                     projection = historical.cal.robot_to_pixel(measured, robot['joints'])
@@ -1911,7 +1942,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 selected = context.get('selected') or {}
                 if snap.get('id') != body.snapshot_id or selected.get('track_id') != body.track_id:
                     raise HTTPException(409, "Snapshot or selected track changed")
-                if not body.confirm or body.kind != 'support_plane_point':
+                if not body.confirm or body.kind not in {'support_plane_point', 'known_height_point'}:
                     raise HTTPException(400, "Confirm a visible point on the support plane; unknown object height is not a top-plane measurement")
                 try:
                     pixel = finite(body.pixel, 2)
@@ -1919,9 +1950,16 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                         raise ValueError('Reference must lie inside the selected region')
                 except (ValueError, TypeError) as exc:
                     raise HTTPException(400, str(exc)) from None
+                if body.kind == 'known_height_point':
+                    if (body.height_mm is None or body.height_uncertainty_mm is None
+                            or not np.isfinite([body.height_mm, body.height_uncertainty_mm]).all()
+                            or body.height_mm < 0 or body.height_uncertainty_mm < 0):
+                        raise HTTPException(400, 'Provide measured height_mm and height_uncertainty_mm; RGB does not measure height')
                 selected['geometric_reference'] = {'kind': body.kind, 'pixel': pixel.tolist(),
                                                     'snapshot_id': body.snapshot_id,
-                                                    'provenance': 'operator_marked_support_point'}
+                                                    'provenance': 'operator_measured_geometric_reference',
+                                                    'height_mm': body.height_mm or 0,
+                                                    'height_uncertainty_mm': body.height_uncertainty_mm or 0}
                 st.invalidate_pending('Object geometric reference changed.')
                 st.audit.event('object_reference', snapshot_id=body.snapshot_id, track_id=body.track_id,
                                reference=selected['geometric_reference'], motion_allowed=False)

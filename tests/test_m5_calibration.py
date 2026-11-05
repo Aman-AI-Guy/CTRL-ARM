@@ -34,7 +34,7 @@ def test_historical_calibration_has_no_activation_side_effect():
     assert report['image_size'] == [1600, 900]
     assert not report['valid_for_motion'] and not report['active']
     assert any('profile' in reason for reason in report['reasons'])
-    assert any('1.5 px' in reason for reason in report['reasons'])
+    assert any('independent metric' in reason for reason in report['reasons'])
     assert not store.assess([1640, 1232])['valid'] and store.hand_eye is None
     assert path.read_bytes() == before
 

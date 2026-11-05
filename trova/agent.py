@@ -512,6 +512,10 @@ def skill_locate(host, task, argument: str) -> dict:
         location = host.vision.localize(robot.get("pose6"), chosen["center"][0], chosen["center"][1],
                                         host.image_size, box=box)
     _note(host, "geometric_localization", time.perf_counter() - began)
+    location.update(object_id=chosen.get('track_id'), source_image=task.get('snapshot_id'),
+                    image_region=chosen.get('box'), geometric_reference=chosen.get('geometric_reference'),
+                    robot_joints_deg=robot.get('joints'), frame='robot_base', units='mm',
+                    rejection_reasons=[] if location.get('ok') else [location.get('reason')])
     task["location"] = location
     chosen["metric_localization_state"] = "localized" if location.get("ok") else "blocked"
     if location.get("ok") and location.get("point_mm") is not None:

@@ -44,7 +44,37 @@ def stationary(robot):
         )
 
 
-class CurrentProvider:
+class ProviderOperations:
+    def validate_current_setup(self, image_size=None):
+        return self.assess(image_size)
+
+    def get_validity_reason(self, image_size=None):
+        return self.assess(image_size).get("reasons", [])
+
+    def get_uncertainty(self, result):
+        return {
+            "uncertainty_mm": result.get("uncertainty_mm"),
+            "kind": result.get("uncertainty_kind", "provider_estimate"),
+        }
+
+    def localize_region(self, robot, selected, image_size):
+        reference = selected.get("geometric_reference") or {}
+        if reference.get("kind") not in {"support_plane_point", "known_height_point"}:
+            return {
+                "ok": False,
+                "point_mm": None,
+                "reason": "A measured geometric reference is required; a bounding-box center is not depth.",
+            }
+        return self.pixel_to_base(
+            robot,
+            reference["pixel"],
+            image_size,
+            height_mm=reference.get("height_mm", 0),
+            height_uncertainty_mm=reference.get("height_uncertainty_mm", 0),
+        )
+
+
+class CurrentProvider(ProviderOperations):
     def __init__(self, store):
         self.store = store
 
@@ -61,11 +91,50 @@ class CurrentProvider:
             "depth_measured": False,
         }
 
-    def localize(self, robot, pixel, image_size):
-        return self.store.localize(robot.get("pose6"), *pixel, image_size)
+    def is_compatible(self, observation, robot_state):
+        size = observation.get("image_size") or observation.get("size")
+        report = self.assess(size)
+        return {"compatible": report["valid"], "reasons": report["reasons"]}
+
+    def pixel_to_base(
+        self, robot, pixel, image_size, *, height_mm=0, height_uncertainty_mm=0
+    ):
+        result = self.store.localize(robot.get("pose6"), *pixel, image_size)
+        if not result.get("ok") or not height_mm:
+            return result
+        from .geom import camera_pose_matrix, pixel_ray, intersect_ray_plane
+
+        height = float(height_mm)
+        if not np.isfinite(height) or height < 0:
+            raise ValueError("Measured object height must be finite and nonnegative")
+        matrix = camera_pose_matrix(robot["pose6"], self.store.hand_eye["matrix"])
+        ray = matrix[:3, :3] @ pixel_ray(
+            *pixel,
+            np.asarray(self.store.intrinsics["k"]),
+            np.asarray(self.store.intrinsics["dist"]),
+        )
+        origin = np.asarray(self.store.table["point_mm"], float) + [0, 0, height]
+        point = intersect_ray_plane(
+            matrix[:3, 3], ray, origin, self.store.table["normal"]
+        )
+        if point is None:
+            return result | {
+                "ok": False,
+                "point_mm": None,
+                "reason": "Ray does not reach the measured height plane",
+            }
+        return result | {
+            "point_mm": point.tolist(),
+            "object_height_measured": True,
+            "uncertainty_mm": result.get("uncertainty_mm", 0)
+            + float(height_uncertainty_mm),
+            "kind": "known_height_plane_intersection",
+        }
+
+    localize = pixel_to_base
 
 
-class ImageSpaceProvider:
+class ImageSpaceProvider(ProviderOperations):
     def assess(self, image_size=None):
         return {
             "provider": "image_space",
@@ -79,7 +148,7 @@ class ImageSpaceProvider:
             ],
         }
 
-    def localize(self, robot, pixel, image_size):
+    def localize(self, robot, pixel, image_size, **_kwargs):
         return {
             "ok": False,
             "point_mm": None,
@@ -87,8 +156,16 @@ class ImageSpaceProvider:
             "reason": "Only image-space localization is available.",
         }
 
+    def is_compatible(self, observation, robot_state):
+        return {
+            "compatible": False,
+            "reasons": ["Image-space observations have no metric calibration."],
+        }
 
-class HistoricalProvider:
+    pixel_to_base = localize
+
+
+class HistoricalProvider(ProviderOperations):
     """An imported model can qualify only against bound current measurements, never replay alone."""
 
     def __init__(self, path, directory):
@@ -137,7 +214,29 @@ class HistoricalProvider:
             raise ValueError("Independent references must be JSON objects")
         return rows
 
-    def assess(self, image_size=None):
+    def is_compatible(self, observation, robot_state):
+        size = observation.get("image_size") or observation.get("size")
+        reasons = []
+        if list(size or []) != [self.cal.width, self.cal.height]:
+            reasons.append(
+                "Exact calibrated optical profile is required; no implicit resize/crop."
+            )
+        if (
+            observation.get("rotate_reported") != 180
+            or observation.get("extra_rotate") != 0
+        ):
+            reasons.append(
+                "Calibrated server rotation is 180 degrees with zero extra rotation."
+            )
+        if observation.get("kind") != "pi":
+            reasons.append("A fresh physically bound Pi observation is required.")
+        try:
+            stationary(robot_state)
+        except (ValueError, TypeError) as exc:
+            reasons.append(str(exc))
+        return {"compatible": not reasons, "reasons": reasons}
+
+    def assess(self, image_size=None, *, require_approval=True):
         reasons = []
         metrics = {}
         data = self.cal.data
@@ -288,12 +387,28 @@ class HistoricalProvider:
                     reference_p95_mm=float(np.percentile(errors, 95)),
                     reference_rms_px=float(np.sqrt(np.mean(np.square(pixels)))),
                 )
+                allowances = [
+                    float(row["measurement_uncertainty_mm"])
+                    for row in refs
+                    if row.get("binding_sha256") == binding_hash
+                    and row.get("calibration_sha256") == self.digest
+                ]
+                if any(not np.isfinite(v) or v < 0 or v > 2 for v in allowances):
+                    reasons.append(
+                        "Independent measurement uncertainty must be between 0 and 2 mm."
+                    )
+                allowance = max(allowances, default=0)
+                metrics["measurement_uncertainty_mm"] = allowance
+                metrics["reference_max_mm"] = max(errors)
+                metrics["metric_error_bound_mm"] = (
+                    metrics["reference_p95_mm"] + allowance
+                )
                 if (
-                    metrics["reference_p95_mm"] > 5
-                    or metrics["reference_rms_px"] > MAX_RMS_PX
+                    metrics["metric_error_bound_mm"] > 5
+                    or metrics["reference_max_mm"] + allowance > 8
                 ):
                     reasons.append(
-                        "Independent reference validation exceeds 5 mm p95 or the existing 1.5 px reprojection gate."
+                        "Independent metric validation exceeds 5 mm p95 or 8 mm maximum, including measurement uncertainty."
                     )
                 xy = np.asarray(points)[:, :2]
                 if np.linalg.svd(xy - xy.mean(0), compute_uv=False)[-1] < 20:
@@ -324,13 +439,24 @@ class HistoricalProvider:
                 )
             else:
                 abc = finite([measured_table[k] for k in ("a", "b", "c")], 3)
-                if (
-                    not np.allclose(abc, self.cal.plane, atol=0.001)
-                    or not 0 <= float(measured_table["residual_mm"]) <= 5
-                ):
+                residual = float(measured_table["residual_mm"])
+                if not 0 <= residual <= 5:
                     reasons.append(
-                        "Measured current support plane differs from the candidate model or exceeds 5 mm residual."
+                        "Measured current support plane exceeds 5 mm residual."
                     )
+                metrics["active_plane_abc"] = abc.tolist()
+                metrics["table_correction_from_saved_abc"] = (
+                    abc - np.asarray(self.cal.plane)
+                ).tolist()
+                if points:
+                    plane_errors = [
+                        abs(float(p[2] - (abc[0] * p[0] + abc[1] * p[1] + abc[2])))
+                        for p in points
+                    ]
+                    if max(plane_errors) > 5:
+                        reasons.append(
+                            "Independently measured support references disagree with the current plane by more than 5 mm."
+                        )
         except (ValueError, TypeError, KeyError, OSError) as exc:
             reasons.append(f"Physical binding/validation incomplete: {exc}")
         if "independent_samples" not in metrics:
@@ -347,9 +473,14 @@ class HistoricalProvider:
             )
         except (ValueError, TypeError, AttributeError):
             rms = float("inf")
-        if not np.isfinite(rms) or rms > MAX_RMS_PX:
+        # Original bundle-fit pixel residual and checkerboard intrinsic RMS have different
+        # nuisance parameters, data and evaluation scopes. Do not transfer its pixel gate.
+        if not np.isfinite(rms) or rms < 0:
+            reasons.append("Imported model lacks a finite reprojection diagnostic.")
+        approval = self.qualification()
+        if require_approval and not self.approval_matches(approval):
             reasons.append(
-                f"Candidate reprojection RMS {rms:g} px exceeds the unchanged {MAX_RMS_PX:g} px calibration gate; refine the original model with measured constraints before qualification."
+                "Current independent evidence requires an explicit operator-approved qualification record."
             )
         return {
             "provider": "historical_flange",
@@ -369,15 +500,80 @@ class HistoricalProvider:
             "historical_quality": data.get("quality"),
             "validation": metrics,
             "historical_replay_is_independent_validation": False,
-            "uncertainty_mm": metrics.get("reference_p95_mm"),
+            "uncertainty_mm": metrics.get("metric_error_bound_mm"),
+            "validation_policy": {
+                "name": "independent_metric_references_v1",
+                "p95_limit_mm": 5,
+                "max_limit_mm": 8,
+                "checkerboard_pixel_gate_applied": False,
+            },
+            "qualification": approval,
+            "historical_pixel_rms_is_activation_evidence": False,
             "motion_authorized": False,
         }
+
+    def qualification(self):
+        path = self.directory / "calibration_qualification.json"
+        if not path.exists():
+            return {}
+        try:
+            value = json.loads(path.read_text())
+            return value if isinstance(value, dict) else {}
+        except (ValueError, OSError):
+            return {}
+
+    def evidence_digest(self):
+        path = self.directory / "calibration_references.jsonl"
+        return sha256(path) if path.exists() else None
+
+    def approval_matches(self, approval):
+        try:
+            return bool(
+                approval.get("operator")
+                and approval.get("approved_at")
+                and approval.get("calibration_sha256") == self.digest
+                and approval.get("binding_sha256") == self.binding_hash(self.station())
+                and approval.get("evidence_sha256") == self.evidence_digest()
+                and approval.get("policy") == "independent_metric_references_v1"
+            )
+        except (ValueError, OSError):
+            return False
+
+    def qualify(self, image_size, *, operator, confirm):
+        if not confirm or not str(operator).strip():
+            raise ValueError(
+                "An operator must explicitly approve current independent physical qualification."
+            )
+        report = self.assess(image_size, require_approval=False)
+        if not report["valid"]:
+            raise ValueError("; ".join(report["reasons"]))
+        import time
+
+        record = {
+            "operator": str(operator).strip(),
+            "approved_at": time.time(),
+            "calibration_sha256": self.digest,
+            "binding_sha256": self.binding_hash(self.station()),
+            "evidence_sha256": self.evidence_digest(),
+            "policy": "independent_metric_references_v1",
+            "validation": report["validation"],
+            "frame": "robot_base",
+            "units": "mm",
+            "hardware_authorized": False,
+        }
+        self.directory.mkdir(parents=True, exist_ok=True)
+        (self.directory / "calibration_qualification.json").write_text(
+            json.dumps(record, indent=2) + "\n"
+        )
+        return record
 
     @staticmethod
     def binding_hash(station):
         return hashlib.sha256(json.dumps(station, sort_keys=True).encode()).hexdigest()
 
-    def localize(self, robot, pixel, image_size):
+    def pixel_to_base(
+        self, robot, pixel, image_size, *, height_mm=0, height_uncertainty_mm=0
+    ):
         self.robot = robot
         report = self.assess(image_size)
         base = {
@@ -395,7 +591,18 @@ class HistoricalProvider:
         uv = finite(pixel, 2)
         if not (0 <= uv[0] < self.cal.width and 0 <= uv[1] < self.cal.height):
             return base | {"reason": "Pixel is outside the calibrated image."}
-        point = self.cal.pixel_to_table(*uv, robot["joints"])
+        height = float(height_mm)
+        height_error = float(height_uncertainty_mm)
+        if (
+            not np.isfinite([height, height_error]).all()
+            or height < 0
+            or height_error < 0
+        ):
+            return base | {
+                "reason": "A finite independently measured height and uncertainty are required."
+            }
+        a, b, c = report["validation"]["active_plane_abc"]
+        point = self.cal.pixel_to_plane(*uv, robot["joints"], c + height, (a, b))
         lo, hi = np.asarray(report["validation"]["qualified_xy_mm"])
         if (point[:2] < lo).any() or (point[:2] > hi).any():
             return base | {
@@ -406,15 +613,19 @@ class HistoricalProvider:
             "point_mm": point.tolist(),
             "camera_pose": self.cal.camera_pose(robot["joints"]).tolist(),
             "uncertainty_mm": report["uncertainty_mm"]
-            + 2 * self.cal.mm_per_pixel(robot["joints"], point[2]),
+            + 2 * self.cal.mm_per_pixel(robot["joints"], point[2])
+            + height_error,
             "uncertainty_kind": "independent_reference_p95_plus_two_pixel_reference_allowance_not_a_global_guarantee",
             "kind": "support_plane_ray_intersection",
-            "object_height_measured": False,
-            "reason": "Joint-dependent distorted ray intersects the independently qualified support plane.",
+            "object_height_measured": height > 0,
+            "reference_height_mm": height,
+            "reason": "Joint-dependent distorted ray intersects the independently qualified known-height plane.",
         }
 
+    localize = pixel_to_base
 
-class CalibrationRouter:
+
+class CalibrationRouter(ProviderOperations):
     """Keep existing calibration editing/storage; route localization through qualified providers."""
 
     def __init__(self, current, historical=None):
@@ -448,7 +659,8 @@ class CalibrationRouter:
                         historical.cal.T_fc, historical.station()["tcp_offset_mm"]
                     ).tolist()
                 }
-            a, b, c = historical.cal.plane
+            measured = historical.station()["table_plane"]
+            a, b, c = (float(measured[k]) for k in ("a", "b", "c"))
             return {
                 "point_mm": [0, 0, c],
                 "normal": [-a, -b, 1],
@@ -500,6 +712,7 @@ class CalibrationRouter:
             "calibration_sha256": sha256(historical.path),
             "station": historical.station(),
             "references": historical.references(),
+            "qualification": historical.qualification(),
             "camera": {
                 k: historical.camera.get(k)
                 for k in ("kind", "host", "rotate_reported", "extra_rotate")
@@ -529,7 +742,10 @@ class CalibrationRouter:
                 "calibration_valid": False,
                 "verified_tool_position": False,
             }
-        if not reference or reference.get("kind") != "support_plane_point":
+        if not reference or reference.get("kind") not in {
+            "support_plane_point",
+            "known_height_point",
+        }:
             return {
                 "ok": False,
                 "point_mm": None,
@@ -557,17 +773,81 @@ class CalibrationRouter:
                 "reason": "Geometric reference is outside the selected object region.",
             }
         if report["active_provider"] == "historical_flange":
-            result = self.historical.localize(robot, pixel, image_size)
+            provider = self.historical
         else:
-            result = self.current.localize(
-                robot.get("pose6"), *pixel, image_size, box=selected["box"]
-            )
+            provider = CurrentProvider(self.current)
+        height = (
+            reference.get("height_mm", 0)
+            if reference["kind"] == "known_height_point"
+            else 0
+        )
+        result = provider.pixel_to_base(
+            robot,
+            pixel,
+            image_size,
+            height_mm=height,
+            height_uncertainty_mm=reference.get("height_uncertainty_mm", 0),
+        )
         return result | {
-            "reference_kind": "operator_marked_support_plane_point",
+            "reference_kind": reference["kind"],
             "object_center_mm": None,
-            "object_height_measured": False,
+            "object_id": selected.get("track_id"),
+            "source_image": reference.get("snapshot_id"),
+            "image_region": selected.get("box"),
+            "geometric_reference": dict(reference),
+            "robot_joints_deg": list(robot.get("joints") or []),
+            "frame": "robot_base",
+            "units": "mm",
+            "object_height_measured": reference["kind"] == "known_height_point",
             "provider": report["active_provider"],
+            "calibration_valid": bool(report["valid"]),
+            "rejection_reasons": [] if result.get("ok") else [result.get("reason")],
         }
+
+    def is_compatible(self, observation, robot_state):
+        if self.historical:
+            return self.historical.is_compatible(observation, robot_state)
+        return CurrentProvider(self.current).is_compatible(observation, robot_state)
+
+    def pixel_to_base(self, robot, pixel, image_size, **kwargs):
+        report = self.assess(image_size)
+        if report["active_provider"] == "historical_flange":
+            return self.historical.pixel_to_base(robot, pixel, image_size, **kwargs)
+        if report["active_provider"] == "current_tool_camera":
+            return CurrentProvider(self.current).pixel_to_base(
+                robot, pixel, image_size, **kwargs
+            )
+        return {"ok": False, "point_mm": None, "reason": "; ".join(report["reasons"])}
+
+    localize_region = localize_observation
+
+    def camera_pose(self, robot):
+        from .geom import camera_pose_matrix
+
+        if self.assess(self.image_size)["active_provider"] == "historical_flange":
+            return self.historical.cal.camera_pose(robot["joints"])
+        if self.current.assess(self.image_size)["valid"]:
+            return camera_pose_matrix(robot["pose6"], self.current.hand_eye["matrix"])
+        raise ValueError("No qualified camera-to-base provider is active")
+
+    def base_to_pixel(self, point_mm, robot, image_size):
+        import cv2
+
+        self.image_size = list(image_size)
+        matrix = np.linalg.inv(self.camera_pose(robot))
+        point = finite(point_mm, 3)
+        camera = matrix[:3, :3] @ point + matrix[:3, 3]
+        if camera[2] <= 0:
+            raise ValueError("Point is behind the camera")
+        intr = self.intrinsics
+        uv, _ = cv2.projectPoints(
+            camera.reshape(1, 1, 3),
+            np.zeros(3),
+            np.zeros(3),
+            np.asarray(intr["k"]),
+            np.asarray(intr["dist"]),
+        )
+        return uv.reshape(2).tolist()
 
     def observation_target(self, *args, **kwargs):
         return VisionStore.observation_target(self, *args, **kwargs)

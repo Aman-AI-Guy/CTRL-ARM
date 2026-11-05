@@ -1,5 +1,7 @@
 # Live localization and historical calibration audit
 
+M6 update: the imported bundle-fit pixel RMS and checkerboard intrinsic RMS are both image residuals, but use different observations and fitted nuisance parameters (robot FK, marker poses and camera mounting versus intrinsic board fits). A shared activation threshold was inappropriate. The imported provider now qualifies using current independent metric references (p95 ≤5 mm, maximum ≤8 mm including declared measurement uncertainty), measured plane/FK consistency, exact optical compatibility and an explicit operator-approved record bound to model/station/evidence hashes. Its 6.148 px RMS remains visible as a diagnostic, not an activation gate. Native checkerboard gates are unchanged. Earlier audit statements below describe the pre-M6 rejection. No current physical references or approval have been fabricated.
+
 The retained calibration is now a discoverable localization provider. It is **not active on this station**. A historical replay, an image region and an independently validated metric point are separate evidence states. No hardware motion was sent during this work.
 
 ## Actual execution path and original rejection
