@@ -122,14 +122,25 @@ def inspect(host,task,argument):
         key=jobs[-1]
     report=host.reconstruction.get(key)
     task['phase']='reported'
-    return result('inspect_reconstruction',report['status']!='failed',report['reason'],task,reconstruction=report,terminal=True,executed=False)
+    review=_review(host)
+    extra={'scan_review':review} if review and review.get('job_id')==key else {}
+    return result('inspect_reconstruction',report['status']!='failed',report['reason'],task,reconstruction=report,terminal=True,executed=False,**extra)
+
+
+def _review(host):
+    """Grok's latest review of the renders (trova/scan_review.py), when the host carries one."""
+    return getattr(getattr(host,'st',None),'scan_review',None)
+
+
+GENERIC_REORIENT=('No additional surface coverage is guaranteed. Cancel motion, park through a separately validated proposal, then turn the object and select it again. A new group is required; cross-group registration is unavailable.')
 
 
 def reorient(host,task,argument):
     task['phase']='reported'
-    return result('request_object_reorientation',True,
-        'No additional surface coverage is guaranteed. Cancel motion, park through a separately validated proposal, then turn the object and select it again. A new group is required; cross-group registration is unavailable.',
-        task,terminal=True,executed=False,human_assistance_requested=True)
+    asked=[q for q in (_review(host) or {}).get('requests',[]) if q.get('status')=='pending']
+    reason=(asked[0]['instruction']+' '+GENERIC_REORIENT) if asked else GENERIC_REORIENT
+    return result('request_object_reorientation',True,reason,task,terminal=True,executed=False,
+                  human_assistance_requested=True,operator_requests=asked)
 
 
 def finish(host,task,argument):

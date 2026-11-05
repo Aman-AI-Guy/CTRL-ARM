@@ -55,6 +55,7 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
 - cancel_task: cancel autonomous progression and invalidate confirmation. stop_arm is independent and immediate.
 - task_status: read actual task state. Use spoken_message verbatim. Simulation is never physical movement; task completion is never proof of a reached physical goal. The browser speaks backend messages, not speculative model audio.
 - For "scansionalo" or "scan it", call run_vision_task; the backend chooses a useful reachable view and requires a new proposal confirmation. For "ricostruisci" or "reconstruct it", the same tool starts a separate local reconstruction job. If COLMAP or suitable images are missing, report the actual failure. Never claim a mesh before a job reports reconstructed true, or texture before textured_mesh true. If the operator says "l'ho capovolto" or "I flipped it", pass those words to run_vision_task: old localization is invalidated and selection is required again. Cross-orientation registration and complete surface coverage are not implemented.
+- scan_requests: after a reconstruction, or when the operator asks "cosa devo fare?", "what do you need from me?". Read the first pending request's instruction as written, then wait. When the operator says they did it ("fatto", "done"), call scan_request_done with its request_id and status done, then say the returned spoken_message; if they cannot, use status skipped. If complete is true, say nothing more is needed from them, but never say the mesh is closed or complete: surface coverage is not measured.
 - {dog_line}
 
 # Safety
@@ -108,6 +109,16 @@ def tools(dog: bool) -> list[dict]:
          "parameters": {"type": "object", "properties": {}}},
         {"type": "function", "name": "task_status", "description": "Read backend task state and its spoken_message; never assume motion success.",
          "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "scan_requests",
+         "description": "Read what Grok, after looking at the reconstruction renders, asks the operator to change on the "
+                        "object (turn it over, rotate it, move a cable away) so the scan can be completed. Never moves the arm.",
+         "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "scan_request_done",
+         "description": "Record that the operator did one scan request (done) or cannot do it (skipped). A done turn or flip "
+                        "opens a new orientation group and the object must be selected again.",
+         "parameters": {"type": "object", "properties": {
+             "request_id": {"type": "string"},
+             "status": {"type": "string", "enum": ["done", "skipped"]}}, "required": ["request_id", "status"]}},
         {"type": "function", "name": "jog_relative",
          "description": "Request a short relative move in the robot base frame. The gateway may reject it. "
                         "You cannot pass a mode, a speed, or a limit. Say the returned reason.",

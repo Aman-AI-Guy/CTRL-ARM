@@ -1,0 +1,697 @@
+{
+ "_note": "scan3d/handeye.py: camera <-> xArm 5 calibration for calib/pix2robot.py. mm, robot base frame, OpenCV camera frame (x right, y down, z forward).",
+ "image_size": [
+  1600,
+  900
+ ],
+ "K": [
+  [
+   1304.9256346281506,
+   0.0,
+   829.2819588656458
+  ],
+  [
+   0.0,
+   1304.9256346281506,
+   467.6861129003491
+  ],
+  [
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "dist": [
+  0.08216226116492933,
+  -0.1541438987617839,
+  0.0,
+  0.0,
+  0.0
+ ],
+ "T_flange_camera": [
+  [
+   -0.6930782376721386,
+   0.003777629926135617,
+   -0.7208524717148604,
+   -26.820788268114878
+  ],
+  [
+   -0.720746133335457,
+   0.014325685335201399,
+   0.6930510702839036,
+   25.374786618642712
+  ],
+  [
+   0.012944796146334148,
+   0.9998902461029499,
+   -0.007206108583132531,
+   39.09574184694304
+  ],
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "table_z_mm": -40.97,
+ "table_z_fitted_mm": -40.97,
+ "cube_height_mm": 53.0,
+ "head_sphere": {
+  "center_flange_mm": [
+   0.0,
+   0.0,
+   45.0
+  ],
+  "radius_mm": 60.0,
+  "note": "Giacomo: the head fits in a ~120 mm sphere; CAD bbox 100 x 100 x 90 mm from the flange face"
+ },
+ "markers": {
+  "2": {
+   "corners_mm": [
+    [
+     -115.11,
+     -372.37,
+     13.18
+    ],
+    [
+     -112.79,
+     -333.44,
+     12.88
+    ],
+    [
+     -73.86,
+     -335.74,
+     13.16
+    ],
+    [
+     -76.17,
+     -374.67,
+     13.45
+    ]
+   ],
+   "normal": [
+    -0.0066,
+    0.0079,
+    0.9999
+   ]
+  },
+  "3": {
+   "corners_mm": [
+    [
+     -70.15,
+     -376.85,
+     5.13
+    ],
+    [
+     -67.86,
+     -337.92,
+     5.5
+    ],
+    [
+     -64.73,
+     -337.74,
+     -33.37
+    ],
+    [
+     -67.02,
+     -376.67,
+     -33.74
+    ]
+   ],
+   "normal": [
+    0.995,
+    -0.0593,
+    0.0799
+   ]
+  },
+  "4": {
+   "corners_mm": [
+    [
+     91.23,
+     -373.4,
+     4.77
+    ],
+    [
+     92.35,
+     -334.42,
+     4.51
+    ],
+    [
+     131.29,
+     -335.53,
+     6.43
+    ],
+    [
+     130.16,
+     -374.51,
+     6.68
+    ]
+   ],
+   "normal": [
+    -0.0489,
+    0.0079,
+    0.9988
+   ]
+  }
+ },
+ "markers_by_leg": {
+  "2@leg0": {
+   "corners_mm": [
+    [
+     -156.34,
+     -434.57,
+     13.03
+    ],
+    [
+     -154.34,
+     -395.63,
+     12.77
+    ],
+    [
+     -115.41,
+     -397.62,
+     13.76
+    ],
+    [
+     -117.41,
+     -436.57,
+     14.03
+    ]
+   ],
+   "normal": [
+    -0.0252,
+    0.0081,
+    0.9997
+   ]
+  },
+  "3@leg0": {
+   "corners_mm": [
+    [
+     -107.89,
+     -438.61,
+     11.27
+    ],
+    [
+     -106.92,
+     -399.62,
+     11.24
+    ],
+    [
+     -106.47,
+     -399.66,
+     -27.75
+    ],
+    [
+     -107.43,
+     -438.64,
+     -27.73
+    ]
+   ],
+   "normal": [
+    0.9996,
+    -0.0247,
+    0.0117
+   ]
+  },
+  "4@leg0": {
+   "corners_mm": [
+    [
+     102.83,
+     -473.52,
+     12.16
+    ],
+    [
+     102.74,
+     -434.52,
+     12.39
+    ],
+    [
+     141.74,
+     -434.43,
+     12.05
+    ],
+    [
+     141.83,
+     -473.43,
+     11.82
+    ]
+   ],
+   "normal": [
+    0.0087,
+    -0.006,
+    0.9999
+   ]
+  },
+  "2@leg1": {
+   "corners_mm": [
+    [
+     -121.3,
+     -545.83,
+     12.48
+    ],
+    [
+     -117.86,
+     -506.99,
+     12.09
+    ],
+    [
+     -79.02,
+     -510.42,
+     12.51
+    ],
+    [
+     -82.45,
+     -549.27,
+     12.9
+    ]
+   ],
+   "normal": [
+    -0.0099,
+    0.0108,
+    0.9999
+   ]
+  },
+  "3@leg1": {
+   "corners_mm": [
+    [
+     -73.48,
+     -551.41,
+     8.68
+    ],
+    [
+     -70.65,
+     -512.51,
+     8.71
+    ],
+    [
+     -70.02,
+     -512.53,
+     -30.29
+    ],
+    [
+     -72.85,
+     -551.43,
+     -30.32
+    ]
+   ],
+   "normal": [
+    0.9972,
+    -0.0726,
+    0.0162
+   ]
+  },
+  "4@leg1": {
+   "corners_mm": [
+    [
+     118.01,
+     -554.93,
+     11.95
+    ],
+    [
+     118.64,
+     -515.94,
+     12.08
+    ],
+    [
+     157.63,
+     -516.56,
+     11.62
+    ],
+    [
+     157.0,
+     -555.55,
+     11.48
+    ]
+   ],
+   "normal": [
+    0.0119,
+    -0.0037,
+    0.9999
+   ]
+  },
+  "2@leg2": {
+   "corners_mm": [
+    [
+     -115.11,
+     -372.37,
+     13.18
+    ],
+    [
+     -112.79,
+     -333.44,
+     12.88
+    ],
+    [
+     -73.86,
+     -335.74,
+     13.16
+    ],
+    [
+     -76.17,
+     -374.67,
+     13.45
+    ]
+   ],
+   "normal": [
+    -0.0066,
+    0.0079,
+    0.9999
+   ]
+  },
+  "3@leg2": {
+   "corners_mm": [
+    [
+     -70.15,
+     -376.85,
+     5.13
+    ],
+    [
+     -67.86,
+     -337.92,
+     5.5
+    ],
+    [
+     -64.73,
+     -337.74,
+     -33.37
+    ],
+    [
+     -67.02,
+     -376.67,
+     -33.74
+    ]
+   ],
+   "normal": [
+    0.995,
+    -0.0593,
+    0.0799
+   ]
+  },
+  "4@leg2": {
+   "corners_mm": [
+    [
+     91.23,
+     -373.4,
+     4.77
+    ],
+    [
+     92.35,
+     -334.42,
+     4.51
+    ],
+    [
+     131.29,
+     -335.53,
+     6.43
+    ],
+    [
+     130.16,
+     -374.51,
+     6.68
+    ]
+   ],
+   "normal": [
+    -0.0489,
+    0.0079,
+    0.9988
+   ]
+  }
+ },
+ "table_plane": {
+  "a": -0.004281709384780579,
+  "b": 0.0007360157071236162,
+  "c": -40.68934235491909,
+  "tilt_deg": 0.249,
+  "rms_mm": 1.28,
+  "points": [
+   [
+    -134.5,
+    -416.5,
+    -39.6
+   ],
+   [
+    121.8,
+    -453.7,
+    -40.9
+   ],
+   [
+    -99.6,
+    -528.7,
+    -40.5
+   ],
+   [
+    137.2,
+    -535.5,
+    -41.2
+   ],
+   [
+    -94.1,
+    -354.5,
+    -39.8
+   ],
+   [
+    -18.8,
+    -434.6,
+    -43.7
+   ]
+  ]
+ },
+ "ruler": [
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-2",
+   "view": 0,
+   "gap_mm": 151.0,
+   "label": "A/check-2",
+   "to": "marker",
+   "marker": 2,
+   "q": [
+    -109.73,
+    35.12,
+    -38.95,
+    -88.06,
+    45.05
+   ],
+   "leg": 0,
+   "key": [
+    0,
+    2
+   ],
+   "head_bottom_mm": [
+    -148.71,
+    -414.77,
+    162.87
+   ],
+   "fitted_gap_mm": 149.5
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-4",
+   "view": 0,
+   "gap_mm": 151.0,
+   "label": "A/check-4",
+   "to": "marker",
+   "marker": 4,
+   "q": [
+    -76.18,
+    37.69,
+    -44.65,
+    -84.95,
+    45.07
+   ],
+   "leg": 0,
+   "key": [
+    0,
+    4
+   ],
+   "head_bottom_mm": [
+    111.78,
+    -454.13,
+    159.39
+   ],
+   "fitted_gap_mm": 147.3
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-table",
+   "view": 0,
+   "gap_mm": 200.0,
+   "label": "A/check-table",
+   "to": "table",
+   "q": [
+    -92.49,
+    36.21,
+    -38.45,
+    -89.66,
+    45.06
+   ],
+   "leg": 0,
+   "key": null,
+   "head_bottom_mm": [
+    -18.85,
+    -434.64,
+    156.26
+   ],
+   "fitted_gap_mm": 197.2
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-2",
+   "view": 0,
+   "gap_mm": 153.0,
+   "label": "B/check-2",
+   "to": "marker",
+   "marker": 2,
+   "q": [
+    -101.79,
+    42.94,
+    -59.6,
+    -75.23,
+    45.06
+   ],
+   "leg": 1,
+   "key": [
+    1,
+    2
+   ],
+   "head_bottom_mm": [
+    -109.96,
+    -527.06,
+    163.43
+   ],
+   "fitted_gap_mm": 150.9
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-4",
+   "view": 0,
+   "gap_mm": 153.0,
+   "label": "B/check-4",
+   "to": "marker",
+   "marker": 4,
+   "q": [
+    -76.7,
+    44.76,
+    -62.64,
+    -74.02,
+    45.06
+   ],
+   "leg": 1,
+   "key": [
+    1,
+    4
+   ],
+   "head_bottom_mm": [
+    126.63,
+    -535.44,
+    159.7
+   ],
+   "fitted_gap_mm": 147.9
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-2",
+   "view": 0,
+   "gap_mm": 181.0,
+   "label": "C/check-2",
+   "to": "marker",
+   "marker": 2,
+   "q": [
+    -107.11,
+    23.58,
+    -22.82,
+    -92.66,
+    45.06
+   ],
+   "leg": 2,
+   "key": [
+    2,
+    2
+   ],
+   "head_bottom_mm": [
+    -108.45,
+    -352.47,
+    193.37
+   ],
+   "fitted_gap_mm": 180.2
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-4",
+   "view": 0,
+   "gap_mm": 180.0,
+   "label": "C/check-4",
+   "to": "marker",
+   "marker": 4,
+   "q": [
+    -74.6,
+    24.66,
+    -23.52,
+    -93.04,
+    45.06
+   ],
+   "leg": 2,
+   "key": [
+    2,
+    4
+   ],
+   "head_bottom_mm": [
+    98.57,
+    -357.64,
+    189.78
+   ],
+   "fitted_gap_mm": 184.2
+  }
+ ],
+ "quality": {
+  "reprojection_rms_px": 8.4,
+  "holdout_median_mm": 1.44,
+  "holdout_p95_mm": 6.15,
+  "pictures": 57,
+  "observations": 92
+ },
+ "source": {
+  "snapshots": [
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\far",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-table",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\ring-2",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-2",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\ring-4",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-4",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\ring-2",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-2",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\ring-4",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-4",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\ring-2",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-2",
+   "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-4"
+  ],
+  "time": "2026-11-05 04:34:25",
+  "handeye_marker": [
+   0,
+   2
+  ],
+  "handeye_pictures": 26,
+  "dropped_observations": [
+   [
+    "far/014.jpg",
+    [
+     0,
+     2
+    ],
+    23.5
+   ],
+   [
+    "far/015.jpg",
+    [
+     0,
+     2
+    ],
+    22.1
+   ],
+   [
+    "check-4/000.jpg",
+    [
+     0,
+     4
+    ],
+    56.7
+   ]
+  ],
+  "scene_facts": {}
+ }
+}

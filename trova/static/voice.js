@@ -142,6 +142,21 @@ const TrovaVoice = (() => {
       h.onAgent && h.onAgent(d);
       return d;
     },
+    async scan_requests() {
+      let d = {};
+      try { d = await (await fetch('/api/scan/review')).json(); } catch (e) { return {error: 'scan review unavailable'}; }
+      h.onRefresh && h.onRefresh();
+      const pending = (d.requests || []).filter(q => q.status === 'pending');
+      return {job_id: d.job_id, complete: !!d.complete, summary: d.summary || d.reason || '',
+              pending: pending.map(q => ({request_id: q.id, instruction: q.instruction, reason: q.reason})),
+              surface_coverage_measured: false, moves_arm: false};
+    },
+    async scan_request_done({request_id, status}) {
+      const d = await api('/api/scan/review/request', {request_id, status}, true);
+      h.onRefresh && h.onRefresh();
+      return d.error ? {error: d.error} : {status: d.request.status, requires_reselection: d.requires_reselection,
+        spoken_message: d.spoken_message || (status === 'done' ? 'Segnato come fatto.' : 'Segnato come non possibile.')};
+    },
     async cancel_task() {
       proposal = null; confirmationHeard = false;
       const d = await api('/api/agent/cancel');

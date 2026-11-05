@@ -1,0 +1,12 @@
+# Step 0 optional dependencies. Install after requirements.txt in Python 3.12.
+# Keep base versions fixed; CUDA wheel pins also work without a system CUDA toolkit.
+-c requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
+SAM-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+moge @ git+https://github.com/microsoft/MoGe.git@b942f00bdc2a2a23ebb474fbe034d487e6dcceec
+pymeshlab==2025.7.post1
+trimesh==5.2.0
+pyransac3d==0.7.0
+wheel==0.48.0

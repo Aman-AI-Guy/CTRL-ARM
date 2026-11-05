@@ -1,0 +1,699 @@
+{
+ "legs": {
+  "A": {
+   "q0": [
+    -93.544184,
+    -0.2407,
+    -43.002889,
+    -43.494429,
+    48.565851
+   ],
+   "time": "03:52:25",
+   "tops_mm": {
+    "2": [
+     -139.4,
+     -415.1,
+     22.5
+    ],
+    "4": [
+     119.19999999999999,
+     -449.3,
+     18.9
+    ]
+   },
+   "boxes": [
+    [
+     -171.4,
+     -447.1,
+     -107.4,
+     -383.1,
+     22.5
+    ],
+    [
+     87.2,
+     -481.3,
+     151.2,
+     -417.3,
+     18.9
+    ]
+   ],
+   "segments": {
+    "far": {
+     "target_mm": [
+      -10.1,
+      -432.2,
+      20.7
+     ],
+     "args": [
+      "--target=-10.1,-432.2,20.7",
+      "--tilts",
+      "15,35,50",
+      "--step",
+      "40",
+      "--span",
+      "200",
+      "--orbit-dist",
+      "350",
+      "--dwell",
+      "1.5",
+      "--speed",
+      "15",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-171.4,-447.1,-107.4,-383.1,22.5",
+      "--box=87.2,-481.3,151.2,-417.3,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\far",
+     "done": true,
+     "views": "18/18",
+     "j5_span_deg": 85.0,
+     "max_jump_deg": 39.5,
+     "time": "03:55:14"
+    },
+    "check-table": {
+     "target_mm": [
+      -10.1,
+      -432.2,
+      -34.1
+     ],
+     "args": [
+      "--target=-10.1,-432.2,-34.1",
+      "--tilts",
+      "0",
+      "--span",
+      "0",
+      "--orbit-dist",
+      "200",
+      "--dwell",
+      "45",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-171.4,-447.1,-107.4,-383.1,22.5",
+      "--box=87.2,-481.3,151.2,-417.3,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-table",
+     "done": true,
+     "views": "1/1",
+     "j5_span_deg": 4.0,
+     "max_jump_deg": 46.2,
+     "predicted_gap_mm": 190.4,
+     "time": "04:13:06"
+    },
+    "ring-2": {
+     "target_mm": [
+      -139.4,
+      -415.1,
+      22.5
+     ],
+     "args": [
+      "--target=-139.4,-415.1,22.5",
+      "--tilts",
+      "25,45",
+      "--step",
+      "90",
+      "--span",
+      "180",
+      "--orbit-dist",
+      "170",
+      "--dwell",
+      "1.5",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-171.4,-447.1,-107.4,-383.1,22.5",
+      "--box=87.2,-481.3,151.2,-417.3,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\ring-2",
+     "done": true,
+     "views": "6/6",
+     "j5_span_deg": 82.0,
+     "max_jump_deg": 71.8,
+     "time": "03:56:17"
+    },
+    "check-2": {
+     "target_mm": [
+      -139.4,
+      -415.1,
+      22.5
+     ],
+     "args": [
+      "--target=-139.4,-415.1,22.5",
+      "--tilts",
+      "0",
+      "--span",
+      "0",
+      "--orbit-dist",
+      "150",
+      "--dwell",
+      "45",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-171.4,-447.1,-107.4,-383.1,22.5",
+      "--box=87.2,-481.3,151.2,-417.3,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-2",
+     "done": true,
+     "views": "1/1",
+     "j5_span_deg": 4.0,
+     "max_jump_deg": 44.6,
+     "predicted_gap_mm": 140.4,
+     "time": "03:59:31"
+    },
+    "ring-4": {
+     "target_mm": [
+      119.2,
+      -449.3,
+      18.9
+     ],
+     "args": [
+      "--target=119.2,-449.3,18.9",
+      "--tilts",
+      "25,45",
+      "--step",
+      "90",
+      "--span",
+      "180",
+      "--orbit-dist",
+      "170",
+      "--dwell",
+      "1.5",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-171.4,-447.1,-107.4,-383.1,22.5",
+      "--box=87.2,-481.3,151.2,-417.3,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\ring-4",
+     "done": true,
+     "views": "6/6",
+     "j5_span_deg": 81.0,
+     "max_jump_deg": 75.9,
+     "time": "04:02:04"
+    },
+    "check-4": {
+     "target_mm": [
+      119.2,
+      -449.3,
+      18.9
+     ],
+     "args": [
+      "--target=119.2,-449.3,18.9",
+      "--tilts",
+      "0",
+      "--span",
+      "0",
+      "--orbit-dist",
+      "150",
+      "--dwell",
+      "45",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-171.4,-447.1,-107.4,-383.1,22.5",
+      "--box=87.2,-481.3,151.2,-417.3,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-4",
+     "done": true,
+     "views": "1/1",
+     "j5_span_deg": 3.0,
+     "max_jump_deg": 41.5,
+     "predicted_gap_mm": 140.5,
+     "time": "04:03:15"
+    }
+   }
+  },
+  "B": {
+   "q0": [
+    -93.544184,
+    -0.2407,
+    -43.002889,
+    -43.494429,
+    48.565851
+   ],
+   "time": "04:16:21",
+   "tops_mm": {
+    "2": [
+     -100.80000000000001,
+     -525.6,
+     22.5
+    ],
+    "4": [
+     134.2,
+     -530.5,
+     18.9
+    ]
+   },
+   "boxes": [
+    [
+     -132.8,
+     -557.6,
+     -68.8,
+     -493.6,
+     22.5
+    ],
+    [
+     102.2,
+     -562.5,
+     166.2,
+     -498.5,
+     18.9
+    ]
+   ],
+   "segments": {
+    "ring-2": {
+     "target_mm": [
+      -100.8,
+      -525.6,
+      22.5
+     ],
+     "args": [
+      "--target=-100.8,-525.6,22.5",
+      "--tilts",
+      "25,45",
+      "--step",
+      "90",
+      "--span",
+      "180",
+      "--orbit-dist",
+      "170",
+      "--dwell",
+      "1.5",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-132.8,-557.6,-68.8,-493.6,22.5",
+      "--box=102.2,-562.5,166.2,-498.5,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\ring-2",
+     "done": true,
+     "views": "6/6",
+     "j5_span_deg": 85.0,
+     "max_jump_deg": 65.4,
+     "time": "04:18:12"
+    },
+    "check-2": {
+     "target_mm": [
+      -100.8,
+      -525.6,
+      22.5
+     ],
+     "args": [
+      "--target=-100.8,-525.6,22.5",
+      "--tilts",
+      "0",
+      "--span",
+      "0",
+      "--orbit-dist",
+      "150",
+      "--dwell",
+      "45",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-132.8,-557.6,-68.8,-493.6,22.5",
+      "--box=102.2,-562.5,166.2,-498.5,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-2",
+     "done": true,
+     "views": "1/1",
+     "j5_span_deg": 4.0,
+     "max_jump_deg": 43.2,
+     "predicted_gap_mm": 140.9,
+     "time": "04:19:24"
+    },
+    "ring-4": {
+     "target_mm": [
+      134.2,
+      -530.5,
+      18.9
+     ],
+     "args": [
+      "--target=134.2,-530.5,18.9",
+      "--tilts",
+      "25,45",
+      "--step",
+      "90",
+      "--span",
+      "180",
+      "--orbit-dist",
+      "170",
+      "--dwell",
+      "1.5",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-132.8,-557.6,-68.8,-493.6,22.5",
+      "--box=102.2,-562.5,166.2,-498.5,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\ring-4",
+     "done": true,
+     "views": "6/6",
+     "j5_span_deg": 83.0,
+     "max_jump_deg": 77.8,
+     "time": "04:21:00"
+    },
+    "check-4": {
+     "target_mm": [
+      134.2,
+      -530.5,
+      18.9
+     ],
+     "args": [
+      "--target=134.2,-530.5,18.9",
+      "--tilts",
+      "0",
+      "--span",
+      "0",
+      "--orbit-dist",
+      "150",
+      "--dwell",
+      "45",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-132.8,-557.6,-68.8,-493.6,22.5",
+      "--box=102.2,-562.5,166.2,-498.5,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-4",
+     "done": true,
+     "views": "1/1",
+     "j5_span_deg": 4.0,
+     "max_jump_deg": 45.0,
+     "predicted_gap_mm": 140.8,
+     "time": "04:22:12"
+    }
+   }
+  },
+  "C": {
+   "q0": [
+    -93.544184,
+    -0.2407,
+    -43.002889,
+    -43.494429,
+    48.565851
+   ],
+   "time": "04:26:56",
+   "tops_mm": {
+    "2": [
+     -99.19999999999999,
+     -351.8,
+     22.5
+    ],
+    "4": [
+     106.0,
+     -352.1,
+     18.9
+    ]
+   },
+   "boxes": [
+    [
+     -131.2,
+     -383.8,
+     -67.2,
+     -319.8,
+     22.5
+    ],
+    [
+     74.0,
+     -384.1,
+     138.0,
+     -320.1,
+     18.9
+    ]
+   ],
+   "segments": {
+    "ring-2": {
+     "target_mm": [
+      -99.2,
+      -351.8,
+      22.5
+     ],
+     "args": [
+      "--target=-99.2,-351.8,22.5",
+      "--tilts",
+      "25,45",
+      "--step",
+      "90",
+      "--span",
+      "180",
+      "--orbit-dist",
+      "170",
+      "--dwell",
+      "1.5",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-131.2,-383.8,-67.2,-319.8,22.5",
+      "--box=74,-384.1,138,-320.1,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\ring-2",
+     "done": true,
+     "views": "5/6",
+     "j5_span_deg": 80.0,
+     "max_jump_deg": 65.5,
+     "time": "04:28:37"
+    },
+    "check-2": {
+     "target_mm": [
+      -99.2,
+      -351.8,
+      22.5
+     ],
+     "args": [
+      "--target=-99.2,-351.8,22.5",
+      "--tilts",
+      "0",
+      "--span",
+      "0",
+      "--orbit-dist",
+      "180",
+      "--dwell",
+      "20",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-131.2,-383.8,-67.2,-319.8,22.5",
+      "--box=74,-384.1,138,-320.1,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-2",
+     "done": true,
+     "views": "1/1",
+     "j5_span_deg": 4.0,
+     "max_jump_deg": 49.2,
+     "predicted_gap_mm": 170.9,
+     "time": "04:29:26"
+    },
+    "check-4": {
+     "target_mm": [
+      106.0,
+      -352.1,
+      18.9
+     ],
+     "args": [
+      "--target=106.0,-352.1,18.9",
+      "--tilts",
+      "0",
+      "--span",
+      "0",
+      "--orbit-dist",
+      "180",
+      "--dwell",
+      "20",
+      "--speed",
+      "10",
+      "--calib",
+      "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+      "--obj-height",
+      "53",
+      "--obj-radius",
+      "32",
+      "--self-margin",
+      "10",
+      "--snapshot-url",
+      "http://192.168.5.160:8080/snapshot.jpg",
+      "--box=-131.2,-383.8,-67.2,-319.8,22.5",
+      "--box=74,-384.1,138,-320.1,18.9"
+     ],
+     "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-4",
+     "done": true,
+     "views": "1/1",
+     "j5_span_deg": 4.0,
+     "max_jump_deg": 49.5,
+     "predicted_gap_mm": 170.9,
+     "time": "04:31:46"
+    }
+   }
+  }
+ },
+ "order": [
+  "A",
+  "B",
+  "C"
+ ],
+ "ruler": [
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-2",
+   "view": 0,
+   "gap_mm": 151.0,
+   "label": "A/check-2",
+   "to": "marker",
+   "marker": 2
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-4",
+   "view": 0,
+   "gap_mm": 151.0,
+   "label": "A/check-4",
+   "to": "marker",
+   "marker": 4
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-table",
+   "view": 0,
+   "gap_mm": 200.0,
+   "label": "A/check-table",
+   "to": "table"
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-2",
+   "view": 0,
+   "gap_mm": 153.0,
+   "label": "B/check-2",
+   "to": "marker",
+   "marker": 2
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-4",
+   "view": 0,
+   "gap_mm": 153.0,
+   "label": "B/check-4",
+   "to": "marker",
+   "marker": 4
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-2",
+   "view": 0,
+   "gap_mm": 181.0,
+   "label": "C/check-2",
+   "to": "marker",
+   "marker": 2
+  },
+  {
+   "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-4",
+   "view": 0,
+   "gap_mm": 180.0,
+   "label": "C/check-4",
+   "to": "marker",
+   "marker": 4
+  }
+ ]
+}

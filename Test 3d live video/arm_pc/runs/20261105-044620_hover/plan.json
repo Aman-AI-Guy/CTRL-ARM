@@ -1,0 +1,129 @@
+{
+ "q0": [
+  -93.544184,
+  -0.2407,
+  -43.002889,
+  -43.494429,
+  48.565851
+ ],
+ "args": {
+  "q0": null,
+  "go": true,
+  "dist": 432,
+  "orbit_dist": [
+   120.0
+  ],
+  "tilts": [
+   0.0
+  ],
+  "step": 20,
+  "span": 0.0,
+  "start_az": null,
+  "direction": null,
+  "shift": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "cam_offset": [
+   -26.820788268114878,
+   25.374786618642712,
+   39.09574184694304
+  ],
+  "axis_flange": [
+   -0.7208524717148604,
+   0.6930510702839036,
+   -0.007206108583132531
+  ],
+  "axis_from": "cad",
+  "head_snap": 45,
+  "head_turn": null,
+  "no_cad": false,
+  "obj_height": 55.0,
+  "obj_radius": 60.0,
+  "table_margin": null,
+  "obj_margin": null,
+  "self_margin": 10.0,
+  "speed": 10.0,
+  "acc": 60,
+  "dwell": [
+   30.0
+  ],
+  "j5_max": 400,
+  "max_views": 0,
+  "pause": false,
+  "ret": true,
+  "force": false,
+  "out": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\20261105-044620_hover\\plan.json",
+  "log": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\20261105-044620_hover\\log.json",
+  "calib": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\v2\\camera_robot.json",
+  "target": [
+   -0.5,
+   -477.9,
+   14.0
+  ],
+  "branch_from_view": null,
+  "table_z": null,
+  "box": [
+   [
+    -162.2,
+    -506.6,
+    -98.2,
+    -442.6,
+    13.4
+   ],
+   [
+    99.0,
+    -508.1,
+    163.0,
+    -444.1,
+    12.0
+   ]
+  ],
+  "snapshots": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\20261105-044620_hover",
+  "snapshot_url": "http://192.168.5.160:8080/snapshot.jpg"
+ },
+ "target_mm": [
+  -0.5,
+  -477.9,
+  14.0
+ ],
+ "table_z_mm": -40.97,
+ "camera_axis_flange": [
+  -0.7208524717148606,
+  0.6930510702839037,
+  -0.007206108583132532
+ ],
+ "camera_offset_flange": [
+  -26.820788268114878,
+  25.374786618642712,
+  39.09574184694304
+ ],
+ "collision_model": "cad",
+ "poses": [
+  {
+   "i": 0,
+   "ring": 0,
+   "az": 86.5,
+   "el": 90.0,
+   "q": [
+    -90.1,
+    45.14,
+    -49.39,
+    -86.16,
+    43.87
+   ],
+   "camera_mm": [
+    -0.5,
+    -477.9,
+    134.0
+   ],
+   "jump_deg": 45.4
+  }
+ ],
+ "reachable": 1,
+ "j5_span_deg": 4.695851000000005,
+ "start_az": 86.455816,
+ "direction": 1,
+ "time": "2026-11-05 04:46:22"
+}

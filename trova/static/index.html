@@ -1,214 +1,631 @@
 <!doctype html>
-<html lang="en">
+<html lang="it">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trova</title>
 <link rel="icon" href="data:,">
 <style>
-:root{--bg:#f6f6f3;--panel:#fff;--ink:#16181d;--muted:#5d6370;--line:#dcdcd6;--accent:#b4009e;--ok:#137333;--bad:#b3261e;--warn:#9a6700;--btn:#eceae4}
-@media (prefers-color-scheme:dark){:root{--bg:#121316;--panel:#1b1d22;--ink:#eceef2;--muted:#9aa0ab;--line:#2c2f36;--accent:#ff5ee8;--ok:#5cc985;--bad:#ff7a70;--warn:#e0b04c;--btn:#262931}}
-*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
-header{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
-h1{font-size:20px;margin:0}h2{font-size:16px;margin:0 0 8px}.badge{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
-.badge.live{color:var(--ok);border-color:var(--ok)}.badge.mock{color:var(--warn);border-color:var(--warn)}
-#stop{margin-left:auto;background:var(--bad);color:#fff;border:0;border-radius:10px;font-weight:700;padding:10px 18px;font-size:16px}
-main{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(320px,1fr);gap:16px;padding:16px;max-width:1500px;margin:0 auto}
-main>section{min-width:0}.row>*{min-width:0}
-@media (max-width:600px){#armst{order:9;flex-basis:100%;text-align:left;border:0;padding:0}}
-@media (max-width:900px){main{grid-template-columns:minmax(0,1fr);padding:12px 16px}#viewcol{order:2}#ctrlcol{order:1}}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
-#live{width:100%;border-radius:10px;border:1px solid var(--line);display:block;cursor:crosshair;background:#000;min-height:120px}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row+.row{margin-top:8px}
-input[type=text],input[type=number]{flex:1;min-width:0;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font-size:16px}
-input[type=number]{flex:0 0 72px;width:72px}
-button{padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--btn);color:var(--ink);font-size:14px;cursor:pointer}
-button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}button:disabled{opacity:.5}
-.result{margin-top:10px;padding:10px;border-radius:8px;border:1px solid var(--line);display:none}
-.result.show{display:block}.st-found{border-color:var(--ok)}.st-not_found{border-color:var(--bad)}.st-clarify{border-color:var(--warn)}
-.muted{color:var(--muted);font-size:13px}.big{font-size:18px;font-weight:600}
-.thumbs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.thumbs img{width:100%;border-radius:6px;border:1px solid var(--line)}
-ul.changes{padding-left:18px;margin:8px 0}li.risk-high{color:var(--bad)}li.risk-medium{color:var(--warn)}
-.score{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;text-align:center}.score div{border:1px solid var(--line);border-radius:8px;padding:8px}.score b{display:block;font-size:20px}
-details summary{cursor:pointer;font-weight:600}#log{max-height:260px;overflow:auto;font:12px/1.4 ui-monospace,Menlo,monospace}
-.mode{font-size:13px;padding:6px 10px;border-radius:8px;background:var(--btn);display:none;margin-top:8px}.mode.on{display:block}
-label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--btn);cursor:pointer}label.file input{display:none}
+@font-face{font-family:"Archivo";src:url(/static/fonts/archivo-latin.woff2) format("woff2");font-weight:400 800;font-stretch:75% 100%;font-display:swap}
+@font-face{font-family:"JetBrains Mono";src:url(/static/fonts/jetbrainsmono-latin.woff2) format("woff2");font-weight:400 600;font-display:swap}
+:root{
+  --paper:#F1F3F0;--paper-deep:#E3E8E2;--field:#FAFBF9;--ink:#1A1A1A;--mute:#5C625B;--rule:#CDD3CB;--rule-strong:#848C83;
+  --green:#7FA392;--green-deep:#4F7766;--green-wash:#E1EAE4;
+  --ochre:#E0A526;--ochre-ink:#7A5200;--ochre-wash:#F6E6BC;
+  --red:#D7261E;--red-deep:#A81C16;--red-wash:#F8DEDB;
+  --frame:#1A1A1A;
+  /* names the result renderers already use */
+  --ok:var(--green-deep);--bad:var(--red);--warn:var(--ochre-ink);--line:var(--rule);--bg:var(--paper);--btn:var(--paper-deep);--muted:var(--mute);--accent:var(--green-deep);--panel:var(--paper);
+  --rail:212px;--side:384px;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{scrollbar-color:var(--rule-strong) transparent;-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 "Archivo",Arial,sans-serif;caret-color:var(--green-deep);accent-color:var(--green-deep)}
+::selection{background:var(--ochre-wash);color:var(--ink)}
+:focus-visible{outline:2px solid var(--green-deep);outline-offset:2px}
+a{color:var(--ink);text-underline-offset:3px;text-decoration-thickness:1px}
+a:hover{color:var(--green-deep)}
+h1,h2,h3,p,ol,ul,dl,dd,dt,figure{margin:0}
+.mono,.mono *{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:.92em}
+.muted{color:var(--mute);font-size:13px}
+.k{font-size:12px;font-weight:600;font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.big{font-size:17px;font-weight:700;line-height:1.3}
+.wrap{overflow-wrap:anywhere}
+.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+h2{font-size:19px;font-weight:800;line-height:1.2;letter-spacing:-.005em}
+h2:focus{outline:none}
+
+/* controls */
+button,.btn{font:600 14px/1.2 "Archivo",Arial,sans-serif;color:var(--ink);background:transparent;border:1px solid var(--ink);border-radius:2px;padding:8px 14px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px;min-height:36px}
+button:hover,.btn:hover{background:var(--paper-deep);color:var(--ink)}
+button:active{background:var(--ink);color:var(--paper)}
+button:disabled{opacity:.45;cursor:not-allowed;background:transparent;color:var(--ink)}
+button.primary{background:var(--green-deep);border-color:var(--green-deep);color:#fff}
+button.primary:hover{background:#436656;color:#fff}
+button.quiet{border-color:var(--rule-strong)}
+input[type=text],input[type=number],select,textarea{font:15px/1.3 "Archivo",Arial,sans-serif;color:var(--ink);background:var(--field);border:1px solid var(--rule-strong);border-radius:2px;padding:7px 10px;min-height:36px;min-width:0}
+input:focus,select:focus,textarea:focus{border-color:var(--ink);outline:2px solid var(--green-deep);outline-offset:1px}
+input::placeholder,textarea::placeholder{color:#646A63}
+input[type=number]{width:96px}
+textarea{width:100%;font-family:"JetBrains Mono",monospace;font-size:13px}
+label{display:inline-flex;align-items:center;gap:8px}
+.check{font-size:14px;color:var(--ink)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row+.row{margin-top:8px}.row>*{min-width:0}
+.field{display:flex;flex-direction:column;gap:4px;align-items:stretch}
+.field>span{font-size:12px;font-weight:600;color:var(--mute)}
+.grow{flex:1 1 200px}
+label.file{border:1px solid var(--ink);padding:8px 14px;cursor:pointer;font-weight:600;font-size:14px;min-height:36px}
+label.file:hover{background:var(--paper-deep)}
+label.file input{position:absolute;opacity:0;width:1px;height:1px}
+
+/* rail: name, status, tools, STOP */
+.rail{display:flex;flex-direction:column;padding:20px 18px 18px;background:var(--paper);min-height:0}
+.brand h1{font-size:28px;font-weight:800;letter-spacing:-.01em;line-height:1}
+.brand p{margin-top:6px;font-size:11px;color:var(--mute);font-weight:600;font-stretch:87.5%;letter-spacing:.05em;text-transform:uppercase}
+.statuslist{margin-top:20px;border-top:1px solid var(--ink)}
+.stat{padding:8px 0;border-bottom:1px solid var(--rule);display:flex;flex-direction:column;gap:1px;min-width:0}
+.badge{font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge::before{content:"";width:9px;height:9px;flex:none;border:1.5px solid var(--ink)}
+.badge.live::before{background:var(--green-deep);border-color:var(--green-deep)}
+.badge.mock::before{background:var(--ochre);border-color:var(--ochre)}
+.badge.bad::before{background:var(--red);border-color:var(--red)}
+#toolsbtn{width:100%;justify-content:space-between;margin-top:18px}
+#toolsbtn[aria-expanded=true]{background:var(--ink);color:var(--paper)}
+#toolsbtn svg{transition:transform .2s var(--ease)}#toolsbtn[aria-expanded=true] svg{transform:rotate(180deg)}
+.menu{border:1px solid var(--ink);border-top:0;background:var(--field);padding:4px 0;overflow:auto;min-height:0}
+.menu .grp{padding:8px 12px 2px}
+.menu button,.menu a{width:100%;border:0;border-radius:0;display:flex;align-items:center;justify-content:flex-start;padding:7px 12px;min-height:32px;font:500 14px/1.2 "Archivo",Arial,sans-serif;background:transparent;text-decoration:none;color:var(--ink);text-align:left}
+.menu button:hover,.menu a:hover,.menu button:focus-visible,.menu a:focus-visible{background:var(--green-wash);color:var(--ink);outline:none}
+.menu button[aria-current=true]{font-weight:700;background:var(--green-wash)}
+.menu hr{border:0;border-top:1px solid var(--rule);margin:4px 0}
+.menu small{margin-left:auto;color:var(--mute);font-size:11px}
+.railfoot{margin-top:auto;padding-top:14px;display:flex;flex-direction:column;gap:8px}
+#stop{width:100%;background:var(--red);border-color:var(--red);color:#fff;font-size:24px;font-weight:800;letter-spacing:.08em;flex-direction:column;gap:2px;padding:12px 0;min-height:70px}
+#stop:hover{background:var(--red-deep)}
+#stop small{font-size:11px;font-weight:500;letter-spacing:.04em}
+.railfoot .muted{font-size:12px;line-height:1.35}
+.rail:has(#toolsmenu:not([hidden])) .railfoot .muted{display:none}
+
+/* work column: Fig. 1, outputs, an open tool */
+.work{padding:16px 24px;min-width:0;display:flex;flex-direction:column;gap:12px}
+#alarm{display:none;background:var(--red);color:#fff;padding:10px 14px;font-weight:600}
+#alarm button{border-color:#fff;color:#fff;margin-left:10px;min-height:30px;padding:4px 10px}#alarm button:hover{background:var(--red-deep)}#alarm a{color:#fff}
+.fighead{display:flex;align-items:baseline;gap:8px 16px;border-bottom:1px solid var(--ink);padding-bottom:6px;flex-wrap:wrap}
+.fighead h2{flex:none}
+.fighead .tail{margin-left:auto;display:flex;gap:6px 16px;align-items:baseline;min-width:0;flex-wrap:wrap}
+.figrow{display:flex;flex-direction:column;gap:8px;margin-top:10px;min-height:0}
+.figbox{position:relative;width:100%;aspect-ratio:var(--ar,16/9);container-type:size}
+.frame{position:relative;background:var(--frame);overflow:hidden;width:min(100cqw,calc(100cqh * var(--arn,1.7778)));height:min(100cqh,calc(100cqw / var(--arn,1.7778)));margin:0 auto}
+#live{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block;cursor:crosshair}
+#callouts{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+#callouts .lead{stroke-dasharray:1;stroke-dashoffset:0;animation:draw .42s var(--ease) both}
+@keyframes draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+#camoff{position:absolute;inset:0;display:none;place-items:center;text-align:center;color:var(--paper);padding:24px}
+#camoff b{display:block;font-size:19px;margin-bottom:6px}
+.banners{position:absolute;left:10px;right:10px;top:10px;display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.mode{display:none;background:var(--ochre-wash);padding:7px 12px;font-size:14px;align-items:center;gap:12px;flex-wrap:wrap;pointer-events:none}.mode.on{display:flex}
+.mode button{min-height:30px;padding:4px 10px;pointer-events:auto}
+#fignotes{max-height:6em;overflow:auto}
+.capwrap{min-width:0;display:flex;flex-direction:column;gap:6px}
+.captions{list-style:none;padding:0;display:flex;gap:10px 22px;flex-wrap:wrap}
+.captions li{display:flex;gap:8px;align-items:baseline;font-size:13px;line-height:1.35;min-width:0;max-width:100%}
+.captions li b{font-size:14px}
+.num{width:22px;height:22px;flex:none;border-radius:50%;display:inline-grid;place-items:center;font:700 12px "Archivo",sans-serif;background:var(--ochre);color:var(--ink);align-self:center}
+.captions .stale{color:var(--ochre-ink)}
+.notes{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:2px 18px;font-size:13px;color:var(--mute)}
+.notes li b{color:var(--ink);font-weight:600}
+
+/* outputs strip */
+.outhead{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;border-bottom:1px solid var(--ink);padding-bottom:4px}
+.outhead .tail{margin-left:auto;display:flex;gap:10px;align-items:center}
+.tabs{display:flex;gap:0;flex-wrap:wrap}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;padding:6px 10px;min-height:32px;font-weight:600;font-size:13px;color:var(--mute);white-space:nowrap}
+.tabs button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--ink)}
+.tabs button span{font:500 11px "JetBrains Mono",monospace;margin-left:4px}
+.strip{display:grid;grid-auto-flow:column;grid-auto-columns:clamp(150px,13vw,210px);gap:14px;overflow-x:auto;overflow-y:hidden;padding:10px 0 6px;min-height:0}
+.cell{display:flex;flex-direction:column;gap:3px;min-height:0;min-width:0;border-top:2px solid var(--ink);padding-top:6px}
+.cell .code{font:600 12px "JetBrains Mono",monospace;color:var(--green-deep)}
+.cell .th{flex:1 1 auto;min-height:34px;background:var(--paper-deep);display:grid;place-items:center;overflow:hidden}
+.cell .th img{width:100%;height:100%;object-fit:cover;display:block}
+.cell .th .v{font:600 17px "JetBrains Mono",monospace;padding:0 8px;text-align:center}
+.cell b{font-size:13px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cell .sub2{font-size:12px;color:var(--mute)}
+.cell .act{display:flex;gap:10px;font-size:13px;font-weight:600}
+.empty{padding:14px 0;color:var(--mute);max-width:70ch;font-size:14px}
+
+/* Grok's requests to the operator, beside the outputs */
+.deck{display:grid;grid-template-columns:minmax(240px,5fr) minmax(0,7fr);gap:24px;min-height:0}
+#sec-requests,#sec-output{display:flex;flex-direction:column;min-height:0;min-width:0}
+.reqhead{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;border-bottom:1px solid var(--ink);padding-bottom:4px;min-height:41px}
+.reqhead .tail{margin-left:auto;display:flex;gap:10px;align-items:center;min-width:0}
+#reqlist{padding-top:4px;min-height:0}
+.reqsum{font-size:14px;margin:6px 0 2px}
+.reqs{list-style:none;padding:0;display:flex;flex-direction:column}
+.req{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:4px 10px;padding:10px 0;border-bottom:1px solid var(--rule)}
+.req .rq{display:flex;flex-direction:column;gap:4px;min-width:0}
+.req .rq b{font-size:15px;line-height:1.35}
+.req .rq .why{font-size:13px;color:var(--mute);line-height:1.4}
+.req.done .rq b,.req.skipped .rq b{color:var(--mute);font-weight:600;text-decoration:line-through;text-decoration-thickness:1px}
+.req .row button{min-height:32px;padding:5px 12px}
+.req .ev img{width:92px;height:68px;object-fit:cover;border:1px solid var(--rule);display:block;background:var(--paper-deep)}
+.reqfoot{font-size:12px;color:var(--mute);margin-top:6px;flex:none;line-height:1.4}
+#reqnote:empty{display:none}
+#reqnote{font-size:13px;background:var(--green-wash);padding:6px 10px;margin-top:6px}
+
+/* tools (opened from Strumenti) */
+.tool .sechead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;border-bottom:1px solid var(--ink);padding-bottom:6px;flex-wrap:wrap}
+.tool .body{margin-top:12px;display:flex;flex-direction:column;gap:10px}
+.tool .body>.row+.row{margin-top:0}
+.tool p.note{font-size:13px;color:var(--mute);max-width:72ch}
+.sub{margin-top:6px;padding-top:10px;border-top:1px solid var(--rule)}
+.sub>.k{display:block;margin-bottom:8px}
+details.more>summary{cursor:pointer;font-weight:600;font-size:14px;padding:8px 0;list-style:none;display:flex;align-items:center;gap:8px}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary svg{transition:transform .2s var(--ease)}details.more[open]>summary svg{transform:rotate(180deg)}
+table.out{width:100%;border-collapse:collapse;font-size:14px}
+table.out th{text-align:left;font-size:12px;font-weight:600;color:var(--mute);padding:8px 10px 6px 0;border-bottom:1px solid var(--ink);font-stretch:87.5%;letter-spacing:.04em;text-transform:uppercase}
+table.out td{padding:8px 10px 8px 0;border-bottom:1px solid var(--rule);vertical-align:top}
+table.out td.code{font:600 13px "JetBrains Mono",monospace;color:var(--green-deep);white-space:nowrap;width:54px}
+table.out td.pv{width:108px}table.out td.pv img{width:96px;height:54px;object-fit:cover;display:block;border:1px solid var(--rule);background:var(--paper-deep)}
+table.out td.pv .ph{width:96px;height:54px;background:var(--paper-deep)}
+table.out .sub2{font-size:13px;color:var(--mute);margin-top:2px}
+table.out td.act{white-space:nowrap;text-align:right}table.out td.act a{margin-left:10px;font-weight:600}
+table.out td.tm{white-space:nowrap;color:var(--mute)}
+.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.formgrid .wide{grid-column:1/-1}
+.formgrid input{width:100%}
+.unchecked{padding-left:18px;font-size:13px;color:var(--mute)}
+
+/* results */
+.result{display:none;padding:8px 0 4px;border-top:2px solid var(--ink)}
+.result.show{display:block}
+.result+.result.show{margin-top:10px}
+.st-found{border-top-color:var(--green-deep)}.st-not_found{border-top-color:var(--red)}.st-clarify{border-top-color:var(--ochre)}
+.result>div+div{margin-top:6px}
+.thumbs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px}.thumbs img{width:100%;display:block;border:1px solid var(--rule)}
+ul.changes{padding-left:18px;margin:6px 0}ul.changes li{padding:2px 0}li.risk-high{color:var(--red-deep)}li.risk-medium{color:var(--ochre-ink)}
+.tag{display:inline-block;padding:1px 8px;font-size:12px;font-weight:700;background:var(--ochre-wash);color:var(--ink)}
+.tag.ok{background:var(--green-wash)}.tag.bad{background:var(--red-wash);color:var(--red-deep)}
+
+/* side column: voice, safety */
+.side{padding:16px 20px;display:flex;flex-direction:column;gap:18px;min-width:0}
+.sechead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;border-bottom:1px solid var(--ink);padding-bottom:6px}
+#sec-voice{display:flex;flex-direction:column;gap:10px;min-height:0}
+#voicebtn{width:100%;min-height:62px;justify-content:flex-start;gap:14px;padding:10px 16px;background:var(--green-deep);border-color:var(--green-deep);color:#fff;text-align:left;flex:none}
+#voicebtn:hover{background:#436656}
+#voicebtn .t{display:flex;flex-direction:column;gap:2px}#voicebtn .t b{font-size:19px;font-weight:800}#voicebtn .t small{font-size:12px;font-weight:500}
+#voicebtn.on{background:var(--ink);border-color:var(--ink)}
+#voicebtn.unavail{background:transparent;border-color:var(--rule-strong);color:var(--mute)}
+#voicebtn.unavail:hover{background:var(--paper-deep)}
+#voicebtn.unavail .t b{color:var(--ink);font-size:16px}
+#voicebtn .dot{width:10px;height:10px;border-radius:50%;background:#fff;margin-left:auto;opacity:0}
+#voicebtn.on .dot{opacity:1;animation:pulse 1.4s ease-out infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.55)}100%{box-shadow:0 0 0 10px rgba(255,255,255,0)}}
+#pttrow{flex:none}
+#vlog{font-size:14px;overflow:auto;min-height:40px;border-top:1px solid var(--rule)}
+#vlog:empty::before{content:"Nessuna conversazione. Parla con Grok, usa il push to talk o scrivi un comando.";color:var(--mute);font-size:13px;display:block;padding-top:6px}
+#vlog>div{padding:5px 0;border-bottom:1px solid var(--rule)}#vlog b{margin-right:6px}
+#results{overflow:auto;min-height:0}
+#results:not(:has(.result.show)){display:none}
+.cmd{display:flex;gap:8px;flex:none}.cmd input{flex:1}
+#sec-safety{flex:none}
+.facts2{display:grid;grid-template-columns:1fr 1fr;gap:0 16px;margin-top:4px}
+.fact{padding:5px 0;border-bottom:1px solid var(--rule);min-width:0}
+.fact .k{display:block;letter-spacing:.04em}
+.fact .v{font-size:14px;font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.miss{background:var(--ochre-wash);padding:0 6px;font-weight:600;font-size:13px}
+.armline{margin-top:8px;font-size:13px;line-height:1.45;color:var(--ink)}
+.armline .k{margin-right:6px}
+.modechip{background:var(--ink);color:var(--paper);padding:2px 10px;font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase}
+.modechip.hw{background:var(--red)}
+.safeact{margin-top:10px}
+
+dialog{border:1px solid var(--ink);border-radius:0;background:var(--paper);color:var(--ink);padding:20px;max-width:92vw;max-height:92vh}
+dialog::backdrop{background:rgba(26,26,26,.45)}
+
+/* the whole console on one screen: nothing scrolls except inside its own box */
+@media (min-width:1100px) and (min-height:600px){
+  body{display:grid;grid-template-columns:var(--rail) minmax(0,1fr) var(--side);height:100vh;overflow:hidden}
+  .rail{height:100vh;border-right:1px solid var(--ink);overflow:hidden}
+  .menu{flex:0 1 auto}
+  .work{height:100vh;overflow:hidden;min-height:0}
+  #sec-camera{flex:0 1 auto;min-height:0;display:flex;flex-direction:column}
+  .figrow{flex:0 1 auto}
+  .figbox{flex:0 1 auto;min-height:150px}
+  .capwrap{flex:none}
+  .captions li{max-width:48%}
+  .deck{flex:1 1 0;min-height:150px}
+  .strip{flex:1 1 0}
+  #reqlist{flex:1 1 0;overflow:auto}
+  #toolarea{display:none}
+  body.tool-open .deck{display:none}
+  body.tool-open #toolarea{display:block;flex:1 1 0;min-height:0;overflow:auto;padding-right:6px}
+  body.tool-open #sec-camera{flex:none}
+  body.tool-open .figrow{flex-direction:row;align-items:flex-start;gap:20px}
+  body.tool-open .figbox{height:34vh;width:auto;flex:none;max-width:72%}
+  body.tool-open .capwrap{flex:1 1 0;max-height:34vh;overflow:auto}
+  body.tool-open .captions{flex-direction:column}
+  body.tool-open .captions li{max-width:none}
+  body.tool-open .captions .ell{white-space:normal}
+  body.tool-open .notes{flex-direction:column}
+  .side{height:100vh;overflow:hidden;border-left:1px solid var(--ink)}
+  #sec-voice{flex:1 1 auto;overflow:hidden}
+  #results{flex:0 1 auto;max-height:55%}
+  #vlog{flex:1 1 0;min-height:0}
+}
+@media (min-width:1100px) and (max-height:820px){
+  .side{gap:12px;padding-top:12px;padding-bottom:12px}
+  #sec-voice{gap:8px}
+  #voicebtn{min-height:48px;padding:6px 14px}#voicebtn .t b{font-size:17px}#voicebtn .t small{font-size:11px}
+  .fact{padding:3px 0}
+  .safeact{margin-top:6px}
+  .statuslist{margin-top:12px}
+  #stop{min-height:58px;padding:8px 0}
+  .work{gap:8px;padding-top:12px;padding-bottom:12px}
+}
+@media (min-width:1100px) and (max-width:1300px){:root{--rail:196px;--side:350px}.work{padding:14px 18px}.side{padding:14px 16px}}
+
+/* phones and short windows: one column that scrolls, camera pinned at the top */
+@media not all and (min-width:1100px) and (min-height:600px){
+  body{display:flex;flex-direction:column}
+  .rail{flex-direction:row;flex-wrap:wrap;align-items:center;gap:10px 12px;padding:10px 16px;border-bottom:1px solid var(--ink)}
+  .brand p,.railfoot .muted{display:none}
+  .brand h1{font-size:24px}
+  #toolsbtn{width:auto;margin:0 0 0 auto}
+  .railfoot{margin:0;padding:0}
+  #stop{width:auto;min-height:44px;padding:8px 20px;font-size:19px;flex-direction:row}#stop small{display:none}
+  .statuslist{order:5;flex-basis:100%;margin:0;display:flex;flex-wrap:wrap;gap:4px 16px;border-top:0}
+  .stat{border:0;padding:0}
+  .menu{order:6;flex-basis:100%;max-height:60vh;border-top:1px solid var(--ink)}
+  .work{display:contents}
+  .work>*,.side{margin-left:16px;margin-right:16px}
+  #alarm{order:1;margin-top:12px}
+  #sec-camera{order:2;position:sticky;top:0;z-index:5;background:var(--paper);padding-top:12px;padding-bottom:8px}
+  .figbox{max-height:34vh}
+  #toolarea{order:3;margin-top:16px}
+  .side{order:4;padding:20px 0;border-top:1px solid var(--ink);margin-top:16px}
+  #vlog{max-height:200px}
+  .deck{order:5;display:flex;flex-direction:column;gap:24px;padding-bottom:40px}
+  .strip{grid-auto-columns:150px;height:200px}
+  .formgrid{grid-template-columns:1fr}
+  .facts2{grid-template-columns:1fr 1fr}
+}
+@media (max-width:640px){
+  .captions{flex-direction:column}
+  table.out thead{display:none}
+  table.out tr{display:grid;grid-template-columns:54px 1fr;gap:4px 10px;padding:8px 0;border-bottom:1px solid var(--rule)}
+  table.out td{border:0;padding:0}
+  table.out td.pv{grid-row:span 2;width:auto}table.out td.pv img,table.out td.pv .ph{width:54px;height:40px}
+  table.out td.act{text-align:left;grid-column:2}table.out td.act a{margin:0 12px 0 0}
+  table.out td.tm{grid-column:2}
+}
+@media (prefers-reduced-motion:reduce){#callouts .lead,#voicebtn.on .dot{animation:none}#toolsbtn svg,details.more>summary svg{transition:none}}
 </style>
 </head>
 <body>
-<header>
-  <h1>Trova</h1><span id="mode" class="badge">Grok …</span><span id="cambadge" class="badge">camera …</span><span id="visionbadge" class="badge">calibration …</span><span id="motionbadge" class="badge">motion …</span><span id="movedbadge" class="badge">movement …</span><span id="armst" class="badge">arm …</span>
-  <a href="/jury" target="_blank" class="badge" style="text-decoration:none">scoreboard</a>
-  <a href="/history" target="_blank" class="badge" style="text-decoration:none">history</a>
-  <button class="badge" style="background:none;cursor:pointer" onclick="runPreflight()">preflight</button>
-  <button id="stop" onclick="post('/api/arm/stop')" title="Space bar or Escape">STOP</button>
-</header>
-<div id="alarm" style="display:none;position:sticky;top:58px;z-index:6;background:var(--bad);color:#fff;padding:12px 16px;font-weight:600">
-  <span id="alarmtext"></span> <button onclick="ackAlarm()" style="margin-left:10px">Acknowledge</button> <a id="alarmimg" target="_blank" style="color:#fff">photo</a></div>
-<main>
-<section id="viewcol">
-  <img id="live" alt="Live view of the table">
-  <div id="clickmode" class="mode"></div>
-  <div id="preres" class="result"></div>
-  <div class="row" style="margin-top:8px"><label class="muted"><input type="checkbox" id="showboxes" checked> show candidate boxes</label>
-    <span class="muted" id="srcinfo"></span></div>
-  <div class="panel" style="margin-top:14px">
-    <details><summary>Setup: camera, empty table, calibration, arm</summary>
-      <div class="row" style="margin-top:10px"><input type="text" id="src" placeholder="demo | 0 | 1 | path/to/video.mp4 | folder/"><button onclick="setSource()">Switch source</button></div>
-      <div class="row"><label class="file">Use a photo of the table<input type="file" accept="image/*" id="scene" onchange="uploadScene()"></label><button onclick="post('/api/upload_scene/clear')">Back to live</button>
-        <button onclick="sendForm('/api/source/step',{delta:-1})">◀ img</button><button onclick="sendForm('/api/source/step',{delta:1})">img ▶</button></div>
-      <div class="row"><button onclick="sendForm('/api/background',{mode:'capture'})">Capture empty table</button><button onclick="sendForm('/api/background',{mode:'clear'})">Clear empty table</button><span class="muted" id="bginfo"></span></div>
-      <div class="row"><button onclick="post('/api/calibration/aruco')">Calibrate (ArUco)</button><button onclick="setClick('calib')">Calibrate by clicks</button><button onclick="post('/api/calibration/reset')">Reset</button><button onclick="markers()">Print markers</button><span class="muted" id="calinfo"></span></div>
-      <div class="row"><b class="muted">Real cobot (UR, xArm, Elite):</b><button onclick="sendForm('/api/arm/freedrive',{on:true})">Freedrive on</button><button onclick="sendForm('/api/arm/freedrive',{on:false})">off</button>
-        <button onclick="setClick('armcal')">Calibrate with arm (click the tip)</button><button onclick="markerFromArm()">Record marker from arm</button>
-        <button onclick="post('/api/arm/clear_errors')">Clear arm errors</button></div>
-      <div class="row"><b class="muted">Camera on the arm:</b><button onclick="teachPose('home_joints')">Teach survey pose here</button>
-        <button onclick="teachPose('look_joints')">Teach look pose here</button><span class="muted" id="poseinfo"></span></div>
-      <div class="row"><button onclick="post('/api/arm/home')">Arm home</button><button onclick="setClick('point')">Click to point</button><button onclick="setClick('teach')">Teach pose (click)</button><button onclick="post('/api/arm/teach_home')">Teach home</button>
-        <button onclick="sendForm('/api/arm/compliant',{on:true})">Compliant on</button><button onclick="sendForm('/api/arm/compliant',{on:false})">off</button></div>
-      <div class="row"><span class="muted">object threshold</span><input type="number" id="thresh" step="2" style="max-width:90px" onchange="tune()"><span class="muted">min area</span><input type="number" id="minarea" step="0.0002" style="max-width:110px" onchange="tune()"></div>
-      <div class="row" id="demorow"><span class="muted">demo:</span><button onclick="sendForm('/api/demo/tamper',{kind:'add'})">+ add</button><button onclick="sendForm('/api/demo/tamper',{kind:'remove'})">− remove</button><button onclick="sendForm('/api/demo/tamper',{kind:'move'})">↔ move</button><button onclick="sendForm('/api/demo/tamper',{kind:'label'})">+ old-lot carton</button><button onclick="sendForm('/api/demo/hand',{on:true})">hand in</button><button onclick="sendForm('/api/demo/hand',{on:false})">hand out</button></div>
-    </details>
+<nav class="rail" aria-label="Stato e strumenti">
+  <div class="brand"><h1>Trova</h1><p>Console operatore · xArm 5</p></div>
+  <dl class="statuslist" aria-label="Stato">
+    <div class="stat"><dt class="k">Camera</dt><dd id="cambadge" class="badge">…</dd></div>
+    <div class="stat"><dt class="k">Grok</dt><dd id="mode" class="badge">…</dd></div>
+    <div class="stat"><dt class="k">Calibrazione</dt><dd id="visionbadge" class="badge">…</dd></div>
+    <div class="stat"><dt class="k">Proposta</dt><dd id="motionbadge" class="badge">…</dd></div>
+    <div class="stat"><dt class="k">Esecuzione</dt><dd id="movedbadge" class="badge">…</dd></div>
+    <div class="stat"><dt class="k">Braccio</dt><dd id="armst" class="badge">…</dd></div>
+    <div class="stat"><dt class="k">Richieste</dt><dd id="reqbadge" class="badge">…</dd></div>
+  </dl>
+  <button id="toolsbtn" aria-haspopup="menu" aria-expanded="false" aria-controls="toolsmenu">Strumenti
+    <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  <div class="menu" id="toolsmenu" role="menu" hidden>
+    <div class="grp k">Lavoro</div>
+    <button role="menuitem" data-tool="objects">Oggetti sul tavolo</button>
+    <button role="menuitem" data-tool="vision">Task di visione</button>
+    <button role="menuitem" data-tool="calib">Calibrazione camera</button>
+    <button role="menuitem" data-tool="scan">Scansione e ricostruzione</button>
+    <button role="menuitem" data-tool="outputs">Tutti gli output</button>
+    <hr>
+    <div class="grp k">Postazione</div>
+    <button role="menuitem" data-tool="safety">Parametri di sicurezza</button>
+    <button role="menuitem" data-tool="arm">Braccio</button>
+    <button role="menuitem" data-tool="source">Camera e tavolo</button>
+    <button role="menuitem" data-tool="preflight">Controllo preliminare</button>
+    <button role="menuitem" data-tool="log">Registro eventi</button>
+    <a role="menuitem" href="/history" target="_blank" rel="noopener">Storico e audit<small>nuova scheda</small></a>
+    <hr>
+    <div class="grp k">Demo hackathon</div>
+    <button role="menuitem" data-tool="line">Line clearance e lotti</button>
+    <button role="menuitem" data-tool="jury">Giuria e metriche</button>
+    <button role="menuitem" data-tool="dog" id="menu-dog" hidden>Cane robot</button>
+    <a role="menuitem" href="/jury" target="_blank" rel="noopener">Tabellone giuria<small>nuova scheda</small></a>
   </div>
-  <div class="panel"><details><summary>Log</summary><div id="log"></div></details></div>
-</section>
-
-<section id="ctrlcol">
-  <div class="panel">
-    <h2>Trova: what are you looking for?</h2>
-    <div class="muted">Ask in English or Italian, type, talk, or show a photo.</div>
-    <div class="row" style="margin-top:8px"><input type="text" id="q" placeholder="e.g. something to write with · qualcosa per scrivere" onkeydown="if(event.key==='Enter')doFind()"></div>
-    <div class="row"><label class="file">📷 Photo of the object<input type="file" accept="image/*" capture="environment" id="photo" onchange="photoChosen()"></label>
-      <button class="primary" id="findbtn" onclick="doFind()">Find</button><button onclick="doFindAll()">Find all</button><button onclick="doInventory()">What's on the table?</button><button onclick="lookAround()">👀 Look around the room</button><span class="muted" id="photoname"></span></div>
-    <div class="row"><button id="voicebtn" onclick="toggleVoice()">🎤 Talk to Trova</button>
-      <label class="muted"><input type="checkbox" id="confirm" checked> ask before the arm moves</label>
-      <span class="badge" id="vstatus">voice off</span></div>
-    <div class="row" id="pttrow" style="display:none"><button id="pttbtn" onclick="pushToTalk()">🎙 Push to talk (browser)</button>
-      <select id="pttlang" style="padding:8px;border-radius:8px"><option value="en-US">EN</option><option value="it-IT">IT</option></select>
-      <label class="muted"><input type="checkbox" id="speak"> speak results</label><span class="muted" id="pttinfo"></span></div>
-    <div id="vlog" class="muted" style="display:none;margin-top:8px;max-height:150px;overflow:auto;font-size:14px"></div>
-    <div id="findres" class="result"></div>
-    <div class="row" style="margin-top:10px"><span class="muted">Jury:</span><button onclick="judge(true)">✓ correct</button><button onclick="judge(false)">✗ wrong</button><button onclick="armMissed()">arm missed</button><button id="absentbtn" style="display:none" onclick="label({absent:true})">not on the table</button></div>
+  <div class="railfoot">
+    <button id="stop" onclick="post('/api/arm/stop')" title="Barra spaziatrice o Esc">STOP<small>Spazio · Esc</small></button>
+    <p class="muted">Lo STOP software tiene la posizione. Non sostituisce l'arresto di emergenza fisico.</p>
   </div>
+</nav>
 
-  <div class="panel">
-    <h2>What changed (line clearance)</h2>
-    <div class="row"><button onclick="saveRef()">Save reference</button><button class="primary" onclick="doCheck()">Check now</button><span class="muted" id="refinfo">no reference</span></div>
-    <div class="row"><button onclick="setClick('zone')">Draw a zone (click corners)</button><button onclick="finishZone()">Finish zone</button>
-      <button onclick="post('/api/zones/cancel')">Cancel</button><span class="muted" id="zoneinfo"></span></div>
-    <div class="row"><span class="muted">Batch</span><input type="text" id="lot" placeholder="current lot, e.g. A123" style="max-width:150px">
-      <button onclick="setBatch()">Set batch</button><button onclick="readLabels()">Read labels</button><button onclick="labelSheet()">Print labels</button><span class="muted" id="batchinfo"></span></div>
-    <div class="row"><button id="watchbtn" onclick="toggleWatch()">👁 Watch the line</button>
-      <label class="muted"><input type="checkbox" id="watchpoint"> arm points at problems</label><span class="muted" id="watchinfo"></span></div>
-    <div id="checkres" class="result"></div>
-    <div class="row" style="margin-top:10px"><input type="text" id="operator" placeholder="operator name" style="max-width:180px"><button onclick="signoff('approve')">Sign off</button><button onclick="signoff('reject')">Reject</button><a href="/api/report" target="_blank"><button>Open record</button></a><a href="/api/report.pdf" target="_blank"><button>Download PDF</button></a></div>
-    <div class="row"><span class="muted">Jury:</span><button onclick="judgeCheck(true)">✓ all right</button><span class="muted">false alarms</span><input type="number" id="fa" value="0" min="0" style="max-width:70px"><span class="muted">missed</span><input type="number" id="miss" value="0" min="0" style="max-width:70px"><button onclick="judgeCheck(false)">record</button></div>
-  </div>
+<main class="work">
+  <div id="alarm" role="alert"><span id="alarmtext"></span> <button onclick="ackAlarm()">Preso atto</button> <a id="alarmimg" target="_blank">foto</a></div>
 
-  <div class="panel" id="dogpanel" style="display:none"><h2>Robot dog (optional)</h2>
-    <div class="muted" id="dogroute"></div>
-    <div class="row" style="margin-top:8px"><button onclick="sendDog()">Send the dog to look</button><button onclick="post('/api/dog/stop')">Stop the dog</button></div>
-    <div id="dogres" class="result"></div>
-  </div>
+  <section id="sec-camera" aria-labelledby="h-camera">
+    <div class="fighead"><h2 id="h-camera" tabindex="-1">Fig. 1 · Vista camera</h2>
+      <div class="tail"><span class="muted mono" id="figmeta"></span><span class="muted ell" id="srcinfo"></span>
+        <label class="check" id="boxesopt"><input type="checkbox" id="showboxes" checked> riquadri candidati</label></div></div>
+    <div class="figrow">
+      <div class="figbox">
+        <div class="frame" id="frame">
+          <img id="live" src="/api/frame.jpg?boxes=1" alt="Vista dal vivo della camera">
+          <svg id="callouts" aria-hidden="true"></svg>
+          <div id="camoff"><div><b>Camera non raggiungibile</b><span id="camofftext">Nuovo tentativo tra poco.</span></div></div>
+          <div class="banners">
+            <div id="clickmode" class="mode"></div>
+            <div class="mode" id="labelwait"><span>Ritrovamento errato: clicca l'oggetto giusto sull'immagine, anche senza riquadro.</span><button id="absentbtn" style="display:none" onclick="label({absent:true})">Non è sul tavolo</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="capwrap">
+        <ol class="captions" id="captions" aria-label="Segni sulla figura"></ol>
+        <ul class="notes" id="fignotes" aria-label="Note sulla figura"></ul>
+      </div>
+    </div>
+  </section>
 
-  <div class="panel">
-    <h2>Vision task</h2>
-    <div class="muted">Grok picks a skill. A move is a proposal until the motion gateway accepts it and calibration, clearance, and the operator unlock are all in place. A synthetic picture cannot authorize motion.</div>
-    <div class="row" style="margin-top:8px"><input type="text" id="agentq" placeholder="trova l'evidenziatore rosa e posizionati sopra" onkeydown="if(event.key==='Enter')runAgent()">
-      <button onclick="openRegionSelection()">Select image region</button><button onclick="runAgent(true)">Step</button><button onclick="runAgent()">Run task</button><button onclick="cancelAgent()">Cancel task</button></div>
-    <div id="agentres" class="result"></div>
-    <div class="muted" id="motioninfo"></div>
-    <div class="muted" id="visioninfo"></div>
-    <div class="muted" id="timeread"></div>
-  </div>
+  <div class="deck">
+  <section id="sec-requests" aria-labelledby="h-requests">
+    <div class="reqhead"><h2 id="h-requests" tabindex="-1">Richieste di Grok</h2>
+      <div class="tail"><span class="muted ell" id="reqmeta"></span><button class="quiet" id="reviewbtn" onclick="reviewRender()">Rivedi il render</button></div></div>
+    <div id="reqnote" role="status"></div>
+    <div id="reqlist" aria-live="polite"></div>
+    <p class="reqfoot">Valutazione dai render, non una misura della superficie. Dopo un capovolgimento i gruppi di orientamento non vengono ancora uniti in una sola mesh.</p>
+  </section>
 
-  <div class="panel" id="calibpanel">
-    <h2>Camera calibration</h2>
-    <div class="muted">Calibration does not move the arm. Pose it yourself, with the physical e-stop in reach. The checkerboard stays fixed in the robot base during hand-eye captures. The Pi image is already rotated 180 degrees. A matrix is stored only when the gates pass: 1.5 px, 10 mm, 10 mm, and 5 mm.</div>
-    <div class="muted" id="robotread">robot telemetry …</div>
-    <div class="row"><span class="muted">inner corners</span><input type="number" id="boardcols" value="9" style="max-width:70px"><input type="number" id="boardrows" value="6" style="max-width:70px">
-      <input type="number" id="boardsquare" placeholder="measured square mm" style="max-width:160px"></div>
-    <div class="row"><button onclick="previewBoard()">Show checkerboard</button>
-      <button onclick="captureBoard('intrinsics')">Capture intrinsics</button><button onclick="post('/api/vision/intrinsics/solve')">Solve intrinsics</button></div>
-    <div class="row"><label class="muted"><input type="checkbox" id="ontable"> board is flat on the table</label>
-      <button onclick="captureBoard('handeye')">Capture hand-eye view</button><button onclick="post('/api/vision/handeye/solve')">Solve hand-eye</button></div>
-    <div class="muted" id="calibinfo">no calibration samples yet</div>
-    <div class="muted" id="calibnext"></div>
-    <div class="muted" id="dofnote"></div>
-    <div id="reprobars"></div>
-    <div id="calibsamples"></div>
-    <img id="boardview" alt="Checkerboard detection" style="display:none;width:100%;margin-top:8px;border-radius:8px;border:1px solid var(--line)">
-    <div class="row" style="margin-top:8px"><span class="muted">measured reference mm</span>
-      <input type="number" id="refx" placeholder="x" style="max-width:80px"><input type="number" id="refy" placeholder="y" style="max-width:80px"><input type="number" id="refz" placeholder="z" style="max-width:80px">
-      <input type="number" id="reftrack" placeholder="track" style="max-width:80px"><button onclick="compareReference()">Compare point</button></div>
-    <div class="muted" id="locinfo"></div>
+  <section id="sec-output" aria-labelledby="h-output">
+    <div class="outhead"><h2 id="h-output" tabindex="-1">Output</h2>
+      <div class="tabs" role="tablist" aria-label="Tipo di output" id="outtabs">
+        <button role="tab" data-tab="all" aria-selected="true">Tutti<span></span></button>
+        <button role="tab" data-tab="mesh" aria-selected="false">Mesh e CAD<span></span></button>
+        <button role="tab" data-tab="render" aria-selected="false">Render<span></span></button>
+        <button role="tab" data-tab="image" aria-selected="false">Immagini<span></span></button>
+        <button role="tab" data-tab="measure" aria-selected="false">Misure<span></span></button>
+        <button role="tab" data-tab="dataset" aria-selected="false">Dataset<span></span></button>
+      </div>
+      <div class="tail"><span class="muted" id="outcount"></span><button class="quiet" onclick="openTool('outputs')">Elenco completo</button></div>
+    </div>
+    <div class="strip" id="outstrip" aria-label="Output recenti"></div>
+    <div class="empty" id="outempty" hidden></div>
+  </section>
   </div>
 
-  <div class="panel" id="safetypanel">
-    <h2>Safety measurements</h2>
-    <div class="muted">Type values you measured. Empty fields are left unchanged. This form cannot set hardware mode or the unlock. Collision avoidance stays off. The physical e-stop is independent of this page.</div>
-    <div class="row"><input type="text" id="safelimits" placeholder="xmin,xmax,ymin,ymax,zmin,zmax or cylinder:radius,zmin,zmax (mm)" style="flex:1"></div>
-    <div class="row"><input type="text" id="safekeep" placeholder="keep-out boxes, or none" style="flex:1"></div>
-    <div class="row"><input type="text" id="safecamera" placeholder="camera body x,y,z,radius" style="flex:1"></div>
-    <div class="row"><input type="number" id="safespeed" placeholder="speed mm/s" style="max-width:120px">
-      <input type="number" id="safejog" placeholder="jog max mm" style="max-width:120px">
-      <input type="number" id="safeclear" placeholder="clearance mm" style="max-width:130px"></div>
-    <div class="row"><input type="text" id="safejoints" placeholder="joint min,max × 5, inside the xArm ranges" style="flex:1"></div>
-    <div class="row"><button onclick="saveSafety()">Store measured values</button></div>
-    <div class="muted" id="safetyinfo"></div>
-    <div class="muted" id="safetyextra"></div>
-  </div>
+  <div id="toolarea">
+    <section class="tool" id="tool-objects" hidden aria-labelledby="t-objects">
+      <div class="sechead"><h2 id="t-objects" tabindex="-1">Oggetti sul tavolo</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body">
+        <div class="row"><input type="text" id="q" class="grow" placeholder="es. qualcosa per scrivere, the red mouse" onkeydown="if(event.key==='Enter')doFind()"></div>
+        <div class="row">
+          <button class="primary" id="findbtn" onclick="doFind()">Trova</button>
+          <button onclick="doFindAll()">Trova tutti</button>
+          <button onclick="doInventory()">Cosa c'è sul tavolo?</button>
+          <button onclick="openRegionSelection()">Seleziona una regione</button>
+          <label class="file">Foto dell'oggetto<input type="file" accept="image/*" capture="environment" id="photo" onchange="photoChosen()"></label>
+          <span class="muted" id="photoname"></span>
+        </div>
+        <div class="row"><button onclick="lookAround()">Guarda nella stanza</button><span class="muted">Con la camera sul braccio: ruota, scatta e si volta verso l'oggetto.</span></div>
+      </div>
+    </section>
 
-  <div class="panel">
-    <h2>Scan session</h2>
-    <div class="muted">Photos and the robot pose that was actually read. This does not build a mesh.</div>
-    <div class="row" style="margin-top:8px"><input type="text" id="scanobj" placeholder="object id" style="max-width:140px">
-      <button onclick="startScan()">Start scan</button><button onclick="captureView()">Capture view</button>
-      <button onclick="finishScan()">Finish scan</button><button onclick="exportScan()">Export poses</button></div>
-    <div class="row"><button onclick="nextScanView()">Plan next scan view</button><button onclick="markOrientation()">Object turned / flipped</button>
-      <button onclick="startReconstruction()">Reconstruct dataset</button><button onclick="cancelReconstruction()">Cancel reconstruction</button><button onclick="loadReconstructionJobs()">Saved reconstruction jobs</button></div>
-    <div id="scanres" class="muted"></div>
-    <div id="reconstructionjobs"></div>
-    <div id="reconstructionres" role="status" class="muted"></div>
-    <details id="m5panel"><summary>3D integration · calibration evidence, orbit and recorded benchmark</summary>
-      <div class="row"><button onclick="loadM5Evidence()">Calibration / retained evidence</button>
-        <button onclick="previewOrbit()">Preview calibrated joint orbit</button></div>
-      <div id="m5evidence" role="status" class="muted"></div>
-      <div id="orbitpreview" role="status"></div>
-      <details><summary>Operator measurements for orbit planning</summary>
-        <p>Load settings, enter measured object height/radius and flange-to-TCP offset, and review model mounting. Confirmation stores measurements; hardware unlock is independent.</p>
-        <button onclick="loadOrbitSettings()">Load orbit settings</button>
-        <textarea id="orbitsettings" rows="12" style="width:100%;font-family:monospace" aria-label="Operator orbit settings"></textarea>
-        <label><input id="orbitsettingsconfirm" type="checkbox"> I measured and reviewed these settings</label>
-        <button onclick="saveOrbitSettings()">Save measured orbit settings</button>
-        <div id="orbitsettingsstatus" role="status"></div>
-      </details>
-      <div class="row"><button onclick="importMouseRecording()">Import recorded mouse · 60 views</button>
-        <button onclick="replayMouseMesh()">Replay retained cloud → new mesh</button></div>
-      <p class="muted">Recorded replay uses historical camera poses and dense points. Full reconstruction uses COLMAP. Neither operation moves the robot.</p>
-    </details>
-  </div>
+    <section class="tool" id="tool-vision" hidden aria-labelledby="t-vision">
+      <div class="sechead"><h2 id="t-vision" tabindex="-1">Task di visione</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body">
+        <p class="note">Grok sceglie una skill. Un movimento resta una proposta finché il gateway non lo accetta e calibrazione, clearance e sblocco operatore non sono tutti presenti. Il comando si scrive nella sezione Voce.</p>
+        <div class="row"><button onclick="runAgent(true)">Esegui un passo</button><button onclick="runAgent()">Esegui il task</button><button onclick="cancelAgent()">Annulla il task</button></div>
+        <div class="muted wrap" id="motioninfo"></div>
+        <div class="muted wrap" id="visioninfo"></div>
+        <div class="muted wrap" id="timeread"></div>
+      </div>
+    </section>
 
-  <div class="panel"><h2>Score</h2>
-    <div class="score"><div><b id="m-found">0/0</b>found</div><div><b id="m-time">–</b>avg find (s)</div><div><b id="m-fa">0</b>false alarms</div></div>
-    <p class="muted" id="m-more"></p>
-    <p class="muted" id="m-fail"></p>
+    <section class="tool" id="tool-calib" hidden aria-labelledby="t-calib">
+      <div class="sechead"><h2 id="t-calib" tabindex="-1">Calibrazione camera</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body" id="calibpanel">
+        <p class="note">La calibrazione non muove il braccio: posizionalo tu, con l'arresto di emergenza a portata. La scacchiera resta fissa nella base del robot durante le catture hand-eye. Una matrice viene salvata solo se passa le soglie: 1.5 px, 10 mm, 10 mm e 5 mm.</p>
+        <div class="muted wrap" id="robotread">telemetria robot …</div>
+        <div class="row">
+          <label class="field"><span>Angoli interni (colonne)</span><input type="number" id="boardcols" value="9"></label>
+          <label class="field"><span>Angoli interni (righe)</span><input type="number" id="boardrows" value="6"></label>
+          <label class="field"><span>Lato quadrato misurato, mm</span><input type="number" id="boardsquare" step="0.1"></label>
+        </div>
+        <div class="row"><button onclick="previewBoard()">Mostra scacchiera</button><button onclick="captureBoard('intrinsics')">Cattura intrinseci</button><button onclick="post('/api/vision/intrinsics/solve')">Risolvi intrinseci</button></div>
+        <div class="row"><label class="check"><input type="checkbox" id="ontable"> scacchiera appoggiata sul tavolo</label><button onclick="captureBoard('handeye')">Cattura vista hand-eye</button><button onclick="post('/api/vision/handeye/solve')">Risolvi hand-eye</button></div>
+        <div class="muted wrap" id="calibinfo">nessun campione di calibrazione</div>
+        <div class="wrap" id="calibnext"></div>
+        <div class="muted wrap" id="dofnote"></div>
+        <div id="reprobars"></div>
+        <div id="calibsamples"></div>
+        <div id="boardwrap"></div>
+        <div class="sub"><span class="k">Confronto con un punto misurato</span>
+          <div class="row">
+            <label class="field"><span>x mm</span><input type="number" id="refx"></label><label class="field"><span>y mm</span><input type="number" id="refy"></label>
+            <label class="field"><span>z mm</span><input type="number" id="refz"></label><label class="field"><span>traccia</span><input type="number" id="reftrack"></label>
+            <button onclick="compareReference()">Confronta il punto</button>
+          </div>
+          <div class="muted wrap" id="locinfo"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tool" id="tool-scan" hidden aria-labelledby="t-scan">
+      <div class="sechead"><h2 id="t-scan" tabindex="-1">Scansione e ricostruzione</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body">
+        <p class="note">Foto e posa del robot effettivamente letta. La sessione non costruisce la mesh: la ricostruzione è un passo separato.</p>
+        <div class="row"><input type="text" id="scanobj" placeholder="id oggetto" style="width:160px">
+          <button onclick="startScan()">Avvia scansione</button><button onclick="captureView()">Cattura vista</button><button onclick="finishScan()">Chiudi sessione</button><button onclick="exportScan()">Esporta pose</button></div>
+        <div class="row"><button onclick="nextScanView()">Pianifica la vista successiva</button><button onclick="markOrientation()">Oggetto girato o capovolto</button></div>
+        <div class="row"><button class="primary" onclick="startReconstruction()">Ricostruisci il dataset</button><button onclick="cancelReconstruction()">Annulla ricostruzione</button><button onclick="loadReconstructionJobs()">Ricostruzioni salvate</button></div>
+        <div id="scanres" class="muted wrap"></div>
+        <div id="reconstructionjobs" class="row"></div>
+        <div id="reconstructionres" role="status" class="wrap"></div>
+        <details class="more sub" id="m5panel"><summary>Integrazione 3D: evidenze di calibrazione, orbita e benchmark registrato
+          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+          <div class="body">
+            <div class="row"><button onclick="loadM5Evidence()">Evidenze di calibrazione</button><button onclick="previewOrbit()">Anteprima orbita calibrata</button></div>
+            <div id="m5evidence" role="status" class="muted wrap"></div>
+            <div id="orbitpreview" role="status"></div>
+            <details class="more"><summary>Misure operatore per l'orbita
+              <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+              <p class="note">Carica le impostazioni, inserisci altezza e raggio dell'oggetto e l'offset flangia-TCP misurati. La conferma salva le misure; lo sblocco hardware resta separato.</p>
+              <div class="row" style="margin-top:8px"><button onclick="loadOrbitSettings()">Carica impostazioni orbita</button></div>
+              <textarea id="orbitsettings" rows="12" aria-label="Impostazioni orbita dell'operatore" style="margin-top:8px"></textarea>
+              <div class="row" style="margin-top:8px"><label class="check"><input id="orbitsettingsconfirm" type="checkbox"> Ho misurato e controllato questi valori</label><button onclick="saveOrbitSettings()">Salva le misure dell'orbita</button></div>
+              <div id="orbitsettingsstatus" role="status" class="muted"></div>
+            </details>
+            <div class="row"><button onclick="importMouseRecording()">Importa scansione registrata del mouse, 60 viste</button><button onclick="replayMouseMesh()">Rigenera la mesh dalla nuvola registrata</button></div>
+            <p class="note">La riproduzione registrata usa pose e punti densi storici. La ricostruzione completa usa COLMAP. Nessuna delle due muove il robot.</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="tool" id="tool-arm" hidden aria-labelledby="t-arm">
+      <div class="sechead"><h2 id="t-arm" tabindex="-1">Braccio</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body">
+        <div class="row"><button onclick="post('/api/arm/home')">Vai a home</button><button onclick="setClick('point')">Punta dove clicco</button><button onclick="post('/api/arm/clear_errors')">Cancella errori del braccio</button></div>
+        <div class="sub"><span class="k">Guida manuale</span>
+          <div class="row"><button onclick="sendForm('/api/arm/freedrive',{on:true})">Freedrive attivo</button><button onclick="sendForm('/api/arm/freedrive',{on:false})">Freedrive spento</button>
+            <button onclick="sendForm('/api/arm/compliant',{on:true})">Cedevole attivo</button><button onclick="sendForm('/api/arm/compliant',{on:false})">Cedevole spento</button></div></div>
+        <div class="sub"><span class="k">Pose insegnate</span>
+          <div class="row"><button onclick="teachPose('home_joints')">Insegna qui la posa di rilievo</button><button onclick="teachPose('look_joints')">Insegna qui la posa di sguardo</button><span class="muted" id="poseinfo"></span></div>
+          <div class="row"><button onclick="setClick('teach')">Insegna posa (clic)</button><button onclick="post('/api/arm/teach_home')">Insegna home</button></div></div>
+        <div class="sub"><span class="k">Calibrazione con la punta</span>
+          <div class="row"><button onclick="setClick('armcal')">Calibra con il braccio (clic sulla punta)</button><button onclick="markerFromArm()">Registra marker dal braccio</button></div></div>
+      </div>
+    </section>
+
+    <section class="tool" id="tool-source" hidden aria-labelledby="t-source">
+      <div class="sechead"><h2 id="t-source" tabindex="-1">Camera e tavolo</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body">
+        <div class="row"><input type="text" id="src" class="grow" placeholder="pi | pi:host | demo | 0 | 1 | video.mp4 | cartella/"><button onclick="setSource()">Cambia sorgente</button></div>
+        <div class="row"><label class="file">Usa una foto del tavolo<input type="file" accept="image/*" id="scene" onchange="uploadScene()"></label><button onclick="post('/api/upload_scene/clear')">Torna al vivo</button>
+          <button onclick="sendForm('/api/source/step',{delta:-1})">Immagine precedente</button><button onclick="sendForm('/api/source/step',{delta:1})">Immagine successiva</button></div>
+        <div class="row"><button onclick="sendForm('/api/background',{mode:'capture'})">Cattura tavolo vuoto</button><button onclick="sendForm('/api/background',{mode:'clear'})">Cancella tavolo vuoto</button><span class="muted" id="bginfo"></span></div>
+        <div class="row"><button onclick="post('/api/calibration/aruco')">Calibra tavolo (ArUco)</button><button onclick="setClick('calib')">Calibra tavolo con clic</button><button onclick="post('/api/calibration/reset')">Azzera calibrazione tavolo</button><button onclick="markers()">Stampa marker</button><span class="muted" id="calinfo"></span></div>
+        <div class="row"><label class="field"><span>Soglia oggetti</span><input type="number" id="thresh" step="2" onchange="tune()"></label><label class="field"><span>Area minima</span><input type="number" id="minarea" step="0.0002" style="width:120px" onchange="tune()"></label></div>
+        <div class="row" id="demorow"><span class="k">Tavolo demo</span><button onclick="sendForm('/api/demo/tamper',{kind:'add'})">Aggiungi oggetto</button><button onclick="sendForm('/api/demo/tamper',{kind:'remove'})">Togli oggetto</button><button onclick="sendForm('/api/demo/tamper',{kind:'move'})">Sposta oggetto</button><button onclick="sendForm('/api/demo/tamper',{kind:'label'})">Cartone lotto vecchio</button><button onclick="sendForm('/api/demo/hand',{on:true})">Mano dentro</button><button onclick="sendForm('/api/demo/hand',{on:false})">Mano fuori</button></div>
+      </div>
+    </section>
+
+    <section class="tool" id="tool-preflight" hidden aria-labelledby="t-preflight">
+      <div class="sechead"><h2 id="t-preflight" tabindex="-1">Controllo preliminare</h2><span class="row"><button onclick="runPreflight()">Ripeti</button><button class="quiet" onclick="closeTool()">Chiudi</button></span></div>
+      <div class="body"><div id="preres" class="result"></div></div>
+    </section>
+
+    <section class="tool" id="tool-log" hidden aria-labelledby="t-log">
+      <div class="sechead"><h2 id="t-log" tabindex="-1">Registro eventi</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body"><div id="log" class="mono" style="max-height:320px;overflow:auto;font-size:12px;line-height:1.5"></div></div>
+    </section>
+
+    <section class="tool" id="tool-line" hidden aria-labelledby="t-line">
+      <div class="sechead"><h2 id="t-line" tabindex="-1">Line clearance e lotti</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body">
+        <div class="row"><button onclick="saveRef()">Salva riferimento</button><button class="primary" onclick="doCheck()">Controlla ora</button><span class="muted" id="refinfo">nessun riferimento</span></div>
+        <div class="row"><button onclick="setClick('zone')">Disegna una zona (clic sugli angoli)</button><button onclick="finishZone()">Chiudi la zona</button><button onclick="post('/api/zones/cancel')">Annulla</button><span class="muted" id="zoneinfo"></span></div>
+        <div class="row"><input type="text" id="lot" placeholder="lotto corrente, es. A123" style="width:200px"><button onclick="setBatch()">Imposta lotto</button><button onclick="readLabels()">Leggi etichette</button><button onclick="labelSheet()">Stampa etichette</button><span class="muted" id="batchinfo"></span></div>
+        <div class="row"><button id="watchbtn" onclick="toggleWatch()">Sorveglia la linea</button><label class="check"><input type="checkbox" id="watchpoint"> il braccio indica i problemi</label><span class="muted" id="watchinfo"></span></div>
+        <div id="checkres" class="result"></div>
+        <div class="row"><input type="text" id="operator" placeholder="nome operatore" style="width:200px"><button onclick="signoff('approve')">Firma</button><button onclick="signoff('reject')">Rifiuta</button><a class="btn" href="/api/report" target="_blank">Apri il verbale</a><a class="btn" href="/api/report.pdf" target="_blank">Scarica PDF</a></div>
+      </div>
+    </section>
+
+    <section class="tool" id="tool-jury" hidden aria-labelledby="t-jury">
+      <div class="sechead"><h2 id="t-jury" tabindex="-1">Giuria e metriche</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body">
+        <div class="row"><span class="k">Ultimo ritrovamento</span><button onclick="judge(true)">Corretto</button><button onclick="judge(false)">Sbagliato</button><button onclick="armMissed()">Il braccio ha mancato</button></div>
+        <div class="row"><span class="k">Ultimo controllo</span><button onclick="judgeCheck(true)">Tutto giusto</button><label class="field"><span>falsi allarmi</span><input type="number" id="fa" value="0" min="0"></label><label class="field"><span>mancati</span><input type="number" id="miss" value="0" min="0"></label><button onclick="judgeCheck(false)">Registra</button></div>
+        <dl class="facts" style="max-width:520px"><dt>Trovati</dt><dd class="mono" id="m-found">0/0</dd><dt>Tempo medio (s)</dt><dd class="mono" id="m-time">–</dd><dt>Falsi allarmi</dt><dd class="mono" id="m-fa">0</dd></dl>
+        <p class="muted wrap" id="m-more"></p>
+        <p class="muted wrap" id="m-fail"></p>
+      </div>
+    </section>
+
+    <section class="tool" id="tool-dog" hidden aria-labelledby="t-dog">
+      <div class="sechead"><h2 id="t-dog" tabindex="-1">Cane robot</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body" id="dogpanel">
+        <div class="muted" id="dogroute"></div>
+        <div class="row"><button onclick="sendDog()">Manda il cane a cercare</button><button onclick="post('/api/dog/stop')">Ferma il cane</button></div>
+        <div id="dogres" class="result"></div>
+      </div>
+    </section>
+
+    <section class="tool" id="tool-safety" hidden aria-labelledby="t-safety">
+      <div class="sechead"><h2 id="t-safety" tabindex="-1">Parametri di sicurezza</h2><button class="quiet" onclick="closeTool()">Chiudi</button></div>
+      <div class="body" id="safetypanel">
+        <p class="note">Inserisci solo valori misurati. I campi vuoti restano invariati. Questo modulo non può attivare la modalità hardware né lo sblocco.</p>
+        <div class="formgrid">
+          <label class="field wide"><span>Workspace TCP, mm: xmin,xmax,ymin,ymax,zmin,zmax oppure cylinder:raggio,zmin,zmax</span><input type="text" id="safelimits"></label>
+          <label class="field wide"><span>Zone keep-out, oppure none</span><input type="text" id="safekeep"></label>
+          <label class="field wide"><span>Corpo camera: x,y,z,raggio dal TCP, mm</span><input type="text" id="safecamera"></label>
+          <label class="field"><span>Velocità max, mm/s</span><input type="number" id="safespeed"></label>
+          <label class="field"><span>Jog max, mm</span><input type="number" id="safejog"></label>
+          <label class="field"><span>Clearance di osservazione, mm</span><input type="number" id="safeclear"></label>
+          <label class="field wide"><span>Limiti giunti: min,max per 5 giunti, dentro i limiti xArm</span><input type="text" id="safejoints"></label>
+        </div>
+        <div class="row"><button class="primary" onclick="saveSafety()">Salva i valori misurati</button></div>
+        <div class="muted wrap" id="safetyinfo"></div>
+        <div class="sub"><span class="k">Non controllato dal software</span><ul class="unchecked" id="unchecked"></ul></div>
+        <p class="note" id="safetyextra"></p>
+      </div>
+    </section>
+
+    <section class="tool" id="tool-outputs" hidden aria-labelledby="t-outputs">
+      <div class="sechead"><h2 id="t-outputs" tabindex="-1">Tutti gli output</h2><span class="row"><button class="quiet" onclick="loadOutputs()">Aggiorna</button><button class="quiet" onclick="closeTool()">Chiudi</button></span></div>
+      <div class="body">
+        <table class="out" id="outtable" aria-labelledby="t-outputs">
+          <thead><tr><th>Codice</th><th>Anteprima</th><th>Elemento</th><th>Valore</th><th>Ora</th><th><span style="position:absolute;left:-9999px">Azioni</span></th></tr></thead>
+          <tbody id="outbody"></tbody>
+        </table>
+        <div class="empty" id="outempty2" hidden></div>
+      </div>
+    </section>
   </div>
-</section>
 </main>
 
-<dialog id="regionDialog" style="max-width:90vw;max-height:90vh;overflow:auto">
-  <p>Click an existing box, or drag a box around the object. This frozen snapshot selection never moves the arm.</p>
-  <label>Object name (operator supplied) <input id="regionLabel" placeholder="mouse rosso"></label>
-  <canvas id="regionCanvas" style="display:block;max-width:100%;max-height:65vh;touch-action:none"></canvas>
-  <div id="regionStatus" role="status"></div>
-  <button onclick="$('regionDialog').close()">Close</button>
+<aside class="side">
+  <section id="sec-voice" aria-labelledby="h-voice">
+    <div class="sechead"><h2 id="h-voice" tabindex="-1">Voce</h2><span class="muted" id="vstatus">voce spenta</span></div>
+    <button id="voicebtn" onclick="toggleVoice()">
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
+      <span class="t"><b id="voicelabel">Parla con Grok</b><small id="voicesub">Grok Voice · italiano o inglese</small></span><span class="dot"></span>
+    </button>
+    <div class="row" id="pttrow" style="display:none"><button id="pttbtn" onclick="pushToTalk()">Push to talk (browser)</button>
+      <select id="pttlang" aria-label="Lingua del push to talk"><option value="it-IT">IT</option><option value="en-US">EN</option></select>
+      <label class="check"><input type="checkbox" id="speak"> leggi le risposte</label><span class="muted wrap" id="pttinfo"></span></div>
+    <label class="check"><input type="checkbox" id="confirm" checked> chiedi conferma prima che il braccio si muova</label>
+    <div class="cmd"><input type="text" id="agentq" aria-label="Comando scritto" placeholder="Scrivi un comando a Grok" onkeydown="if(event.key==='Enter')runAgent()"><button onclick="runAgent()">Esegui</button></div>
+    <div id="results"><div id="agentres" class="result" aria-live="polite"></div><div id="findres" class="result" aria-live="polite"></div></div>
+    <div id="vlog" aria-live="polite"></div>
+  </section>
+
+  <section id="sec-safety" aria-labelledby="h-safety">
+    <div class="sechead"><h2 id="h-safety" tabindex="-1">Sicurezza</h2><span id="safemode" class="modechip">…</span></div>
+    <div class="facts2" id="safetylist"></div>
+    <div class="armline" id="armlist"></div>
+    <div class="row safeact"><button onclick="openTool('safety')">Modifica parametri</button><span class="muted" id="uncheckedcount"></span></div>
+  </section>
+</aside>
+
+<dialog id="regionDialog">
+  <p>Clicca un riquadro esistente o trascina un riquadro attorno all'oggetto. La selezione su questa istantanea non muove mai il braccio.</p>
+  <div class="row" style="margin-top:10px"><label class="field grow"><span>Nome dell'oggetto (dato dall'operatore)</span><input id="regionLabel" placeholder="mouse rosso"></label></div>
+  <canvas id="regionCanvas" style="display:block;max-width:100%;max-height:65vh;touch-action:none;margin-top:10px"></canvas>
+  <div id="regionStatus" role="status" class="muted"></div>
+  <div class="row" style="margin-top:10px"><button onclick="$('regionDialog').close()">Chiudi</button></div>
 </dialog>
 <script src="/static/voice.js"></script>
 <script src="/static/speech.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-let S = null, clickMode = null, photoFile = null, frameSize = [1, 1];
+let S = null, clickMode = null, photoFile = null, frameSize = [1600, 900];
 
 async function call(url, opts) {
   const r = await fetch(url, opts);
@@ -216,31 +633,79 @@ async function call(url, opts) {
   if (!r.ok || d.error) { toast((d.error || d.detail || r.statusText)); d.shown = true; throw d; }
   return d;
 }
-// errors from call() are already shown in the panel: don't also report them as uncaught
+// errors from call() are already shown: don't also report them as uncaught
 window.addEventListener('unhandledrejection', e => { if (e.reason && e.reason.shown) e.preventDefault(); });
 const post = url => call(url, {method: 'POST'}).then(refresh);
 const sendForm = (url, obj) => { const f = new FormData(); for (const k in obj) f.append(k, obj[k]); return call(url, {method: 'POST', body: f}).then(d => { refresh(); return d; }); };
 const json = (url, obj) => call(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(obj)}).then(d => { refresh(); return d; });
-function toast(msg) { const r = $('findres'); r.className = 'result show st-not_found'; r.innerHTML = '<b>Error</b> ' + esc(String(msg)); }
+function toast(msg) { const r = $('findres'); r.className = 'result show st-not_found'; r.innerHTML = '<b>Errore</b> ' + esc(typeof msg === 'string' ? msg : JSON.stringify(msg)); }
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const hhmmss = t => new Date(t).toLocaleTimeString('it-IT', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+const store = {get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} }};
 
-// live view: next frame only after the previous one loaded
+// ---- tools menu (everything that is not camera, voice, safety, output)
+const menu = $('toolsmenu'), menuBtn = $('toolsbtn');
+function openMenu(focusFirst) { menu.hidden = false; menuBtn.setAttribute('aria-expanded', 'true'); if (focusFirst) menuItems()[0].focus(); }
+function closeMenu() { menu.hidden = true; menuBtn.setAttribute('aria-expanded', 'false'); }
+const menuItems = () => [...menu.querySelectorAll('[role=menuitem]')].filter(el => !el.hidden);
+menuBtn.addEventListener('click', () => menu.hidden ? openMenu(false) : closeMenu());
+menuBtn.addEventListener('keydown', e => { if (e.key === 'ArrowDown') { e.preventDefault(); openMenu(true); } });
+menu.addEventListener('keydown', e => {
+  const items = menuItems(), i = items.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+  if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+  if (e.key === 'Tab') closeMenu();
+});
+menu.addEventListener('click', e => { const b = e.target.closest('[data-tool]'); if (b) openTool(b.dataset.tool); else if (e.target.closest('a')) closeMenu(); });
+document.addEventListener('click', e => { if (!menu.hidden && !e.target.closest('#toolsmenu, #toolsbtn')) closeMenu(); });
+const SHELL = matchMedia('(min-width: 1100px) and (min-height: 600px)');
+let openToolName = null;
+function openTool(name) {
+  closeMenu();
+  document.querySelectorAll('.tool').forEach(t => { t.hidden = t.id !== 'tool-' + name; });
+  openToolName = name; store.set('trova.tool', name); document.body.classList.add('tool-open');
+  const t = $('tool-' + name); if (!t) return;
+  menu.querySelectorAll('[data-tool]').forEach(b => b.setAttribute('aria-current', String(b.dataset.tool === name)));
+  if (!SHELL.matches) t.scrollIntoView({block: 'start'});
+  $('toolarea').scrollTop = 0;
+  const h = t.querySelector('h2'); if (h) h.focus({preventScroll: true});
+  if (name === 'outputs') renderOutputs();
+  if (name === 'preflight') runPreflight();
+  if (name === 'scan') loadReconstructionJobs();
+  if (name === 'calib') loadSamples();
+  refresh();
+}
+function closeTool() { document.querySelectorAll('.tool').forEach(t => { t.hidden = true; }); openToolName = null; store.set('trova.tool', ''); document.body.classList.remove('tool-open'); menu.querySelectorAll('[data-tool]').forEach(b => b.removeAttribute('aria-current')); }
+
+// Known backend phrases in Italian; anything else is shown as the server wrote it.
+const IT = {'intrinsics are not solved': 'intrinseci non risolti', 'hand-eye is not solved': 'hand-eye non risolto', 'the table plane is not solved': 'piano del tavolo non risolto',
+  'The robot links, the dress pack, and the camera cable are not in the model.': 'I link del robot, il cablaggio e il cavo della camera non sono nel modello.',
+  'Objects on the table are not treated as obstacles.': 'Gli oggetti sul tavolo non sono trattati come ostacoli.',
+  'The table edge beyond the measured plane is not checked.': 'Il bordo del tavolo oltre il piano misurato non è controllato.',
+  'People in the workspace are not detected.': 'Le persone nel workspace non vengono rilevate.',
+  'collision_avoidance stays false. A path whose clearance cannot be checked is refused.': 'Nessuna anticollisione: un percorso di cui non si può verificare la clearance viene rifiutato.'};
+const tr = x => IT[x] || x;
+
+// ---- live view: Pi MJPEG stream, otherwise the next frame only after the previous one loaded
 const live = $('live');
 function usePiStream() { return S && S.source && S.source.kind === 'pi'; }
 function nextFrame() {
   if (usePiStream()) {
-    if (live.dataset.mode !== 'stream') { live.dataset.mode = 'stream'; live.src = '/api/camera/stream'; }
+    if (live.dataset.mode !== 'stream') { live.dataset.mode = 'stream'; live.src = '/api/camera/stream?t=' + Date.now(); }
     return;
   }
   if (live.dataset.mode === 'stream') live.dataset.mode = '';
   live.src = '/api/frame.jpg?boxes=' + ($('showboxes').checked ? 1 : 0) + '&t=' + Date.now();
 }
-live.onload = () => { if (live.dataset.mode !== 'stream') setTimeout(nextFrame, 250); };
-live.onerror = () => setTimeout(nextFrame, 1500); nextFrame();
+live.onload = () => { live.dataset.loaded = '1'; camOffline(false); if (live.dataset.mode !== 'stream') setTimeout(nextFrame, 250); };
+live.onerror = () => { live.dataset.loaded = ''; live.dataset.mode = ''; camOffline(true); setTimeout(nextFrame, 1500); };
+function camOffline(on, text) { $('camoff').style.display = on ? 'grid' : 'none'; if (text) $('camofftext').textContent = text; }
 
 live.addEventListener('click', ev => {
-  const r = live.getBoundingClientRect();
-  const u = (ev.clientX - r.left) / r.width * frameSize[0], v = (ev.clientY - r.top) / r.height * frameSize[1];
+  const r = live.getBoundingClientRect(), [W, H] = frameSize;
+  const s = Math.min(r.width / W, r.height / H), ox = (r.width - W * s) / 2, oy = (r.height - H * s) / 2;   // object-fit: contain
+  const u = (ev.clientX - r.left - ox) / s, v = (ev.clientY - r.top - oy) / s;
+  if (u < 0 || v < 0 || u > W || v > H) return;
   if (S && S.label_wait) return label({u, v});
   if (clickMode === 'point') return json('/api/arm/point', {u, v});
   if (clickMode === 'teach') return json('/api/arm/teach', {u, v});
@@ -248,38 +713,93 @@ live.addEventListener('click', ev => {
   if (clickMode === 'zone') return json('/api/zones/point', {u, v});
   if (clickMode === 'place') { setClick(null); return json('/api/arm/lift_tray', {place_u: u, place_v: v}); }
   if (clickMode === 'calib') {
-    const t = prompt('Table coordinates of this point in mm, as x,y (e.g. 0,0)'); if (!t) return;
+    const t = prompt('Coordinate del punto sul tavolo in mm, come x,y (es. 0,0)'); if (!t) return;
     const [x, y] = t.split(',').map(Number); return json('/api/calibration/click', {u, v, x_mm: x, y_mm: y});
   }
 });
-function setClick(m) { clickMode = clickMode === m ? null : m; const el = $('clickmode');
-  el.className = 'mode' + (clickMode ? ' on' : ''); el.textContent = clickMode ? ({point: 'Click mode: the arm points where you click.', teach: 'Teach mode: move the arm tip by hand over a point, then click that point in the image.', calib: 'Calibration: click a point you measured, then type its mm coordinates. 4 or more points.', place: 'Tray lift: click where the tray should go. STOP aborts.', zone: 'Zone: click the corners of the area, then press Finish zone.', armcal: 'Arm calibration: put the tip ON the table (freedrive), then click the tip in the image. Repeat at 4-6 spread-out points.'})[clickMode] + ' (click the button again to stop)' : ''; }
+const CLICK_TEXT = {point: 'Il braccio punta dove clicchi sull\'immagine.', teach: 'Porta a mano la punta sopra un punto, poi clicca quel punto sull\'immagine.',
+  calib: 'Clicca un punto misurato, poi scrivi le sue coordinate in mm. Servono almeno 4 punti.', place: 'Clicca dove appoggiare il vassoio. STOP interrompe.',
+  zone: 'Clicca gli angoli dell\'area, poi premi Chiudi la zona.', armcal: 'Appoggia la punta sul tavolo (freedrive), poi clicca la punta sull\'immagine. Ripeti in 4-6 punti distanti.'};
+function setClick(m) {
+  clickMode = clickMode === m ? null : m; const el = $('clickmode');
+  el.className = 'mode' + (clickMode ? ' on' : '');
+  el.innerHTML = clickMode ? `<span>${esc(CLICK_TEXT[clickMode])}</span><button onclick="setClick(null)">Esci da questa modalità</button>` : '';
+}
 
-function photoChosen() { photoFile = $('photo').files[0] || null; $('photoname').textContent = photoFile ? 'photo ready' : ''; }
+// ---- Fig. 1 callouts: numbered notes keyed to the captions under the picture
+const notes = {sel: null, find: null};
+function setNote(kind, box, title, detail) {
+  notes[kind] = Array.isArray(box) && box.length === 4 ? {box: box.map(Number), title, detail, t: Date.now()} : null;
+  drawCallouts(true);
+}
+let calloutKey = '';
+function drawCallouts(force) {
+  const [W, H] = frameSize, svg = $('callouts');
+  const moving = !!(S && S.robot && S.robot.moving);
+  const list = [notes.sel, notes.find].filter(Boolean).filter((n, i, a) => i === 0 || JSON.stringify(n.box) !== JSON.stringify(a[0].box));
+  const key = W + 'x' + H + JSON.stringify(list.map(n => [n.box, n.t])) + moving;
+  if (key !== calloutKey || force) {
+    calloutKey = key;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const sw = W / 420, r = W / 56;
+    svg.innerHTML = list.map((n, i) => {
+      const [x0, y0, x1, y1] = n.box, cx = (x0 + x1) / 2, right = cx < W / 2;
+      const ax = right ? x1 : x0, ay = y0, lx = Math.max(r * 1.6, Math.min(W - r * 1.6, ax + (right ? 1 : -1) * W * 0.09)), ly = Math.max(r * 1.6, ay - H * 0.1);
+      const stale = moving || Date.now() - n.t > 60000;
+      return `<rect x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}" fill="none" stroke="#E0A526" stroke-width="${sw * 1.4}"${stale ? ` stroke-dasharray="${sw * 5} ${sw * 4}"` : ''}/>` +
+        `<path class="lead" pathLength="1" d="M${ax} ${ay} L${lx} ${ly}" stroke="#E0A526" stroke-width="${sw}" fill="none"/>` +
+        `<circle cx="${lx}" cy="${ly}" r="${r}" fill="#E0A526" stroke="#1A1A1A" stroke-width="${sw * 0.6}"/>` +
+        `<text x="${lx}" y="${ly}" text-anchor="middle" dominant-baseline="central" font-family="Archivo,Arial,sans-serif" font-weight="700" font-size="${r * 1.05}" fill="#1A1A1A">${i + 1}</text>`;
+    }).join('');
+  }
+  renderCaptions(list, moving);
+}
+let captionHtml = '';
+function renderCaptions(list, moving) {
+  const marks = list.map((n, i) => `<li><span class="num">${i + 1}</span><span class="ell"><b>${esc(n.title)}</b> ${esc(n.detail || '')} · ` +
+    ((moving || Date.now() - n.t > 60000) ? `<span class="stale">posizione dell'istantanea delle ${hhmmss(n.t)}, la vista può essere cambiata</span>` : `istantanea delle ${hhmmss(n.t)}`) + `</span></li>`).join('');
+  const notes = [];
+  if (S) {
+    const vis = S.vision || {}, src = S.source || {};
+    notes.push(vis.valid ? `<b>Coordinate metriche</b> disponibili, calibrazione versione ${esc(vis.version)}`
+      : `<b>Nessuna coordinata metrica</b>: ${esc((vis.reasons || []).map(tr).join(', ') || 'calibrazione non valida')}`);
+    if (S.mock || (S.grok && S.grok.offline)) notes.push(`<b>${S.mock ? 'Riconoscimento simulato' : 'Grok offline'}</b>: i nomi degli oggetti non autorizzano movimenti`);
+    if (src.kind === 'demo' || src.kind === 'armsim') notes.push('<b>Immagine sintetica</b>: non autorizza movimenti');
+    if (!list.length) notes.push('Seleziona o trova un oggetto: il suo riquadro compare numerato sulla figura');
+  }
+  const html = marks + '|' + notes.join('');
+  if (html === captionHtml) return;
+  captionHtml = html;
+  $('captions').innerHTML = marks; $('captions').hidden = !marks;
+  $('fignotes').innerHTML = notes.map(x => `<li>${x}</li>`).join('');
+}
+
+function photoChosen() { photoFile = $('photo').files[0] || null; $('photoname').textContent = photoFile ? 'foto pronta' : ''; }
 
 async function doFind() {
   const f = new FormData(); f.append('text', $('q').value); if (photoFile) f.append('photo', photoFile);
   $('q').blur();   // so the space bar is STOP again while the arm moves
-  $('findbtn').disabled = true; $('findbtn').textContent = 'Looking…';
+  $('findbtn').disabled = true; $('findbtn').textContent = 'Cerco…';
   try { showFind(await call('/api/find', {method: 'POST', body: f})); } catch (e) {} finally {
-    $('findbtn').disabled = false; $('findbtn').textContent = 'Find'; photoFile = null; $('photo').value = ''; $('photoname').textContent = ''; refresh(); }
+    $('findbtn').disabled = false; $('findbtn').textContent = 'Trova'; photoFile = null; $('photo').value = ''; $('photoname').textContent = ''; refresh(); }
 }
 async function answer(a) { const f = new FormData(); f.append('answer', a); try { showFind(await call('/api/clarify', {method: 'POST', body: f})); } catch (e) {} refresh(); }
 
 function showFind(d) {
   const r = d.result, el = $('findres'); el.className = 'result show st-' + r.status;
   if (S) { S.pending_select = null; S.pending_question = r.status === 'clarify' ? r.clarifying_question : null; }   // a spoken answer may come before the next poll
+  setNote('find', r.status === 'found' && r.box ? r.box.box : null, 'Trovato: ' + (r.label || ''), `confidenza ${r.confidence ?? '–'}`);
   let h = '';
-  if (r.status === 'found') h = `<div class="big">Found: ${esc(r.label)}</div><div>${esc(r.reason)}</div>` +
-      (!d.moved && !d.arm_blocked && d.table_mm ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at it</button></div>` : '') +
-      (S && S.lift_allowed && d.table_mm ? `<div class="row"><button onclick="setClick('place')">Lift its tray: click where to put it</button></div>` : '');
+  if (r.status === 'found') h = `<div class="big">Trovato: ${esc(r.label)}</div><div>${esc(r.reason)}</div>` +
+      (!d.moved && !d.arm_blocked && d.table_mm ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Indicalo con il braccio</button></div>` : '') +
+      (S && S.lift_allowed && d.table_mm ? `<div class="row"><button onclick="setClick('place')">Solleva il vassoio: clicca dove appoggiarlo</button></div>` : '');
   else if (r.status === 'clarify') {
     h = `<div class="big">${esc(r.clarifying_question)}</div><div class="row">` + r.candidate_ids.map(i => `<button onclick="answer('numero ${i}')">${i}</button>`).join('') +
-        `<input type="text" id="ans" placeholder="or answer in words" onkeydown="if(event.key==='Enter')answer(this.value)"></div>`;
-  } else h = `<div class="big">Not found on the table</div><div>${esc(r.reason)}</div>` +
-      (S && S.dog ? `<div class="row"><button onclick="sendDog()">Send the dog to look in the other rooms</button></div>` : '');
-  h += `<div class="muted">${r.mode === 'direct' ? 'Grok direct box · ' : r.mode === 'offline' ? '<b style="color:var(--warn)">offline: local colour match</b> · ' : ''}${r.n_candidates} candidates · confidence ${r.confidence} · Grok ${r.grok_latency_s}s · total ${d.total_s}s${d.table_mm ? ' · arm → ' + d.table_mm.join(', ') + ' mm' : ''}</div>` + (d.arm_blocked ? `<div style="color:var(--warn)">Arm not moved: ${esc(d.arm_blocked)}</div>` : '');
-  h += `<div class="thumbs">${d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>` : ""}${d.query ? `<a href="/files/${d.query}" target="_blank"><img src="/files/${d.query}"></a>` : ''}</div>`;
+        `<input type="text" id="ans" placeholder="oppure rispondi a parole" onkeydown="if(event.key==='Enter')answer(this.value)"></div>`;
+  } else h = `<div class="big">Non è sul tavolo</div><div>${esc(r.reason)}</div>` +
+      (S && S.dog ? `<div class="row"><button onclick="sendDog()">Manda il cane a cercare nelle altre stanze</button></div>` : '');
+  h += `<div class="muted">${r.mode === 'direct' ? 'riquadro diretto di Grok · ' : r.mode === 'offline' ? '<b style="color:var(--warn)">offline: confronto colori locale</b> · ' : ''}${r.n_candidates} candidati · confidenza ${r.confidence} · Grok ${r.grok_latency_s} s · totale ${d.total_s} s${d.table_mm ? ' · braccio verso ' + d.table_mm.join(', ') + ' mm' : ''}</div>` + (d.arm_blocked ? `<div style="color:var(--warn)">Braccio non mosso: ${esc(d.arm_blocked)}</div>` : '');
+  h += `<div class="thumbs">${d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}" alt="Immagine con i riquadri"></a>` : ''}${d.query ? `<a href="/files/${d.query}" target="_blank"><img src="/files/${d.query}" alt="Foto della richiesta"></a>` : ''}</div>`;
   el.innerHTML = h;
   if (speakOn()) TrovaSpeech.say(TrovaSpeech.phraseFind(d, TrovaSpeech.italian(d.request || '')), sayLang(d.request));
 }
@@ -289,34 +809,36 @@ async function judge(ok) { try { await json('/api/judge', {kind: 'find', correct
 async function label(obj) { try { await json('/api/label', obj); } catch (e) {} }
 async function judgeCheck(ok) { await json('/api/judge', {kind: 'change', correct: ok, false_alarms: +$('fa').value || 0, missed: +$('miss').value || 0}); $('fa').value = 0; $('miss').value = 0; }
 
-async function saveRef() { const d = await call('/api/reference', {method: 'POST'}); $('refinfo').textContent = `reference: ${d.n_objects} objects` + (d.occluded ? ' (view was blocked!)' : ''); refresh(); }
+async function saveRef() { const d = await call('/api/reference', {method: 'POST'}); $('refinfo').textContent = `riferimento: ${d.n_objects} oggetti` + (d.occluded ? ' (vista ostruita)' : ''); refresh(); }
 async function doCheck() {
-  const el = $('checkres'); el.className = 'result show'; el.innerHTML = 'Checking…';
-  try { showCheck(await call('/api/changes', {method: 'POST'})); } catch (e) { el.innerHTML = 'Check failed: ' + esc(e.error || e.detail || ''); }
+  const el = $('checkres'); el.className = 'result show'; el.innerHTML = 'Controllo…';
+  try { showCheck(await call('/api/changes', {method: 'POST'})); } catch (e) { el.innerHTML = 'Controllo non riuscito: ' + esc(e.error || e.detail || ''); }
   refresh();
 }
 function showCheck(d) {
   const el = $('checkres'); el.className = 'result show'; const r = d.result;
-  {
-    let h = `<div class="big" style="color:var(${r.line_clear ? '--ok' : '--bad'})">${r.line_clear ? 'Line clear' : 'NOT clear: ' + r.changes.length + ' change(s)'}</div><div>${esc(r.summary)}</div>`;
-    h += '<ul class="changes">' + r.changes.map(c => `<li class="risk-${esc(c.risk)}"><b>C${c.id} ${esc(c.kind)}</b> ${esc(c.label)}: ${esc(c.explanation)}</li>`).join('') + '</ul>';
-    if (r.filtered.length) h += `<div class="muted">${r.filtered.length} candidate(s) rejected by Grok as false alarms (see the record).</div>`;
-    if (r.batch) h += labelList(r.batch);
-    if (r.zones) h += '<ul class="changes">' + r.zones.map(z => `<li class="${z.ok ? '' : 'risk-high'}"><b>${esc(z.name)}</b> (${z.rule === 'empty' ? 'must be empty' : 'only ' + esc(z.allowed.join(', '))}): ${z.ok ? 'OK' : esc(z.problems.join('; '))}</li>`).join('') + '</ul>';
-    h += `<div class="muted">${r.frames_used} frames · Grok ${r.grok_latency_s}s · total ${r.total_s}s</div>`;
-    h += `<div class="thumbs"><a href="/files/${d.ref_marked}" target="_blank"><img src="/files/${d.ref_marked}"></a><a href="/files/${d.cur_marked}" target="_blank"><img src="/files/${d.cur_marked}"></a></div>`;
-    el.innerHTML = h;
-    if (speakOn()) TrovaSpeech.say(TrovaSpeech.phraseCheck(d, $('pttlang').value === 'it-IT'), $('pttlang').value);
-  }
+  let h = `<div class="big" style="color:var(${r.line_clear ? '--ok' : '--bad'})">${r.line_clear ? 'Linea libera' : 'Linea NON libera: ' + r.changes.length + ' cambiamenti'}</div><div>${esc(r.summary)}</div>`;
+  h += '<ul class="changes">' + r.changes.map(c => `<li class="risk-${esc(c.risk)}"><b>C${c.id} ${esc(c.kind)}</b> ${esc(c.label)}: ${esc(c.explanation)}</li>`).join('') + '</ul>';
+  if (r.filtered.length) h += `<div class="muted">${r.filtered.length} candidati scartati da Grok come falsi allarmi (vedi il verbale).</div>`;
+  if (r.batch) h += labelList(r.batch);
+  if (r.zones) h += '<ul class="changes">' + r.zones.map(z => `<li class="${z.ok ? '' : 'risk-high'}"><b>${esc(z.name)}</b> (${z.rule === 'empty' ? 'deve essere vuota' : 'solo ' + esc(z.allowed.join(', '))}): ${z.ok ? 'OK' : esc(z.problems.join('; '))}</li>`).join('') + '</ul>';
+  h += `<div class="muted">${r.frames_used} fotogrammi · Grok ${r.grok_latency_s} s · totale ${r.total_s} s</div>`;
+  h += `<div class="thumbs"><a href="/files/${d.ref_marked}" target="_blank"><img src="/files/${d.ref_marked}" alt="Riferimento"></a><a href="/files/${d.cur_marked}" target="_blank"><img src="/files/${d.cur_marked}" alt="Situazione attuale"></a></div>`;
+  el.innerHTML = h;
+  if (speakOn()) TrovaSpeech.say(TrovaSpeech.phraseCheck(d, $('pttlang').value === 'it-IT'), $('pttlang').value);
 }
 
-// ---- feature 12: browser speech (fallback for Grok Voice) and spoken results
+// ---- browser speech (fallback for Grok Voice) and spoken results
 let stopWords = ['stop', 'halt', 'fermo', 'ferma', 'fermati', 'basta', 'alt'], listening = false;
 fetch('/api/voice/config').then(r => r.json()).then(c => { if (c.stop_words) stopWords = c.stop_words; }).catch(() => {});
 const speakOn = () => $('speak').checked && TrovaSpeech.supported() && !TrovaVoice.running();   // Grok Voice speaks itself
 const sayLang = req => TrovaSpeech.italian(req || '') ? 'it-IT' : $('pttlang').value;
 if (TrovaSpeech.supported()) $('pttrow').style.display = 'flex';
+$('pttlang').value = store.get('trova.pttlang') || 'it-IT';
+$('pttlang').addEventListener('change', () => store.set('trova.pttlang', $('pttlang').value));
 async function runSpoken(text) {
+  const asked = S && S.scan_review && (S.scan_review.requests || []).find(q => q.status === 'pending');
+  if (asked && /^\s*(fatto|ho fatto|finito|done|i did it)\b/i.test(text)) { $('pttinfo').textContent = `“${text}” → richiesta ${asked.id} fatta`; return markRequest(asked.id, 'done'); }
   const p = TrovaSpeech.parse(text, stopWords), it = $('pttlang').value === 'it-IT';
   $('pttinfo').textContent = `“${text}” → ${p.cmd}`;
   if (p.cmd === 'stop') {                        // already sent on the interim transcript; again, to be sure
@@ -346,36 +868,36 @@ async function runSpoken(text) {
 function pushToTalk() {
   if (listening) { TrovaSpeech.cancel(); return; }
   if (!pushToTalk.used) { pushToTalk.used = true; $('speak').checked = true; }   // talking to it: answers are spoken
-  listening = true; $('pttbtn').textContent = '⏹ Listening… (tap to stop)';
+  listening = true; $('pttbtn').textContent = 'In ascolto, tocca per fermare';
   TrovaSpeech.listen({lang: $('pttlang').value, stopWords,
     onInterim: t => { $('pttinfo').textContent = t + '…'; },
     onStop: t => { fetch('/api/arm/stop', {method: 'POST'}); $('pttinfo').textContent = `“${t}” → STOP`; },
     onFinal: t => runSpoken(t).catch(() => {}),
-    onEnd: err => { listening = false; $('pttbtn').textContent = '🎙 Push to talk (browser)'; if (err) $('pttinfo').textContent = err; }});
+    onEnd: err => { listening = false; $('pttbtn').textContent = 'Push to talk (browser)'; if (err) $('pttinfo').textContent = err; }});
 }
 
-// ---- feature 11: labels and batch
+// ---- labels and batch
 async function setBatch() { const d = await sendForm('/api/batch', {lot: $('lot').value}); $('lot').value = d.lot; }
 async function labelSheet() { const d = await call('/api/labels/sheet', {method: 'POST'}); window.open(d.file); }
 function labelList(b) {
-  if (b.error) return `<div style="color:var(--bad)">Labels could not be read: ${esc(b.error)}</div>`;
-  return `<div class="muted">Labels vs batch LOT ${esc(b.lot || '–')}:</div><ul class="changes">` +
-    b.items.map(i => `<li>${i.box_id}: LOT ${esc(i.lot || '–')} · EXP ${esc(i.expiry || '–')}${i.code ? ' · code ✓' : ''}</li>`).join('') +
+  if (b.error) return `<div style="color:var(--bad)">Etichette non leggibili: ${esc(b.error)}</div>`;
+  return `<div class="muted">Etichette rispetto al lotto ${esc(b.lot || '–')}:</div><ul class="changes">` +
+    b.items.map(i => `<li>${i.box_id}: LOTTO ${esc(i.lot || '–')} · SCAD ${esc(i.expiry || '–')}${i.code ? ' · codice letto' : ''}</li>`).join('') +
     b.problems.map(p => `<li class="risk-${esc(p.risk)}"><b>${esc(p.kind.replace(/_/g, ' '))}</b> ${esc(p.text)}</li>`).join('') + '</ul>';
 }
 function showLabels(d) {
   const el = $('checkres'); el.className = 'result show ' + (d.ok ? 'st-found' : 'st-not_found');
-  el.innerHTML = `<div class="big" style="color:var(${d.ok ? '--ok' : '--bad'})">${d.ok ? 'Labels OK' : d.problems.length + ' label problem(s)'}</div>` +
-    (d.items.length ? '' : '<div class="muted">No labels seen.</div>') + labelList(d) +
-    `<div class="muted">${d.codes.length} code(s) decoded · Grok ${d.latency_s}s${d.offline ? ' · offline' : ''}</div><div class="thumbs">${d.image ? `<a href="/files/${d.image}" target="_blank"><img src="/files/${d.image}"></a>` : ""}</div>`;
+  el.innerHTML = `<div class="big" style="color:var(${d.ok ? '--ok' : '--bad'})">${d.ok ? 'Etichette OK' : d.problems.length + ' problemi di etichetta'}</div>` +
+    (d.items.length ? '' : '<div class="muted">Nessuna etichetta vista.</div>') + labelList(d) +
+    `<div class="muted">${d.codes.length} codici decodificati · Grok ${d.latency_s} s${d.offline ? ' · offline' : ''}</div><div class="thumbs">${d.image ? `<a href="/files/${d.image}" target="_blank"><img src="/files/${d.image}" alt="Etichette"></a>` : ''}</div>`;
   if (speakOn()) TrovaSpeech.say(d.ok ? 'Labels OK.' : d.problems.map(p => p.text).join('. '), 'en-US');
 }
 async function readLabels() {
-  const el = $('checkres'); el.className = 'result show'; el.innerHTML = 'Reading labels…';
-  try { showLabels(await call('/api/labels', {method: 'POST'})); } catch (e) { el.innerHTML = 'Reading failed: ' + esc(e.error || e.detail || ''); }
+  const el = $('checkres'); el.className = 'result show'; el.innerHTML = 'Leggo le etichette…';
+  try { showLabels(await call('/api/labels', {method: 'POST'})); } catch (e) { el.innerHTML = 'Lettura non riuscita: ' + esc(e.error || e.detail || ''); }
 }
 
-// ---- feature 10: watch the line
+// ---- watch the line
 let lastAlarm = 0;
 async function toggleWatch() {
   const on = !(S && S.watch && S.watch.on);
@@ -388,84 +910,84 @@ function beep() {
 }
 function showWatch() {
   const w = S.watch; if (!w) return;
-  $('watchbtn').textContent = w.on ? '⏹ Stop watching' : '👁 Watch the line';
-  $('watchinfo').textContent = w.on ? w.status + ` · ${w.checks} looks` : '';
+  $('watchbtn').textContent = w.on ? 'Smetti di sorvegliare' : 'Sorveglia la linea';
+  $('watchinfo').textContent = w.on ? w.status + ` · ${w.checks} controlli` : '';
   const a = w.alert;
   $('alarm').style.display = a ? 'block' : 'none';
   if (a) {
-    $('alarmtext').textContent = `ALARM ${a.time}: ${a.summary}` + (a.grok && a.grok !== 'not needed' ? ` (${a.grok})` : '') + (a.pointed ? ' · the arm points at it' : '');
+    $('alarmtext').textContent = `ALLARME ${a.time}: ${a.summary}` + (a.grok && a.grok !== 'not needed' ? ` (${a.grok})` : '') + (a.pointed ? ' · il braccio lo indica' : '');
     $('alarmimg').href = '/files/' + a.image;
     if (a.id !== lastAlarm) { lastAlarm = a.id; beep(); }
   }
 }
 
-// ---- feature 14: camera on the arm, look around the room
+// ---- camera on the arm, look around the room
 async function teachPose(name) {
-  const what = name === 'home_joints' ? 'SURVEY pose: the camera sees the whole table' : 'LOOK pose: the camera looks out at the room';
-  if (!confirm(`Record the arm's current joints as the ${what}?`)) return;
+  const what = name === 'home_joints' ? 'posa di RILIEVO: la camera vede tutto il tavolo' : 'posa di SGUARDO: la camera guarda la stanza';
+  if (!confirm(`Registrare i giunti attuali del braccio come ${what}?`)) return;
   try { const d = await sendForm('/api/arm/teach_pose', {name}); if (d.note) alert(d.note); } catch (e) {}
 }
 let roomActive = false, roomKey = '';
 async function lookAround() {
-  const q = $('q').value.trim(); if (!q) return alert('Type what to look for, e.g. the red umbrella');
+  const q = $('q').value.trim(); if (!q) return alert('Scrivi cosa cercare, es. l\'ombrello rosso');
   $('q').blur(); roomActive = true; roomKey = '';
-  const el = $('findres'); el.className = 'result show st-clarify'; el.innerHTML = 'Turning to look around the room…';
+  const el = $('findres'); el.className = 'result show st-clarify'; el.innerHTML = 'Mi giro a guardare nella stanza…';
   try { await sendForm('/api/room/find', {text: q}); } catch (e) { roomActive = false; }
 }
 function showRoom() {
   const d = S.room; if (!roomActive || !d) return;
   const key = d.status + (d.done || '') + (d.request || ''); if (key === roomKey) return; roomKey = key;
   const el = $('findres');
-  if (d.status === 'scanning') { el.className = 'result show st-clarify'; el.innerHTML = `Looking around for “${esc(d.request)}”… photo ${d.done} of ${d.total}`; return; }
-  const thumbs = (d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>` : '') +
-    (d.sheet ? `<a href="/files/${d.sheet}" target="_blank"><img src="/files/${d.sheet}"></a>` : '');
+  if (d.status === 'scanning') { el.className = 'result show st-clarify'; el.innerHTML = `Cerco “${esc(d.request)}” nella stanza… foto ${d.done} di ${d.total}`; return; }
+  const thumbs = (d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}" alt="Foto con l'oggetto"></a>` : '') +
+    (d.sheet ? `<a href="/files/${d.sheet}" target="_blank"><img src="/files/${d.sheet}" alt="Foglio delle foto"></a>` : '');
   el.className = 'result show st-' + (d.status === 'found' ? 'found' : 'not_found');
   el.innerHTML = (d.status === 'found'
-      ? `<div class="big">Found in photo ${d.view} of ${d.n_views}: ${esc(d.label)}</div><div>${esc(d.reason)}</div>` +
-        `<div class="muted">${d.facing ? 'The arm is facing it' : 'Not turned: ' + esc(d.error || '')} · turned to ${d.angle}° · ${esc(d.px_per_deg_source)} · Grok ${d.grok_latency_s}s · total ${d.total_s}s</div>`
-      : d.status === 'not_found' ? `<div class="big">Not seen in the room</div><div>${esc(d.reason || '')}</div><div class="muted">${d.n_views} photos · Grok ${d.grok_latency_s}s</div>`
-      : `<div class="big">${d.status === 'stopped' ? 'Stopped' : 'Error'}</div><div>${esc(d.error || '')}</div>`) +
+      ? `<div class="big">Trovato nella foto ${d.view} di ${d.n_views}: ${esc(d.label)}</div><div>${esc(d.reason)}</div>` +
+        `<div class="muted">${d.facing ? 'Il braccio è rivolto verso l\'oggetto' : 'Non girato: ' + esc(d.error || '')} · ruotato a ${d.angle}° · ${esc(d.px_per_deg_source)} · Grok ${d.grok_latency_s} s · totale ${d.total_s} s</div>`
+      : d.status === 'not_found' ? `<div class="big">Non visto nella stanza</div><div>${esc(d.reason || '')}</div><div class="muted">${d.n_views} foto · Grok ${d.grok_latency_s} s</div>`
+      : `<div class="big">${d.status === 'stopped' ? 'Fermato' : 'Errore'}</div><div>${esc(d.error || '')}</div>`) +
     `<div class="thumbs">${thumbs}</div>`;
   if (speakOn() && d.status === 'found') TrovaSpeech.say((TrovaSpeech.italian(d.request) ? 'Trovato: ' : 'Found: ') + d.label, sayLang(d.request));
   if (d.status !== 'scanning') roomActive = false;
 }
 
-// ---- feature 9: preflight check
+// ---- preflight check
 async function runPreflight() {
-  const el = $('preres'); el.className = 'result show'; el.innerHTML = 'Checking camera, arm, Grok, voice…';
+  const el = $('preres'); el.className = 'result show'; el.innerHTML = 'Controllo camera, braccio, Grok, voce…';
   try {
     const d = await call('/api/preflight');
-    const icon = {ok: '✓', warn: '!', fail: '✗'}, col = {ok: '--ok', warn: '--warn', fail: '--bad'};
+    const word = {ok: 'ok', warn: 'attenzione', fail: 'errore'}, cls = {ok: 'ok', warn: '', fail: 'bad'};
     el.className = 'result show ' + (d.ok ? 'st-found' : 'st-not_found');
-    el.innerHTML = `<div class="big">Preflight: ${esc(d.summary)}</div><ul class="changes" style="list-style:none;padding-left:0">` +
-      d.items.map(i => `<li><b style="color:var(${col[i.status]})">${icon[i.status]} ${esc(i.name)}</b> ${esc(i.detail)}` +
-        (i.fix && i.status !== 'ok' ? `<div class="muted">→ ${esc(i.fix)}</div>` : '') + '</li>').join('') +
-      `</ul><div class="row"><button onclick="$('preres').className='result'">Close</button><span class="muted">${d.time} · ${d.seconds}s</span></div>`;
-  } catch (e) { el.innerHTML = 'Preflight failed: ' + esc(e.error || e.detail || ''); }
+    el.innerHTML = `<div class="big">${esc(d.summary)}</div><ul class="changes" style="list-style:none;padding-left:0">` +
+      d.items.map(i => `<li style="padding:6px 0;border-bottom:1px solid var(--rule)"><span class="tag ${cls[i.status]}">${word[i.status] || esc(i.status)}</span> <b>${esc(i.name)}</b> ${esc(i.detail)}` +
+        (i.fix && i.status !== 'ok' ? `<div class="muted">Soluzione: ${esc(i.fix)}</div>` : '') + '</li>').join('') +
+      `</ul><div class="muted">${esc(d.time)} · ${esc(d.seconds)} s</div>`;
+  } catch (e) { el.innerHTML = 'Controllo non riuscito: ' + esc(e.error || e.detail || ''); }
 }
 
-// ---- feature 2: zones
+// ---- zones
 async function finishZone() {
-  const name = prompt('Zone name (e.g. line area, reject bin)'); if (!name) return;
-  const rule = confirm('OK = this zone must be EMPTY.\nCancel = only some items are allowed.') ? 'empty' : 'allowed';
-  const allowed = rule === 'allowed' ? (prompt('Allowed items, comma separated (e.g. blister pack)') || '') : '';
+  const name = prompt('Nome della zona (es. area linea, cestino scarti)'); if (!name) return;
+  const rule = confirm('OK = questa zona deve essere VUOTA.\nAnnulla = sono ammessi solo alcuni oggetti.') ? 'empty' : 'allowed';
+  const allowed = rule === 'allowed' ? (prompt('Oggetti ammessi, separati da virgola (es. blister)') || '') : '';
   await sendForm('/api/zones/finish', {name, rule, allowed}); setClick(null);
 }
 
-// ---- feature 6: point at all
+// ---- point at all
 async function doFindAll() {
-  const q = $('q').value.trim(); if (!q) return alert('Type what to find, e.g. all the pens');
+  const q = $('q').value.trim(); if (!q) return alert('Scrivi cosa trovare, es. tutte le penne');
   $('q').blur();
-  const el = $('findres'); el.className = 'result show'; el.innerHTML = 'Looking for every match…';
+  const el = $('findres'); el.className = 'result show'; el.innerHTML = 'Cerco tutte le corrispondenze…';
   try { showFindAll(await call('/api/find_all', (() => { const f = new FormData(); f.append('text', q); return {method: 'POST', body: f}; })())); } catch (e) {}
   refresh();
 }
 function showFindAll(d) {
   const r = d.result, el = $('findres'); el.className = 'result show st-' + (r.count ? 'found' : 'not_found');
-  el.innerHTML = `<div class="big">${r.count ? r.count + ' found: ' + esc(r.label) : 'None found'}</div><div>${esc(r.reason)}</div>` +
-    (r.count && !d.moved && !d.arm_blocked && d.targets.length ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Point at all</button></div>` : '') +
-    (d.arm_blocked ? `<div style="color:var(--warn)">Arm not moved: ${esc(d.arm_blocked)}</div>` : '') +
-    `<div class="muted">${r.n_candidates} candidates · Grok ${r.grok_latency_s}s · total ${d.total_s}s</div><div class="thumbs">${d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>` : ""}</div>`;
+  el.innerHTML = `<div class="big">${r.count ? r.count + ' trovati: ' + esc(r.label) : 'Nessuno trovato'}</div><div>${esc(r.reason)}</div>` +
+    (r.count && !d.moved && !d.arm_blocked && d.targets.length ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Indicali tutti</button></div>` : '') +
+    (d.arm_blocked ? `<div style="color:var(--warn)">Braccio non mosso: ${esc(d.arm_blocked)}</div>` : '') +
+    `<div class="muted">${r.n_candidates} candidati · Grok ${r.grok_latency_s} s · totale ${d.total_s} s</div><div class="thumbs">${d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}" alt="Immagine con i riquadri"></a>` : ''}</div>`;
 }
 
 // Frozen image coordinates are bound to a snapshot id, never the moving live stream.
@@ -482,26 +1004,26 @@ function displayRegionSnapshot(snapshot) {
   regionPicture.onload = () => {
     const canvas = $('regionCanvas');
     canvas.width = regionSnapshot.width; canvas.height = regionSnapshot.height;
-    paintRegions(); $('regionStatus').textContent = regionReferenceObject ? 'Click a visible point on the support plane within this object region. Do not click the cup rim or object top.' : ''; $('regionDialog').showModal();
+    paintRegions(); $('regionStatus').textContent = regionReferenceObject ? 'Clicca un punto visibile sul piano di appoggio entro la regione. Evita il bordo o la sommità dell’oggetto.' : ''; $('regionDialog').showModal();
   };
   regionPicture.src = '/files/' + regionSnapshot.image;
 }
 async function markSupportPoint() {
   const state = await call('/api/state');
   const snapshot = state.inventory && state.inventory.snapshot;
-  if (!lastSelectedRegion || !snapshot) return toast('Select an object first.');
+  if (!lastSelectedRegion || !snapshot) return toast('Seleziona prima un oggetto.');
   regionReferenceObject = lastSelectedRegion;
   displayRegionSnapshot(snapshot);
 }
 function paintRegions(end) {
   const ctx = $('regionCanvas').getContext('2d');
   ctx.drawImage(regionPicture, 0, 0);
-  ctx.strokeStyle = '#ff00cc'; ctx.lineWidth = 3;
+  ctx.strokeStyle = '#D78B67'; ctx.lineWidth = 3;
   for (const o of regionSnapshot.objects) {
     const [x0,y0,x1,y1] = o.box; ctx.strokeRect(x0,y0,x1-x0,y1-y0);
   }
   if (regionStart && end) {
-    ctx.strokeStyle = '#00ff80'; ctx.strokeRect(regionStart[0],regionStart[1],end[0]-regionStart[0],end[1]-regionStart[1]);
+    ctx.strokeStyle = '#7FA392'; ctx.strokeRect(regionStart[0],regionStart[1],end[0]-regionStart[0],end[1]-regionStart[1]);
   }
 }
 function regionPoint(ev) {
@@ -522,7 +1044,7 @@ $('regionCanvas').onpointerup = async ev => {
       await json('/api/select/reference', {snapshot_id: regionSnapshot.id, track_id: regionReferenceObject.track_id,
         pixel: end, kind: 'support_plane_point', confirm: true});
       $('regionDialog').close();
-    } catch (e) { $('regionStatus').textContent = e.detail || e.error || 'Reference failed'; }
+    } catch (e) { $('regionStatus').textContent = e.detail || e.error || 'Riferimento non riuscito'; }
     return;
   }
   const data = {snapshot_id: regionSnapshot.id, label: $('regionLabel').value};
@@ -531,12 +1053,12 @@ $('regionCanvas').onpointerup = async ev => {
   try {
     const result = await json('/api/select/region', data);
     $('regionDialog').close(); showSelection(result);
-  } catch (e) { $('regionStatus').textContent = e.detail || e.error || 'Selection failed'; }
+  } catch (e) { $('regionStatus').textContent = e.detail || e.error || 'Selezione non riuscita'; }
 };
 
-// ---- feature 1: inventory map
+// ---- inventory map
 async function doInventory() {
-  const el = $('findres'); el.className = 'result show'; el.innerHTML = 'Naming every object…';
+  const el = $('findres'); el.className = 'result show'; el.innerHTML = 'Do un nome a ogni oggetto…';
   try { showInventory(await call('/api/inventory', {method: 'POST'})); } catch (e) {}
 }
 function showInventory(d) {
@@ -546,17 +1068,17 @@ function showInventory(d) {
   const rows = snap.objects || d.objects.map(o => ({track_id: o.box_id, box_id: o.box_id, name: o.name,
     category: o.category || '', note: o.note || '', confidence: '', ambiguous: false, touches_border: false}));
   const banner = snap.grok_mode && snap.grok_mode !== 'live'
-    ? `<div style="color:var(--warn)">Recognition is ${esc(snap.grok_mode)}. A selection from it cannot authorize motion.</div>` : '';
-  el.innerHTML = banner + `<div class="big">${esc(d.summary)}</div><ul class="changes">` +
-    rows.map(o => `<li><button onclick="pickObject(${Number(o.track_id)})"><b>${o.track_id}</b> ${esc(o.name)}</button> ` +
-      `<span class="muted">box ${o.box_id} · ${esc(o.category)} · ${esc(o.note)}` +
-      (o.confidence === '' || o.confidence == null ? '' : ` · confidence ${o.confidence}`) +
-      (o.ambiguous ? ' · similar objects' : '') + (o.identity_uncertain ? ' · identity uncertain' : '') +
+    ? `<div style="color:var(--warn)">Riconoscimento ${esc(snap.grok_mode)}: una selezione da qui non autorizza movimenti.</div>` : '';
+  el.innerHTML = banner + `<div class="big">${esc(d.summary)}</div><ul class="changes" style="list-style:none;padding-left:0">` +
+    rows.map(o => `<li style="padding:4px 0"><button onclick="pickObject(${Number(o.track_id)})"><b>${o.track_id}</b> ${esc(o.name)}</button> ` +
+      `<span class="muted">riquadro ${o.box_id} · ${esc(o.category)} · ${esc(o.note)}` +
+      (o.confidence === '' || o.confidence == null ? '' : ` · confidenza ${o.confidence}`) +
+      (o.ambiguous ? ' · oggetti simili' : '') + (o.identity_uncertain ? ' · identità incerta' : '') +
       (o.association && o.association !== 'same_view' ? ' · ' + esc(o.association) : '') +
-      (o.touches_border ? ' · at the edge' : '') + `</span></li>`).join('') +
-    `</ul><div class="muted">Grok ${d.latency_s}s${snap.tracks_reset ? ' · tracks reset: ' + esc(snap.tracks_reset) : ''}</div>` +
+      (o.touches_border ? ' · al bordo' : '') + `</span></li>`).join('') +
+    `</ul><div class="muted">Grok ${d.latency_s} s${snap.tracks_reset ? ' · tracce azzerate: ' + esc(snap.tracks_reset) : ''}</div>` +
     `<div class="thumbs">` + [snap.image, snap.map || d.map].filter(Boolean).map(p =>
-      `<a href="/files/${p}" target="_blank"><img src="/files/${p}"></a>`).join('') + `</div>`;
+      `<a href="/files/${p}" target="_blank"><img src="/files/${p}" alt="Mappa degli oggetti"></a>`).join('') + `</div>`;
   if (speakOn()) TrovaSpeech.say(d.summary, $('pttlang').value);
 }
 async function pickObject(trackId) {
@@ -578,16 +1100,15 @@ function showSelection(d) {
   if (d.status === 'selected' && d.object) {
     lastSelectedRegion = d.object;
     const o = d.object;
-    h = `<div class="big">Selected: ${esc(o.name || ('object ' + o.track_id))}</div>` +
-        `<div>track ${o.track_id} · box ${o.box_id} · confidence ${o.confidence}` +
-        (o.ambiguous ? ' · similar objects' : '') + `</div>`;
+    setNote('sel', o.box, 'Selezionato: ' + (o.name || ('oggetto ' + o.track_id)), `traccia ${o.track_id} · confidenza ${o.confidence ?? '–'}`);
+    h = `<div class="big">Selezionato: ${esc(o.name || ('oggetto ' + o.track_id))}</div>` +
+        `<div>traccia ${o.track_id} · riquadro ${o.box_id} · confidenza ${o.confidence}` + (o.ambiguous ? ' · oggetti simili' : '') + `</div>`;
   } else if (d.status === 'clarify') {
     h = `<div class="big">${esc(d.question || '')}</div><div class="row">` +
-      (d.candidates || []).map(o => `<button onclick="pickObject(${Number(o.track_id)})">${o.track_id} ${esc(o.name || '')}</button>`).join('') +
-      `</div>`;
-  } else h = `<div class="big">Not in this photo</div>`;
-  if (d.object) h += '<button onclick="markSupportPoint()">Mark support-plane point</button>';
-  if (d.authoritative === false) h += `<div style="color:var(--warn)">Recognition is not live. This selection cannot authorize motion.</div>`;
+      (d.candidates || []).map(o => `<button onclick="pickObject(${Number(o.track_id)})">${o.track_id} ${esc(o.name || '')}</button>`).join('') + `</div>`;
+  } else h = `<div class="big">Non è in questa immagine</div>`;
+  if (d.object) h += '<button onclick="markSupportPoint()">Segna il punto sul piano</button>';
+  if (d.authoritative === false) h += `<div style="color:var(--warn)">Riconoscimento non live: questa selezione non autorizza movimenti.</div>`;
   h += `<div class="muted">${esc(d.reason || '')}</div>`;
   el.innerHTML = h;
   if (speakOn()) TrovaSpeech.say(TrovaSpeech.phraseSelect(d, $('pttlang').value === 'it-IT'), $('pttlang').value);
@@ -595,62 +1116,70 @@ function showSelection(d) {
 
 // ---- voice (Grok Voice realtime)
 function vline(who, text, final) {
-  const box = $('vlog'); box.style.display = 'block';
+  const box = $('vlog');
   let cur = box.querySelector('.live-' + who);
   if (!cur) { cur = document.createElement('div'); cur.className = 'live-' + who; box.appendChild(cur); }
-  cur.innerHTML = `<b>${who === 'you' ? 'You' : 'Trova'}:</b> ${esc(text)}`;
+  cur.innerHTML = `<b>${who === 'you' ? 'Tu' : 'Trova'}</b>${esc(text)}`;
   if (final) cur.className = ''; box.scrollTop = box.scrollHeight;
 }
+function voiceButton(on) {
+  $('voicebtn').classList.toggle('on', on);
+  $('voicelabel').textContent = on ? 'Termina la conversazione' : 'Parla con Grok';
+  $('voicesub').textContent = on ? 'Grok ti ascolta · di "stop" per fermare il braccio' : 'Grok Voice · italiano o inglese';
+}
 async function toggleVoice() {
-  if (TrovaVoice.running()) { TrovaVoice.stop(); $('voicebtn').textContent = '🎤 Talk to Trova'; return; }
-  $('voicebtn').textContent = '⏹ Stop talking';
+  if (TrovaVoice.running()) { TrovaVoice.stop(); voiceButton(false); return; }
+  if (S && !S.voice_available) { $('vstatus').textContent = 'Grok Voice non configurato'; if ($('pttrow').style.display !== 'none') $('pttbtn').focus(); return; }
+  voiceButton(true);
   const ok = await TrovaVoice.start({onStatus: s => $('vstatus').textContent = s, onLine: vline,
     onFind: d => { showFind(d); refresh(); }, onCheck: d => { showCheck(d); refresh(); }, onRefresh: refresh,
     onInventory: d => showInventory(d), onSelect: d => showSelection(d), onFindAll: d => { showFindAll(d); refresh(); },
     onAgent: d => showAgent(d),
-    onLabels: d => showLabels(d), onTool: () => refresh(), onClosed: () => { $('voicebtn').textContent = '🎤 Talk to Trova'; }}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'mic error: ' + e.message; return false; });
-  if (!ok) $('voicebtn').textContent = '🎤 Talk to Trova';
+    onLabels: d => showLabels(d), onTool: () => refresh(), onClosed: () => voiceButton(false)}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'errore microfono: ' + e.message; return false; });
+  if (!ok) voiceButton(false);
 }
-// STOP from the keyboard: Escape always (even while typing), space bar unless the cursor is in a text field
-const typing = () => { const a = document.activeElement; return a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && ['text', 'number', 'search'].includes(a.type))); };
+// STOP from the keyboard: Escape always (even while typing), space bar unless the cursor is in a text field.
+const typing = () => { const a = document.activeElement; return a && (a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || (a.tagName === 'INPUT' && ['text', 'number', 'search'].includes(a.type))); };
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' || (e.code === 'Space' && !typing())) { e.preventDefault(); post('/api/arm/stop'); }
+  if (e.key === 'Escape' || (e.code === 'Space' && !typing())) { e.preventDefault(); closeMenu(); post('/api/arm/stop'); }
 });
 
 // ---- optional dog
 async function sendDog() {
   const q = (S && S.last_find && S.last_find.request) || $('q').value;
-  if (!q) return alert('Ask for an object first');
-  $('dogres').className = 'result show'; $('dogres').innerHTML = 'The dog is walking its route…';
+  if (!q) return alert('Chiedi prima un oggetto');
+  $('dogres').className = 'result show'; $('dogres').innerHTML = 'Il cane percorre il suo giro…';
   try { await sendForm('/api/dog/search', {description: q, wait: false}); } catch (e) {}
 }
 function showDog() {
-  if (!S || !S.dog) { $('dogpanel').style.display = 'none'; return; }
-  $('dogpanel').style.display = 'block'; $('dogroute').textContent = 'Route: ' + S.dog.route.join(' → ') + ` (${S.dog.name})`;
+  $('menu-dog').hidden = !(S && S.dog);
+  if (!S || !S.dog) return;
+  $('dogroute').textContent = 'Percorso: ' + S.dog.route.join(' → ') + ` (${S.dog.name})`;
   const d = S.dog.search; if (!d) return;
   const el = $('dogres'); el.className = 'result show st-' + (d.status === 'found' ? 'found' : d.status === 'running' ? 'clarify' : 'not_found');
-  el.innerHTML = d.status === 'running' ? `Searching for "${esc(d.request)}"… visited: ${esc(d.visited.join(', ') || 'none yet')}`
-    : d.status === 'found' ? `<div class="big">Found in ${esc(d.spot)}: ${esc(d.label)}</div><div>${esc(d.where)}</div><div class="thumbs"><a href="/files/${d.photo}" target="_blank"><img src="/files/${d.photo}"></a></div>`
-    : `<div class="big">${d.status === 'stopped' ? 'Stopped' : 'Not found'}</div><div class="muted">visited: ${esc(d.visited.join(', '))} ${esc(d.where || '')}</div>`;
+  el.innerHTML = d.status === 'running' ? `Cerco "${esc(d.request)}"… visitati: ${esc(d.visited.join(', ') || 'nessuno')}`
+    : d.status === 'found' ? `<div class="big">Trovato in ${esc(d.spot)}: ${esc(d.label)}</div><div>${esc(d.where)}</div><div class="thumbs"><a href="/files/${d.photo}" target="_blank"><img src="/files/${d.photo}" alt="Foto del cane"></a></div>`
+    : `<div class="big">${d.status === 'stopped' ? 'Fermato' : 'Non trovato'}</div><div class="muted">visitati: ${esc(d.visited.join(', '))} ${esc(d.where || '')}</div>`;
 }
 async function signoff(decision) {
-  const op = $('operator').value.trim(); if (!op) return alert('Operator name first');
+  const op = $('operator').value.trim(); if (!op) return alert('Prima il nome dell\'operatore');
   let note = '';
   if (decision === 'approve' && S && S.last_check && !S.last_check.result.line_clear) {   // GMP: a deviation needs a reason
-    note = prompt('The line is NOT clear. Reason for approving it anyway (goes into the record):'); if (!note) return;
+    note = prompt('La linea NON è libera. Motivo per approvarla comunque (va nel verbale):'); if (!note) return;
   }
   try { await sendForm('/api/signoff', {operator: op, decision, note}); } catch (e) {}
 }
-async function setSource() { await sendForm('/api/source', {spec: $('src').value}); }
+async function setSource() { await sendForm('/api/source', {spec: $('src').value}); live.dataset.mode = ''; nextFrame(); }
 async function uploadScene() { const f = new FormData(); f.append('photo', $('scene').files[0]); await call('/api/upload_scene', {method: 'POST', body: f}); refresh(); }
-async function markerFromArm() { const id = prompt('Touch the centre of an ArUco marker with the tip. Marker id (0-3)?'); if (id === null) return; await sendForm('/api/calibration/marker_from_arm', {marker_id: id}); }
+async function markerFromArm() { const id = prompt('Tocca il centro di un marker ArUco con la punta. Id del marker (0-3)?'); if (id === null) return; await sendForm('/api/calibration/marker_from_arm', {marker_id: id}); }
 async function markers() { const d = await call('/api/calibration/markers', {method: 'POST'}); d.files.forEach(u => window.open(u)); }
 async function tune() { await json('/api/tune', {thresh: +$('thresh').value, min_area_frac: +$('minarea').value}); }
 
+// ---- agent task: the written command shares the voice path
 async function runAgent(step) {
   const text = $('agentq').value.trim();
-  if (!text) return alert('Type the task, for example: trova l\'evidenziatore rosa e posizionati sopra');
-  const el = $('agentres'); el.className = 'result show'; el.innerHTML = step === true ? 'One skill…' : 'Running the task…';
+  if (!text) { $('agentq').focus(); $('agentq').placeholder = 'Scrivi prima il comando, es. trova l\'evidenziatore rosa e posizionati sopra'; return; }
+  const el = $('agentres'); el.className = 'result show'; el.innerHTML = step === true ? 'Eseguo una skill…' : 'Eseguo il task…';
   const body = {text};
   if (step === true) body.step = true;
   try { const d = await json('/api/agent/task', body); showAgent(d);
@@ -675,70 +1204,69 @@ async function nextScanView() {
   if (speakOn()) TrovaSpeech.say(d.spoken_message || d.reason, $('pttlang').value);
 }
 async function markOrientation() {
-  const orientation = prompt('New object orientation name (old localization will be invalidated):');
+  const orientation = prompt('Nome del nuovo orientamento dell\'oggetto (la localizzazione precedente viene invalidata):');
   if (!orientation) return;
   const d = await json('/api/scan/orientation', {orientation});
   agentProposal = null;
-  $('scanres').textContent = d.reason || 'Select the object again in its new orientation.';
+  $('scanres').textContent = d.reason || 'Seleziona di nuovo l\'oggetto nel nuovo orientamento.';
 }
 let reconstructionJob = null;
 async function loadM5Evidence() {
   try {
     const d = await call('/api/integration/evidence');
     const c = d.current_compatibility || d.calibration || {};
-    $('m5evidence').textContent = 'Calibration provider: ' + (c.active_provider || 'image_space') + '. Motion still requires geometry qualification and operator authorization. ' +
-      (c.reasons || []).join(' ') + ' ' + (d.reason || '') + '\n' + JSON.stringify(d);
-    $('m5evidence').style.overflowWrap = 'anywhere';
-  } catch(e) { $('m5evidence').textContent = String(e); }
+    $('m5evidence').textContent = 'Historical calibration · non attiva per il movimento. ' + (c.reasons || []).join(' ') + ' ' + (d.reason || '') + '\n' + JSON.stringify(d);
+  } catch (e) { $('m5evidence').textContent = String(e.detail || e.error || e); }
 }
 async function loadOrbitSettings() {
   try { $('orbitsettings').value = JSON.stringify(await call('/api/orbit/settings'), null, 2); }
-  catch(e) { $('orbitsettingsstatus').textContent = String(e); }
+  catch (e) { $('orbitsettingsstatus').textContent = String(e.detail || e.error || e); }
 }
 async function saveOrbitSettings() {
   try {
-    const d = await call('/api/orbit/settings', {method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({confirm:$('orbitsettingsconfirm').checked,settings:JSON.parse($('orbitsettings').value)})});
-    $('orbitsettingsstatus').textContent = 'Measurements saved. Hardware mode and unlock remain operator-owned.';
-  } catch(e) { $('orbitsettingsstatus').textContent = String(e); }
+    await call('/api/orbit/settings', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({confirm: $('orbitsettingsconfirm').checked, settings: JSON.parse($('orbitsettings').value)})});
+    $('orbitsettingsstatus').textContent = 'Misure salvate. Modalità hardware e sblocco restano all\'operatore.';
+  } catch (e) { $('orbitsettingsstatus').textContent = String(e.detail || e.error || e); }
 }
 async function previewOrbit() {
   try {
-    const d = await call('/api/orbit/plan', {method:'POST'});
+    const d = await call('/api/orbit/plan', {method: 'POST'});
     const candidates = d.candidates || [];
-    const points = candidates.filter(c=>c.validated && c.camera_mm).map(c=>c.camera_mm);
+    const points = candidates.filter(c => c.validated && c.camera_mm).map(c => c.camera_mm);
     let diagram = '';
-    if(points.length) {
-      const xmin=Math.min(...points.map(p=>p[0]))-20, xmax=Math.max(...points.map(p=>p[0]))+20;
-      const ymin=Math.min(...points.map(p=>p[1]))-20, ymax=Math.max(...points.map(p=>p[1]))+20;
-      diagram = `<svg viewBox="0 0 400 240" role="img" aria-label="Proposed camera positions in robot-base XY" style="width:100%;max-width:500px;background:#eee">` +
-        points.map(p=>`<circle cx="${20+360*(p[0]-xmin)/(xmax-xmin)}" cy="${220-200*(p[1]-ymin)/(ymax-ymin)}" r="4" fill="#168070"/>`).join('') + '</svg>';
+    if (points.length) {
+      const xmin = Math.min(...points.map(p => p[0])) - 20, xmax = Math.max(...points.map(p => p[0])) + 20;
+      const ymin = Math.min(...points.map(p => p[1])) - 20, ymax = Math.max(...points.map(p => p[1])) + 20;
+      diagram = `<svg viewBox="0 0 400 240" role="img" aria-label="Posizioni camera proposte nel piano XY della base" style="width:100%;max-width:500px;background:var(--paper-deep);margin-top:8px">` +
+        points.map((p, i) => `<circle cx="${20 + 360 * (p[0] - xmin) / (xmax - xmin)}" cy="${220 - 200 * (p[1] - ymin) / (ymax - ymin)}" r="9" fill="#E0A526" stroke="#1A1A1A"/><text x="${20 + 360 * (p[0] - xmin) / (xmax - xmin)}" y="${220 - 200 * (p[1] - ymin) / (ymax - ymin)}" text-anchor="middle" dominant-baseline="central" font-size="10" font-weight="700">${i + 1}</text>`).join('') + '</svg>';
     }
-    $('orbitpreview').innerHTML = `<b>Proposals only · no motion</b> ${esc(d.reason || '')}<br>${diagram}<ul>` +
-      candidates.map(c=>`<li>${esc(c.id)}: ${c.validated?'validated':'rejected'} · ${esc(c.reason || '')}</li>`).join('') + '</ul>';
-  } catch(e) { $('orbitpreview').textContent = String(e); }
+    $('orbitpreview').innerHTML = `<b>Solo proposte · nessun movimento</b> ${esc(d.reason || '')}<br>${diagram}<ul class="changes">` +
+      candidates.map(c => `<li>${esc(c.id)}: ${c.validated ? 'validata' : 'rifiutata'} · ${esc(c.reason || '')}</li>`).join('') + '</ul>';
+  } catch (e) { $('orbitpreview').textContent = String(e.detail || e.error || e); }
 }
 async function importMouseRecording() {
-  try { const d=await call('/api/scan/replay/mouse',{method:'POST'}); showScan(d); }
-  catch(e) { $('scanres').textContent=String(e); }
+  try { const d = await call('/api/scan/replay/mouse', {method: 'POST'}); showScan(d); }
+  catch (e) { $('scanres').textContent = String(e.detail || e.error || e); }
 }
 async function replayMouseMesh() {
   try {
-    const d=await call('/api/reconstruction/replay/mouse',{method:'POST'});
-    reconstructionJob=d.id; showReconstruction(d); if(d.id)pollReconstruction();
-  } catch(e) { $('reconstructionres').textContent=String(e); }
+    const d = await call('/api/reconstruction/replay/mouse', {method: 'POST'});
+    reconstructionJob = d.id; showReconstruction(d); if (d.id) pollReconstruction();
+  } catch (e) { $('reconstructionres').textContent = String(e.detail || e.error || e); }
 }
 async function loadReconstructionJobs() {
   try {
-    const jobs=await call('/api/reconstruction/jobs');
+    const jobs = await call('/api/reconstruction/jobs');
     $('reconstructionjobs').replaceChildren();
-    for(const job of jobs) {
-      const button=document.createElement('button');
-      button.textContent=job.id.slice(0,8)+' · '+job.status+' · '+(job.provenance || 'COLMAP job');
-      button.onclick=()=>{reconstructionJob=job.id;showReconstruction(job);pollReconstruction();};
+    for (const job of jobs) {
+      const button = document.createElement('button');
+      button.className = 'quiet';
+      button.textContent = job.id.slice(0, 8) + ' · ' + job.status + ' · ' + (job.provenance || 'job COLMAP');
+      button.onclick = () => { reconstructionJob = job.id; showReconstruction(job); pollReconstruction(); };
       $('reconstructionjobs').append(button);
     }
-  } catch(e) { $('reconstructionjobs').textContent=String(e); }
+  } catch (e) { $('reconstructionjobs').textContent = String(e.detail || e.error || e); }
 }
 async function startReconstruction() {
   const d = await json('/api/reconstruction/start', {});
@@ -746,21 +1274,22 @@ async function startReconstruction() {
   showReconstruction(d);
   if (reconstructionJob) pollReconstruction();
 }
+const artifactUrl = (id, name) => `/api/reconstruction/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(name)}`;
 function showReconstruction(d) {
-  const links = Object.keys(d.artifacts || {}).map(name => `<a href="/api/reconstruction/${encodeURIComponent(d.id)}/artifacts/${encodeURIComponent(name)}" target="_blank">${esc(name)}</a>`).join(' · ');
-  $('reconstructionres').innerHTML = `<b>${esc(d.status)} · ${esc(d.stage || '')}</b> ${esc(d.reason || '')}<br>` +
-    `mesh ${d.reconstructed ? 'generated' : 'not generated'} · textured ${d.textured_mesh ? 'yes' : 'no'} · surface completeness unverified<br>` +
-    `<div>${esc(d.provenance || '')}${d.benchmark ? ' · full COLMAP rerun: ' + (d.benchmark.full_reconstruction_rerun ? 'yes':'no; retained SfM/dense inputs') : ''}</div>` +
-    `<div style="overflow-wrap:anywhere">${esc(JSON.stringify(d.quality || {}))}</div>${links}` +
-    Object.keys(d.artifacts || {}).filter(name=>name.endsWith('.png')).map(name=>`<img alt="Reconstructed mesh ${esc(name)}" loading="lazy" style="width:45%;max-width:320px" src="/api/reconstruction/${encodeURIComponent(d.id)}/artifacts/${encodeURIComponent(name)}">`).join('');
+  const links = Object.keys(d.artifacts || {}).map(name => `<a href="${artifactUrl(d.id, name)}" target="_blank">${esc(name)}</a>`).join(' · ');
+  $('reconstructionres').innerHTML = `<div class="big">${esc(d.status)} · ${esc(d.stage || '')}</div><div>${esc(d.reason || '')}</div>` +
+    `<div class="muted">mesh ${d.reconstructed ? 'generata' : 'non generata'} · texture ${d.textured_mesh ? 'sì' : 'no'} · completezza superficie non verificata</div>` +
+    `<div class="muted">${esc(d.provenance || '')}${d.benchmark ? ' · rerun COLMAP completo: ' + (d.benchmark.full_reconstruction_rerun ? 'sì' : 'no, input SfM e denso conservati') : ''}</div>` +
+    `<div class="muted mono wrap">${esc(JSON.stringify(d.quality || {}))}</div><div>${links}</div>` +
+    `<div class="thumbs">` + Object.keys(d.artifacts || {}).filter(name => name.endsWith('.png')).map(name => `<img alt="Mesh ricostruita ${esc(name)}" loading="lazy" src="${artifactUrl(d.id, name)}">`).join('') + `</div>`;
 }
 async function pollReconstruction() {
   if (!reconstructionJob) return;
   try {
     const d = await call('/api/reconstruction/' + encodeURIComponent(reconstructionJob));
     showReconstruction(d);
-    if (['queued', 'running'].includes(d.status)) setTimeout(pollReconstruction, 1000);
-  } catch (e) { $('reconstructionres').textContent = 'Unable to read reconstruction status: ' + e; }
+    if (['queued', 'running'].includes(d.status)) setTimeout(pollReconstruction, 1000); else loadOutputs();
+  } catch (e) { $('reconstructionres').textContent = 'Stato della ricostruzione non leggibile: ' + (e.detail || e.error || e); }
 }
 async function cancelReconstruction() {
   if (reconstructionJob) await post('/api/reconstruction/' + encodeURIComponent(reconstructionJob) + '/cancel');
@@ -769,47 +1298,44 @@ function showAgent(d) {
   if (!d || !d.status) return;
   agentProposal = d.confirmation && d.confirmation.expires_at * 1000 > Date.now() ? d.confirmation : null;
   if (d.reconstruction) { reconstructionJob = d.reconstruction.id; showReconstruction(d.reconstruction); pollReconstruction(); }
+  if (d.selected && d.selected.box && (!notes.sel || JSON.stringify(notes.sel.box) !== JSON.stringify(d.selected.box)))
+    setNote('sel', d.selected.box, 'Selezionato: ' + (d.selected.name || ('oggetto ' + d.selected.track_id)), `traccia ${d.selected.track_id ?? '–'}`);
   const el = $('agentres');
-  el.className = 'result show st-' + (d.goal_achieved ? 'found' : d.status === 'clarify' ? 'clarify' : 'not_found');
+  el.className = 'result show st-' + (d.goal_achieved ? 'found' : d.status === 'clarify' || agentProposal ? 'clarify' : 'not_found');
   const steps = (d.steps || []).map(s => `<li><b>${esc(s.skill)}</b> ${esc(s.reason || '')}</li>`).join('');
   const prop = d.proposal && d.proposal.proposal ? d.proposal.proposal.target_mm : (d.planned_target || null);
   const traj = (d.proposal && d.proposal.trajectory_mm) || [];
   const blocks = (d.blockers || []).map(b => `<li>${esc(b)}</li>`).join('');
   const safety = d.proposal && d.proposal.safety;
-  const camState = (typeof S !== 'undefined' && S && S.source) ? (S.source.online ? 'camera online' : (S.source.kind === 'pi' ? 'camera offline' : 'camera ' + S.source.kind)) : 'camera';
+  const camState = (S && S.source) ? (S.source.online ? 'camera online' : (S.source.kind === 'pi' ? 'camera offline' : 'camera ' + S.source.kind)) : 'camera';
   el.innerHTML = `<div class="big">${esc(d.status)} · ${esc(d.phase || '')}</div><div>${esc(d.reason || '')}</div>` +
     `<div id="agentblocker" role="status"><b>${esc(d.workflow_state || '')}</b> ${esc(d.spoken_message || '')}</div>` +
-    (agentProposal ? `<div>Proposal ${esc(agentProposal.id)} · expires ${esc(new Date(agentProposal.expires_at * 1000).toLocaleTimeString())}</div><button onclick="confirmAgent()">Confirm validated motion</button><button onclick="cancelAgent()">Cancel proposal</button>` : '') +
+    (agentProposal ? `<div class="row" style="margin-top:10px"><button class="primary" onclick="confirmAgent()">Conferma il movimento validato</button><button onclick="cancelAgent()">Annulla la proposta</button></div><div class="muted">proposta ${esc(agentProposal.id)} · scade alle ${esc(new Date(agentProposal.expires_at * 1000).toLocaleTimeString('it-IT'))}</div>` : '') +
     (d.question ? `<div class="big">${esc(d.question)}</div>` : '') +
-    `<div class="muted">${esc(camState)} · Grok ${esc(d.grok_mode || (d.authoritative ? 'live' : 'not live'))} · calibration ${d.calibration_valid ? 'valid' : 'not valid'} · motion ${prop ? 'proposed' : 'not proposed'} · movement ${d.hardware_moved ? 'executed' : 'not executed'}</div>` +
+    `<div class="muted">${esc(camState)} · Grok ${esc(d.grok_mode || (d.authoritative ? 'live' : 'non live'))} · calibrazione ${d.calibration_valid ? 'valida' : 'non valida'} · movimento ${prop ? 'proposto' : 'non proposto'} · esecuzione ${d.hardware_moved ? 'avvenuta' : 'non avvenuta'}</div>` +
     (d.motion_lock ? `<div style="color:var(--warn)">${esc(d.motion_lock)}</div>` : '') +
     (blocks ? `<ul class="changes">${blocks}</ul>` : '') +
-    (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm · geometry ${esc((d.proposal && d.proposal.geometry_source) || 'unknown')} · IK ${d.proposal && d.proposal.ik_verified ? (d.proposal.ik_source === 'imported_five_axis_camera_ik' ? 'five-axis numerical solution' : 'confirmed by the controller') : 'not confirmed'} · authorized ${d.proposal && d.proposal.execution_authorized ? 'yes' : 'no'} · collision avoidance: no</div>` : '') +
-    (d.proposal && d.proposal.duration_s != null ? `<div class="muted">straight-line estimate ${esc(d.proposal.duration_s)} s${d.proposal.duration_is_straight_line_estimate ? '' : ''}</div>` : '') +
-    (d.timings ? `<div class="muted">stage times ${esc(Object.keys(d.timings).filter(k => d.timings[k] && d.timings[k].last_s != null).map(k => k + ' ' + d.timings[k].last_s + 's').join(' · '))} · realtime not claimed</div>` : '') +
-    (traj.length ? `<div class="muted">straight-line samples ${esc(traj.map(p => p.join(', ')).join(' → '))} mm</div>` : '') +
-    (safety ? `<div class="muted">gateway ${esc(d.proposal.status || '')}: workspace ${esc(safety.workspace || '')} · clearance ${esc(safety.clearance || '')} · keep-out ${esc(safety.keep_out || 'not_assessed')} · motion ${d.proposal.allow_motion ? 'allowed' : 'not sent'} · collision avoidance: no</div>` : '') +
-    (d.approach_plan ? `<div><b>Five-axis approach</b>: ${esc(d.approach_plan.reason)} · camera axis targets the measured object reference · collision avoidance not claimed</div>` : '') +
-    (safety && safety.trajectory_certificate ? `<div>Bounded model intervals: ${esc(safety.trajectory_certificate.intervals || 0)} · minimum modeled clearance ${esc(safety.trajectory_certificate.minimum_model_clearance_mm ?? 'unknown')} mm · controller tracking requires qualification</div>` : '') +
-    (d.scan_plan ? `<div><b>Scan viewpoints</b>: ${esc(d.scan_plan.reason)} · surface coverage unknown</div><ul>` + (d.scan_plan.candidates || []).map(v =>
-      `<li>${esc(v.id)} · ${v.validated ? 'validated' : 'blocked'} · IK ${v.ik_verified ? 'checked' : 'unverified'} · plane overlap ${v.plane_overlap_fraction == null ? 'unknown' : Math.round(v.plane_overlap_fraction * 100) + '%'} · ${esc(v.reason || '')}</li>`).join('') + '</ul>' : '') +
-    (steps ? `<ul class="changes">${steps}</ul>` : '');
+    (prop ? `<div class="muted">bersaglio di osservazione proposto <span class="mono">${esc(prop.join(', '))}</span> mm · geometria ${esc((d.proposal && d.proposal.geometry_source) || 'sconosciuta')} · IK ${d.proposal && d.proposal.ik_verified ? 'confermata dal controller' : 'non confermata'} · autorizzato ${d.proposal && d.proposal.execution_authorized ? 'sì' : 'no'} · anticollisione: no</div>` : '') +
+    (d.proposal && d.proposal.duration_s != null ? `<div class="muted">stima in linea retta ${esc(d.proposal.duration_s)} s</div>` : '') +
+    (d.timings ? `<div class="muted">tempi ${esc(Object.keys(d.timings).filter(k => d.timings[k] && d.timings[k].last_s != null).map(k => k + ' ' + d.timings[k].last_s + ' s').join(' · '))} · tempo reale non dichiarato</div>` : '') +
+    (traj.length ? `<div class="muted wrap">campioni in linea retta <span class="mono">${esc(traj.map(p => p.join(', ')).join(' → '))}</span> mm</div>` : '') +
+    (safety ? `<div class="muted">gateway ${esc(d.proposal.status || '')}: workspace ${esc(safety.workspace || '')} · clearance ${esc(safety.clearance || '')} · keep-out ${esc(safety.keep_out || 'not_assessed')} · movimento ${d.proposal.allow_motion ? 'consentito' : 'non inviato'} · anticollisione: no</div>` : '') +
+    (d.scan_plan ? `<div><b>Viste di scansione</b>: ${esc(d.scan_plan.reason)} · copertura della superficie sconosciuta</div><ul class="changes">` + (d.scan_plan.candidates || []).map(v =>
+      `<li>${esc(v.id)} · ${v.validated ? 'validata' : 'bloccata'} · IK ${v.ik_verified ? 'controllata' : 'non verificata'} · sovrapposizione piano ${v.plane_overlap_fraction == null ? 'sconosciuta' : Math.round(v.plane_overlap_fraction * 100) + '%'} · ${esc(v.reason || '')}</li>`).join('') + '</ul>' : '') +
+    (steps ? `<details class="more"><summary>Skill eseguite (${(d.steps || []).length})</summary><ul class="changes">${steps}</ul></details>` : '');
+  if (agentProposal) el.scrollIntoView({block: 'nearest'});
 }
 function showBoard(d) {
-  if (d && d.image) {
-    $('boardview').style.display = 'block';
-    $('boardview').src = '/files/' + d.image + '?t=' + Date.now();
-  }
-  const bits = [d && d.reason, d && d.moved ? '' : 'arm not moved', d && d.pose_source ? 'pose ' + d.pose_source : ''];
+  if (d && d.image) $('boardwrap').innerHTML = `<img src="/files/${esc(d.image)}?t=${Date.now()}" alt="Rilevamento della scacchiera" style="width:100%;max-width:640px;border:1px solid var(--rule)">`;
+  const bits = [d && d.reason, d && d.moved ? '' : 'braccio non mosso', d && d.pose_source ? 'posa ' + d.pose_source : ''];
   window._boardNote = bits.filter(Boolean).join(' · ');
   $('visioninfo').textContent = window._boardNote;
 }
 async function previewBoard() {
-  try { showBoard(await json('/api/vision/preview', {cols: +$('boardcols').value, rows: +$('boardrows').value})); }
-  catch (e) {}
+  try { showBoard(await json('/api/vision/preview', {cols: +$('boardcols').value, rows: +$('boardrows').value})); } catch (e) {}
 }
 async function captureBoard(which) {
-  if (!$('boardsquare').value) return alert('Measure one checkerboard square and type it in millimetres.');
+  if (!$('boardsquare').value) { $('boardsquare').focus(); $('calibnext').textContent = 'Misura un quadrato della scacchiera e scrivi il lato in millimetri.'; return; }
   const body = {cols: +$('boardcols').value, rows: +$('boardrows').value, square_mm: +$('boardsquare').value};
   if (which === 'handeye') body.on_table = $('ontable').checked;
   try { showBoard(await json('/api/vision/' + which, body)); } catch (e) {}
@@ -818,33 +1344,29 @@ function showCalib() {
   const p = S && S.vision_progress;
   if (!p) return;
   const sp = p.spread || {};
-  const rms = p.intrinsics_rms_px == null ? 'not solved' : p.intrinsics_rms_px + ' px';
-  const hold = p.holdout_mm == null ? 'not solved' : p.holdout_mm + ' mm';
-  const plane = p.plane_residual_mm == null ? 'not solved' : p.plane_residual_mm + ' mm';
-  const axis = sp.one_axis ? ' · rotations stay near one axis' : '';
-  const rejected = ` · rejected intrinsics ${p.n_rejected_intrinsics || 0} · rejected hand-eye ${p.n_rejected_handeye || 0}`;
-  $('calibinfo').textContent = `intrinsics ${p.n_intrinsics} · hand-eye ${p.n_handeye} · on table ${p.n_on_table}${rejected} · rotation ${sp.max_rotation_deg || 0} deg · translation ${sp.max_translation_mm || 0} mm${axis} · rms ${rms} · held-out ${hold} · plane ${plane} · ${sp.reason || ''}`;
-  if ($('calibnext')) $('calibnext').textContent = p.next_instruction || '';
-  if ($('dofnote')) $('dofnote').textContent = p.dof_note || '';
-  const bars = $('reprobars');
-  if (bars) {
-    const views = p.per_view_px || [];
-    bars.innerHTML = views.map(v => {
-      const px = v.mean_px == null ? 0 : v.mean_px;
-      const width = Math.min(100, px / 1.5 * 100);
-      return `<div class="muted">view ${v.index} ${v.mean_px == null ? 'no error' : v.mean_px + ' px'} <span style="display:inline-block;height:8px;width:${width}px;background:${px > 1.5 ? 'var(--bad)' : 'var(--ok)'}"></span></div>`;
-    }).join('');
-  }
+  const rms = p.intrinsics_rms_px == null ? 'non risolto' : p.intrinsics_rms_px + ' px';
+  const hold = p.holdout_mm == null ? 'non risolto' : p.holdout_mm + ' mm';
+  const plane = p.plane_residual_mm == null ? 'non risolto' : p.plane_residual_mm + ' mm';
+  const axis = sp.one_axis ? ' · rotazioni quasi su un solo asse' : '';
+  const rejected = ` · scartati intrinseci ${p.n_rejected_intrinsics || 0} · scartati hand-eye ${p.n_rejected_handeye || 0}`;
+  $('calibinfo').textContent = `intrinseci ${p.n_intrinsics} · hand-eye ${p.n_handeye} · sul tavolo ${p.n_on_table}${rejected} · rotazione ${sp.max_rotation_deg || 0}° · traslazione ${sp.max_translation_mm || 0} mm${axis} · rms ${rms} · held-out ${hold} · piano ${plane} · ${sp.reason || ''}`;
+  $('calibnext').textContent = p.next_instruction || '';
+  $('dofnote').textContent = p.dof_note || '';
+  const views = p.per_view_px || [];
+  $('reprobars').innerHTML = views.map(v => {
+    const px = v.mean_px == null ? 0 : v.mean_px, width = Math.min(160, px / 1.5 * 100);
+    return `<div class="muted">vista ${v.index} ${v.mean_px == null ? 'nessun errore' : v.mean_px + ' px'} <span style="display:inline-block;height:8px;width:${width}px;background:${px > 1.5 ? 'var(--bad)' : 'var(--ok)'}"></span></div>`;
+  }).join('');
 }
 async function compareReference() {
-  if ($('refx').value === '' || $('refy').value === '' || $('refz').value === '') return alert('Type the measured x, y and z in millimetres.');
-  if ($('reftrack').value === '') return alert('Type the track id of the object you measured.');
+  if ($('refx').value === '' || $('refy').value === '' || $('refz').value === '') { $('locinfo').textContent = 'Scrivi x, y e z misurati in millimetri.'; return; }
+  if ($('reftrack').value === '') { $('locinfo').textContent = 'Scrivi la traccia dell\'oggetto misurato.'; return; }
   const body = {x_mm: +$('refx').value, y_mm: +$('refy').value, z_mm: +$('refz').value, track_id: +$('reftrack').value};
   try {
     const d = await json('/api/vision/reference', body);
     $('locinfo').textContent = d.estimate_from_calibration
-      ? `predicted ${d.predicted_mm.join(', ')} mm · measured ${d.measured_mm.join(', ')} mm · error ${d.error_mm} mm · version ${d.calibration_version} · pose ${d.pose_source} · uncertainty ${d.uncertainty_mm} · motion not authorized`
-      : (d.reason || 'localization blocked');
+      ? `previsto ${d.predicted_mm.join(', ')} mm · misurato ${d.measured_mm.join(', ')} mm · errore ${d.error_mm} mm · versione ${d.calibration_version} · posa ${d.pose_source} · incertezza ${d.uncertainty_mm} · movimento non autorizzato`
+      : (d.reason || 'localizzazione bloccata');
   } catch (e) {}
 }
 async function saveSafety() {
@@ -858,137 +1380,275 @@ async function saveSafety() {
   if ($('safejoints').value.trim()) body.joint_limits = $('safejoints').value.trim();
   try {
     const d = await json('/api/safety', body);
-    $('safetyinfo').textContent = (d.ok ? 'stored ' + (d.applied || []).join(', ') : d.reason) + ' · collision avoidance: no · mode unchanged';
+    $('safetyinfo').textContent = (d.ok ? 'salvati: ' + (d.applied || []).join(', ') : d.reason) + ' · anticollisione: no · modalità invariata';
   } catch (e) {}
 }
-async function dropSample(kind, index) {
-  try { await json('/api/vision/sample/drop', {kind, index}); } catch (e) {}
-}
+async function dropSample(kind, index) { try { await json('/api/vision/sample/drop', {kind, index}); loadSamples(); } catch (e) {} }
 async function loadSamples() {
-  if (!$('calibsamples')) return;
   try {
     const d = await (await fetch('/api/vision/samples')).json();
     const rows = (d.intrinsics || []).concat(d.handeye || []);
     $('calibsamples').innerHTML = rows.map(s => {
-      const thumb = s.image ? `<img src="/files/${esc(s.image)}" alt="" style="width:96px;height:auto;border-radius:6px;border:1px solid var(--line)">` : '';
-      return `<div class="row">${thumb}<span class="muted">${esc(s.kind)} ${s.index} · ${s.width || '?'}×${s.height || '?'} · ${s.corners} corners${s.reprojection_px == null ? '' : ' · ' + s.reprojection_px + ' px'}</span><button onclick="dropSample('${esc(s.kind)}', ${Number(s.index)})">Remove</button></div>`;
-    }).join('') + (d.rejected || []).slice(-6).map(s => `<div class="muted">rejected ${esc(s.kind)}: ${esc(s.reason)}</div>`).join('');
+      const thumb = s.image ? `<img src="/files/${esc(s.image)}" alt="" style="width:96px;height:auto;border:1px solid var(--rule)">` : '';
+      return `<div class="row">${thumb}<span class="muted">${esc(s.kind)} ${s.index} · ${s.width || '?'}×${s.height || '?'} · ${s.corners} angoli${s.reprojection_px == null ? '' : ' · ' + s.reprojection_px + ' px'}</span><button class="quiet" onclick="dropSample('${esc(s.kind)}', ${Number(s.index)})">Rimuovi</button></div>`;
+    }).join('') + (d.rejected || []).slice(-6).map(s => `<div class="muted">scartato ${esc(s.kind)}: ${esc(s.reason)}</div>`).join('');
   } catch (e) {}
 }
-async function startScan() {
-  try { await json('/api/scan/start', {object_id: $('scanobj').value}); } catch (e) {}
-}
+async function startScan() { try { await json('/api/scan/start', {object_id: $('scanobj').value}); } catch (e) {} }
 async function captureView() {
   try {
     const d = await call('/api/scan/capture', {method: 'POST'});
-    $('scanres').textContent = `${d.viewpoint_id}: ${d.accepted ? 'accepted' : 'rejected ' + (d.reject_reason || '')}`;
+    $('scanres').textContent = `${d.viewpoint_id}: ${d.accepted ? 'accettata' : 'scartata ' + (d.reject_reason || '')}`;
   } catch (e) {}
   refresh();
 }
-async function finishScan() {
-  try { await call('/api/scan/finish', {method: 'POST'}); } catch (e) {}
-  refresh();
-}
+async function finishScan() { try { await call('/api/scan/finish', {method: 'POST'}); } catch (e) {} refresh(); }
 async function exportScan() {
   try {
     const d = await call('/api/scan/export', {method: 'POST'});
-    $('scanres').textContent = `exported ${d.images} images, reconstructed: ${d.reconstructed}`;
+    $('scanres').textContent = `esportate ${d.images} immagini, ricostruito: ${d.reconstructed}`;
   } catch (e) {}
 }
 function showScan(session) {
   if (!session) return;
   const views = session.views || [];
-  $('scanres').innerHTML = `${esc(session.id || '')} · ${esc(session.status || '')} · ${session.n_views || views.length} views · orientation ${esc(session.orientation || '')} · ${esc(session.provenance || '')} · ${session.n_reconstruction_accepted || 0} reconstruction inputs · acquisition dataset; reconstruction results shown separately` +
-    (views.length ? '<ul class="changes">' + views.map(v => `<li>${esc(v.viewpoint_id)} ${v.accepted ? 'metric capture accepted' : v.reconstruction_accepted ? 'recorded reconstruction input' : 'rejected'} ${esc(v.reject_reason || '')} ${v.quality ? esc(JSON.stringify(v.quality)) : ''} pose ${esc((v.robot_tcp_mm || []).join(', '))}</li>`).join('') + '</ul>' : '');
+  $('scanres').innerHTML = `${esc(session.id || '')} · ${esc(session.status || '')} · ${session.n_views || views.length} viste · orientamento ${esc(session.orientation || '')} · ${esc(session.provenance || '')} · ${session.n_reconstruction_accepted || 0} input di ricostruzione` +
+    (views.length ? '<ul class="changes">' + views.map(v => `<li>${esc(v.viewpoint_id)} ${v.accepted ? 'cattura metrica accettata' : v.reconstruction_accepted ? 'input di ricostruzione registrato' : 'scartata'} ${esc(v.reject_reason || '')} posa <span class="mono">${esc((v.robot_tcp_mm || []).join(', '))}</span></li>`).join('') + '</ul>' : '');
 }
 
+// ---- Output: meshes, renders, images, measurements, datasets in one table
+let OUT = {jobs: [], hist: []}, outTab = store.get('trova.outtab') || 'all';
+async function loadOutputs() {
+  try { const j = await (await fetch('/api/reconstruction/jobs')).json(); if (Array.isArray(j)) OUT.jobs = j; } catch (e) {}
+  try { const h = await (await fetch('/api/history?n=120')).json(); OUT.hist = (h.rows || []).filter(r => r.image); } catch (e) {}
+  renderOutputs();
+}
+const fmtDims = q => q && typeof q === 'object' && !Array.isArray(q) ? [q.L, q.W, q.H].map(Number).map(v => v.toFixed(1)).join(' x ') : Array.isArray(q) ? q.map(Number).map(v => v.toFixed(1)).join(' x ') : '';
+const clock = t => t ? new Date(t * 1000).toLocaleTimeString('it-IT', {hour: '2-digit', minute: '2-digit'}) : '';
+function outputItems() {
+  const items = [];
+  const jobs = [...OUT.jobs].sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+  for (const job of jobs) {
+    const names = Object.keys(job.artifacts || {}), meshes = names.filter(n => /\.(glb|stl|ply|obj)$/i.test(n)), renders = names.filter(n => /\.png$/i.test(n));
+    const tm = clock(job.started_at), src = job.provenance || 'ricostruzione';
+    if (meshes.length || ['queued', 'running', 'failed', 'cancelled'].includes(job.status))
+      items.push({kind: 'mesh', title: meshes.length ? 'Mesh dell\'oggetto' : 'Ricostruzione ' + job.status, sub: `${job.id.slice(0, 8)} · ${src}${job.cad ? '' : ' · nessun CAD'}${job.textured_mesh ? ' · texture' : ''}`,
+        value: job.status === 'completed' ? (job.quality && job.quality.mesh_vertices ? job.quality.mesh_vertices + ' vertici' : 'completata') : (job.stage || job.status), tm,
+        thumb: renders[0] ? artifactUrl(job.id, renders[0]) : '', links: meshes.map(n => [n.split('.').pop().toUpperCase(), artifactUrl(job.id, n)])});
+    renders.forEach(n => items.push({kind: 'render', title: 'Render ' + n.replace(/\.png$/i, '').replace(/[_-]/g, ' '), sub: job.id.slice(0, 8), value: 'PNG', tm, thumb: artifactUrl(job.id, n), links: [['Apri', artifactUrl(job.id, n)]]}));
+    const q = job.quality || {};
+    if (q.estimated_object_dimensions_mm) items.push({kind: 'measure', title: 'Dimensioni stimate dell\'oggetto', sub: `${job.id.slice(0, 8)} · ${q.metric_scale_source || 'scala metrica'}`, value: fmtDims(q.estimated_object_dimensions_mm) + ' mm', tm});
+    if (q.mesh_bbox_extent_mm) items.push({kind: 'measure', title: 'Ingombro della mesh', sub: job.id.slice(0, 8), value: fmtDims(q.mesh_bbox_extent_mm) + ' mm', tm});
+    if (q.median_reprojection_px != null) items.push({kind: 'measure', title: 'Errore di riproiezione mediano', sub: job.id.slice(0, 8), value: Number(q.median_reprojection_px).toFixed(2) + ' px', tm});
+    if (q.registered_images != null) items.push({kind: 'measure', title: 'Immagini registrate', sub: job.id.slice(0, 8), value: q.registered_images + (q.input_images ? ' / ' + q.input_images : ''), tm});
+  }
+  if (S) {
+    const p = S.vision_progress || {};
+    if (p.intrinsics_rms_px != null) items.push({kind: 'measure', title: 'Calibrazione: riproiezione intrinseci', sub: `${p.n_intrinsics} viste`, value: p.intrinsics_rms_px + ' px'});
+    if (p.holdout_mm != null) items.push({kind: 'measure', title: 'Calibrazione: errore held-out hand-eye', sub: `${p.n_handeye} viste`, value: p.holdout_mm + ' mm'});
+    if (p.plane_residual_mm != null) items.push({kind: 'measure', title: 'Calibrazione: residuo del piano', sub: `${p.n_on_table} viste sul tavolo`, value: p.plane_residual_mm + ' mm'});
+    const rc = S.reference_check;
+    if (rc && rc.estimate_from_calibration) items.push({kind: 'measure', title: 'Confronto con punto misurato', sub: `versione ${rc.calibration_version}`, value: rc.error_mm + ' mm'});
+    const sc = S.scan;
+    if (sc && (sc.id || sc.session)) { const s = sc.session || sc; items.push({kind: 'dataset', title: 'Sessione di scansione ' + (s.object_id || ''), sub: `${s.id || ''} · ${s.status || ''} · orientamento ${s.orientation || '–'}`, value: (s.n_views || (sc.views || []).length || 0) + ' viste'}); }
+  }
+  OUT.hist.forEach(r => items.push({kind: 'image', title: r.what || r.kind, sub: `${r.kind.replace(/_/g, ' ')} · ${r.result || ''}`.slice(0, 120), value: '', tm: (r.time || '').slice(11, 16), thumb: '/files/' + r.image, links: [['Apri', '/files/' + r.image]]}));
+  const prefix = {mesh: 'M', render: 'R', image: 'I', measure: 'D', dataset: 'S'}, n = {};
+  items.forEach(it => { n[it.kind] = (n[it.kind] || 0) + 1; it.code = prefix[it.kind] + String(n[it.kind]).padStart(2, '0'); });
+  return items;
+}
+const EMPTY = {all: 'Nessun output ancora. Le mesh e i render compaiono qui al termine di una ricostruzione, le immagini quando Trova cattura, seleziona o trova un oggetto, le misure quando calibrazione e ricostruzione producono numeri.',
+  mesh: 'Nessuna mesh. Avvia una ricostruzione da Strumenti, Scansione e ricostruzione. Il CAD modificabile non è ancora generato.', render: 'Nessun render: arrivano con la mesh.',
+  image: 'Nessuna immagine salvata. Le foto arrivano da ritrovamenti, selezioni, catture di calibrazione e scansioni.', measure: 'Nessuna misura. Calibrazione e ricostruzione aggiungono qui i loro numeri.', dataset: 'Nessuna sessione di scansione.'};
+const linkHtml = it => (it.links || []).map(([t, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener"${t === 'Apri' ? '' : ' download'}>${esc(t)}</a>`).join('');
+const cellHtml = it => `<div class="cell" data-kind="${it.kind}"><span class="code">${it.code}</span>` +
+  `<div class="th">${it.thumb ? `<img src="${esc(it.thumb)}" alt="" loading="lazy">` : it.value ? `<span class="v">${esc(it.value)}</span>` : ''}</div>` +
+  `<b title="${esc(it.title)}">${esc(it.title)}</b><span class="sub2 ell" title="${esc(it.sub || '')}">${esc([it.thumb ? it.value : '', it.tm].filter(Boolean).join(' · ') || it.sub || '')}</span>` +
+  `<span class="act">${linkHtml(it)}</span></div>`;
+let outHtml = '', stripHtml = '';
+function renderOutputs() {
+  const items = outputItems(), counts = {all: items.length};
+  items.forEach(it => { counts[it.kind] = (counts[it.kind] || 0) + 1; });
+  document.querySelectorAll('#outtabs [role=tab]').forEach(b => { b.setAttribute('aria-selected', String(b.dataset.tab === outTab)); b.querySelector('span').textContent = counts[b.dataset.tab] || ''; });
+  const shown = outTab === 'all' ? items : items.filter(it => it.kind === outTab), empty = EMPTY[outTab] || EMPTY.all;
+  $('outcount').textContent = items.length ? items.length + ' elementi' : '';
+  const sh = shown.slice(0, 40).map(cellHtml).join('');
+  if (sh !== stripHtml) { stripHtml = sh; $('outstrip').innerHTML = sh; }
+  $('outstrip').hidden = !shown.length; $('outempty').hidden = shown.length > 0; $('outempty').textContent = empty;
+  const html = shown.slice(0, 300).map(it => `<tr data-kind="${it.kind}"><td class="code">${it.code}</td>` +
+    `<td class="pv">${it.thumb ? `<img src="${esc(it.thumb)}" alt="" loading="lazy">` : '<div class="ph"></div>'}</td>` +
+    `<td><b>${esc(it.title)}</b><div class="sub2 wrap">${esc(it.sub || '')}</div></td>` +
+    `<td class="mono">${esc(it.value || '')}</td><td class="tm mono">${esc(it.tm || '')}</td><td class="act">${linkHtml(it)}</td></tr>`).join('');
+  if (html !== outHtml) { outHtml = html; $('outbody').innerHTML = html; }
+  $('outtable').hidden = !shown.length; $('outempty2').hidden = shown.length > 0; $('outempty2').textContent = empty;
+}
+$('outstrip').addEventListener('wheel', e => { const s = $('outstrip'); if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && s.scrollWidth > s.clientWidth) { s.scrollLeft += e.deltaY; e.preventDefault(); } }, {passive: false});
+document.querySelectorAll('#outtabs [role=tab]').forEach(b => b.addEventListener('click', () => { outTab = b.dataset.tab; store.set('trova.outtab', outTab); renderOutputs(); }));
+
+// ---- Grok's requests to the operator after a reconstruction (trova/scan_review.py)
+const ACTION_IT = {flip: 'capovolgere', rotate: 'ruotare', reposition: 'spostare', uncover: 'liberare un lato', lighting: 'luce', clean: 'pulire', other: 'altro'};
+const SIDE_IT = {top: 'sopra', bottom: 'sotto', left: 'sinistra', right: 'destra', front: 'davanti', back: 'dietro'};
+const GMODE_IT = {live: 'live', mock: 'simulato', offline: 'offline'};
+const hhmm = t => t ? new Date(t * 1000).toLocaleTimeString('it-IT', {hour: '2-digit', minute: '2-digit'}) : '';
+let reqHtml = '';
+function renderRequests() {
+  const rv = S && S.scan_review && S.scan_review.job_id ? S.scan_review : null;
+  const qs = rv ? rv.requests || [] : [], pend = qs.filter(q => q.status === 'pending').length;
+  $('reqbadge').textContent = !rv ? 'nessuna revisione' : pend ? `${pend} in attesa` : qs.length ? 'tutte gestite' : 'nessuna';
+  $('reqbadge').className = 'badge ' + (pend ? 'mock' : rv ? 'live' : '');
+  $('reqmeta').textContent = rv ? `ricostruzione ${rv.job_id.slice(0, 8)} · Grok ${GMODE_IT[rv.grok_mode] || rv.grok_mode} · ${rv.time}` : '';
+  let html;
+  if (!rv) html = `<p class="empty">Dopo una ricostruzione Grok guarda i render e scrive qui cosa cambiare sull'oggetto per completare la scansione: capovolgerlo, ruotarlo, spostare un cavo che copre un lato.</p>`;
+  else {
+    html = (rv.summary ? `<p class="reqsum">${esc(rv.summary)}</p>` : '') + (qs.length ? '<ol class="reqs">' + qs.map((q, i) => {
+      const tags = `<span class="row"><span class="tag">${esc(ACTION_IT[q.action] || q.action)}</span>${SIDE_IT[q.side] ? `<span class="tag">${SIDE_IT[q.side]}</span>` : ''}</span>`;
+      const act = q.status === 'pending'
+        ? `<span class="row"><button class="primary" onclick="markRequest('${esc(q.id)}','done')">Fatto</button><button class="quiet" onclick="markRequest('${esc(q.id)}','skipped')">Non posso</button></span>`
+        : `<span class="row"><span class="muted">${q.status === 'done' ? 'fatto' : 'non possibile'} alle ${hhmm(q.updated)}</span><button class="quiet" onclick="markRequest('${esc(q.id)}','pending')">Riapri</button></span>`;
+      const ev = q.render ? `<a class="ev" href="${artifactUrl(rv.job_id, q.render)}" target="_blank" rel="noopener"><img src="${artifactUrl(rv.job_id, q.render)}" alt="Render ${esc(q.render)}" loading="lazy"></a>` : '<span></span>';
+      return `<li class="req ${esc(q.status)}"><span class="num${q.status === 'pending' ? '' : ' ring'}">${i + 1}</span><div class="rq"><b>${esc(q.instruction)}</b>` +
+        (q.reason ? `<span class="why">${esc(q.reason)}</span>` : '') + tags + act + `</div>${ev}</li>`;
+    }).join('') + '</ol>' : `<p class="empty">Nessuna altra richiesta per questo gruppo di orientamento.</p>`);
+  }
+  if (html !== reqHtml) { reqHtml = html; $('reqlist').innerHTML = html; }
+}
+async function reviewRender() {
+  const b = $('reviewbtn'); b.disabled = true; b.textContent = 'Grok guarda i render…'; $('reqnote').textContent = '';
+  try { const d = await json('/api/scan/review', {}); $('reqnote').textContent = d.summary || ''; }
+  catch (e) { $('reqnote').textContent = String(e.detail || e.error || 'Revisione non riuscita'); }
+  finally { b.disabled = false; b.textContent = 'Rivedi il render'; }
+}
+async function markRequest(id, status) {
+  try {
+    const d = await json('/api/scan/review/request', {request_id: id, status});
+    $('reqnote').textContent = d.spoken_message || (status === 'done' ? 'Segnata come fatta.' : status === 'skipped' ? 'Segnata come non possibile.' : 'Richiesta riaperta.');
+    if (d.spoken_message && speakOn()) TrovaSpeech.say(d.spoken_message, $('pttlang').value);
+  } catch (e) {}
+}
+
+// ---- safety and arm facts
+const miss = t => `<span class="miss">${esc(t)}</span>`;
+const MODE_IT = {simulation: 'simulazione', dry_run: 'prova a secco', hardware: 'hardware'};
+const SRC_IT = {telemetry: 'telemetria xArm', simulated: 'simulata'};
+const plain = h => String(h).replace(/<[^>]+>/g, '');
+function renderSafety() {
+  const sf = S.safety || {}, mo = S.motion || {}, mode = mo.mode || sf.mode || '–';
+  $('safemode').textContent = MODE_IT[mode] || mode; $('safemode').className = 'modechip' + (mode === 'hardware' ? ' hw' : '');
+  const rows = [
+    ['Workspace TCP', sf.workspace_limits ? `<span class="mono">${esc(sf.workspace_limits)}</span>` : miss('non misurato')],
+    ['Keep-out', sf.keep_out === 'not_assessed' || !sf.keep_out ? miss('non valutato') : sf.keep_out === 'none' ? 'nessuno, verificato' : esc(sf.keep_out)],
+    ['Velocità max', `<span class="mono">${esc(sf.max_speed_mm_s ?? mo.max_speed_mm_s ?? '–')} mm/s</span>`],
+    ['Jog max', `<span class="mono">${esc(sf.jog_max_mm ?? mo.jog_max_mm ?? '–')} mm</span>`],
+    ['Clearance', sf.clearance_mm != null ? `<span class="mono">${esc(sf.clearance_mm)} mm</span>` : miss('non misurata')],
+    ['Corpo camera', !sf.camera || sf.camera === 'not_configured' ? miss('non misurato') : esc(sf.camera)],
+    ['Limiti giunti', sf.joint_limits ? `<span class="mono">${esc(Array.isArray(sf.joint_limits) ? sf.joint_limits.map(j => j.join('..')).join(' · ') : sf.joint_limits)}</span>` : miss('non impostati')],
+    ['Anticollisione', 'no'],
+  ];
+  const html = rows.map(([k, v]) => `<div class="fact" title="${esc(k + ': ' + plain(v))}"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+  if ($('safetylist').innerHTML !== html) $('safetylist').innerHTML = html;
+  const un = sf.unchecked || [], u = un.map(x => `<li>${esc(tr(x))}</li>`).join('');
+  if ($('unchecked').innerHTML !== u) $('unchecked').innerHTML = u;
+  $('uncheckedcount').textContent = un.length ? `${un.length} aspetti non controllati` : '';
+  const r = S.robot || {}, joints = (r.joints || []).map(v => Number(v).toFixed(1)).join(', ');
+  const pose = r.pose6 ? r.pose6.map(v => Number(v).toFixed(1)).join(', ') : (r.xyz_mm || []).map(v => Number(v).toFixed(1)).join(', ');
+  const arm = `<div class="ell"><span class="k">TCP</span><span class="mono">${esc(pose || '–')}</span> &nbsp; <span class="k">Giunti</span><span class="mono">${esc(joints || '–')}</span></div>` +
+    `<div class="muted">posa ${esc(SRC_IT[r.source] || r.source || '–')} · può muovere ${r.process_can_move ? '<b>sì</b>' : 'no'} · in movimento ${r.moving ? '<b>sì</b>' : 'no'} · errore ${esc(r.error_code ?? '–')}/${esc(r.warn_code ?? '–')}</div>`;
+  if ($('armlist').innerHTML !== arm) $('armlist').innerHTML = arm;
+}
+
+const ARM_STATE = {idle: 'fermo', moving: 'in movimento', stopped: 'fermato', error: 'errore', disconnected: 'scollegato'};
+let lastSlow = 0;
 async function refresh() {
-  try { S = await (await fetch('/api/state')).json(); } catch { return; }
-  frameSize = S.frame_size;
-  if (!refresh.langSet && S.lang === 'it') { $('pttlang').value = 'it-IT'; } refresh.langSet = true;
-  const m = $('mode'); m.textContent = S.mock ? 'Grok mock' : S.grok.offline ? 'Grok offline' : 'Grok online ' + S.grok.model;
+  try { S = await (await fetch('/api/state')).json(); } catch { $('cambadge').textContent = 'server non raggiungibile'; $('cambadge').className = 'badge bad'; return; }
+  frameSize = S.frame_size && S.frame_size.every(v => v > 0) ? S.frame_size : live.naturalWidth > 0 ? [live.naturalWidth, live.naturalHeight] : frameSize; $('frame').style.setProperty('--ar', frameSize[0] + ' / ' + frameSize[1]); $('frame').style.setProperty('--arn', String(frameSize[0] / frameSize[1]));
+  const m = $('mode'); m.textContent = S.mock ? 'simulato' : S.grok.offline ? 'offline' : 'live · ' + S.grok.model;
   m.className = 'badge ' + (S.mock || S.grok.offline ? 'mock' : 'live'); m.title = S.grok.last_error || '';
   const readOnly = S.robot && S.robot.source === 'telemetry' && !S.robot.process_can_move;
-  $('armst').textContent = `arm ${S.arm.name}: ${S.arm.state}` + (S.arm.motion_mode ? ' · ' + S.arm.motion_mode : '') + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (readOnly ? ' · telemetry read-only' : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · will not move' : '');
-  $('armst').title = S.arm_blocked || ''; $('armst').style.color = S.arm_blocked ? 'var(--warn)' : '';
-  const src = S.source || {};
-  let srcLabel = 'source: ' + src.kind + (src.provenance ? ' · ' + src.provenance : '');
-  if (src.kind === 'demo' || src.kind === 'armsim') srcLabel += ' · synthetic image';
-  if (src.kind === 'pi') srcLabel += src.online ? ' · camera online' : ' · camera offline (no held frame)';
-  $('srcinfo').textContent = srcLabel + (S.override ? ' (uploaded photo)' : '') + (S.background ? ' · empty table set' : ' · no empty table (estimated)');
+  $('armst').textContent = `${S.arm.name} · ${ARM_STATE[S.arm.state] || S.arm.state}` + (S.arm.step ? ' · ' + S.arm.step : '') + (S.arm.error ? ' · ' + S.arm.error : '') + (readOnly ? ' · sola lettura' : '') + (S.arm_blocked && S.arm.state !== 'moving' ? ' · non si muoverà' : '');
+  $('armst').title = S.arm_blocked || ''; $('armst').className = 'badge ' + (S.arm.error ? 'bad' : S.arm_blocked ? 'mock' : S.arm.state === 'moving' ? 'live' : '');
+  const reportedSource = S.source || {};
+  const streamLoaded = reportedSource.kind === 'pi' && live.dataset.mode === 'stream' && live.dataset.loaded === '1';
+  const src = streamLoaded ? {...reportedSource, online: true, size: [live.naturalWidth, live.naturalHeight]} : reportedSource, synth = src.kind === 'demo' || src.kind === 'armsim';
+  $('srcinfo').textContent = [src.kind !== 'pi' ? 'sorgente ' + src.kind : '', synth ? 'immagine sintetica' : '', S.override ? 'foto caricata' : '', S.background ? 'tavolo vuoto acquisito' : '',
+    S.camera_on_arm ? (S.at_survey ? 'camera sul braccio in posa di rilievo' : 'camera sul braccio: vista in movimento') : ''].filter(Boolean).join(' · ');
+  if (S.camera_error) { $('srcinfo').textContent = 'CAMERA: ' + S.camera_error; $('srcinfo').style.color = 'var(--bad)'; } else $('srcinfo').style.color = '';
+  $('boxesopt').style.display = usePiStream() ? 'none' : '';
   if (usePiStream() && live.dataset.mode !== 'stream') nextFrame();
+  if (src.kind === 'pi') camOffline(src.online === false, `${src.host}:${src.port} non risponde. ${src.error || ''}`);
+  $('figmeta').textContent = src.kind === 'pi' ? `${src.host} · ${(src.size || frameSize).join(' × ')} · ${src.online === false ? 'offline' : 'dal vivo'} ${hhmmss(Date.now())}` : `${src.kind} · ${frameSize.join(' × ')}`;
   const cam = $('cambadge');
-  cam.textContent = src.kind === 'pi' ? (src.online ? 'Pi camera online' : 'Pi camera offline') : (src.kind === 'demo' || src.kind === 'armsim' ? 'synthetic camera' : 'camera ' + src.kind);
-  cam.className = 'badge ' + (src.kind === 'pi' && src.online ? 'live' : (src.kind === 'demo' || src.kind === 'armsim' ? 'mock' : ''));
-  const vis = S.vision || {};
-  const vb = $('visionbadge');
-  vb.textContent = vis.valid ? 'calibration valid' : 'calibration not valid';
-  vb.className = 'badge ' + (vis.valid ? 'live' : 'mock');
-  vb.title = (vis.reasons || []).join('; ');
+  cam.textContent = src.kind === 'pi' ? (src.online ? 'Pi online' : 'Pi offline') : synth ? 'sintetica' : src.kind;
+  cam.className = 'badge ' + (src.kind === 'pi' ? (src.online ? 'live' : 'bad') : synth ? 'mock' : '');
+  const vis = S.vision || {}, vb = $('visionbadge');
+  vb.textContent = vis.valid ? 'valida' : 'non valida'; vb.className = 'badge ' + (vis.valid ? 'live' : 'mock'); vb.title = (vis.reasons || []).map(tr).join('; ');
   const agent = S.agent || {};
   const proposed = !!(agent.motion_proposed || agent.planned_target || (agent.proposal && agent.proposal.proposal && agent.proposal.proposal.target_mm));
-  const mb = $('motionbadge');
-  mb.textContent = proposed ? 'motion proposed' : 'motion not proposed';
-  mb.className = 'badge ' + (proposed ? 'mock' : '');
-  const moved = $('movedbadge');
-  moved.textContent = agent.hardware_moved ? 'movement executed' : 'movement not executed';
-  moved.className = 'badge ' + (agent.hardware_moved ? 'live' : '');
+  const mb = $('motionbadge'); mb.textContent = proposed ? 'movimento proposto' : 'nessuna'; mb.className = 'badge ' + (proposed ? 'mock' : '');
+  const moved = $('movedbadge'); moved.textContent = agent.hardware_moved ? 'movimento eseguito' : 'nessuna'; moved.className = 'badge ' + (agent.hardware_moved ? 'live' : '');
+  renderSafety();
+  const vOk = !!S.voice_available;
+  if (!TrovaVoice.running()) {
+    $('voicebtn').classList.toggle('unavail', !vOk); $('voicebtn').setAttribute('aria-disabled', String(!vOk));
+    $('voicelabel').textContent = vOk ? 'Parla con Grok' : 'Grok Voice non disponibile';
+    $('voicesub').textContent = vOk ? 'Grok Voice · italiano o inglese' : 'Manca XAI_API_KEY sul server: usa il push to talk qui sotto';
+  }
+  $('pttbtn').classList.toggle('primary', !vOk);
   if (S.robot) {
     const joints = (S.robot.joints || []).map(v => Number(v).toFixed(1)).join(', ');
-    const pose = S.robot.pose6 ? S.robot.pose6.map(v => Number(v).toFixed(1)).join(', ') : 'no roll/pitch/yaw';
-    let line = `robot pose: ${S.robot.source || 'unavailable'} · tcp ${pose} · joints ${joints || '–'} · moving ${S.robot.moving} · error ${S.robot.error_code ?? '–'} · warn ${S.robot.warn_code ?? '–'} · state ${S.robot.state_code ?? '–'}` + (vis.reasons && vis.reasons.length ? ' · ' + vis.reasons[0] : '') + ' · sync not claimed';
+    const pose = S.robot.pose6 ? S.robot.pose6.map(v => Number(v).toFixed(1)).join(', ') : 'nessun roll/pitch/yaw';
+    let line = `posa robot: ${SRC_IT[S.robot.source] || S.robot.source || 'non disponibile'} · tcp ${pose} · giunti ${joints || '–'} · in movimento ${S.robot.moving ? 'sì' : 'no'} · errore ${S.robot.error_code ?? '–'} · warn ${S.robot.warn_code ?? '–'} · stato ${S.robot.state_code ?? '–'}` + (vis.reasons && vis.reasons.length ? ' · ' + tr(vis.reasons[0]) : '') + ' · sincronizzazione non dichiarata';
     if (window._boardNote) line += ' · ' + window._boardNote;
     $('visioninfo').textContent = line;
-    if ($('robotread')) $('robotread').textContent = line + (S.robot.motors_enabled_by_trova ? ' · motors enabled by Trova' : ' · motors not enabled by Trova') + (S.robot.read_finished_at ? ' · pose read ' + S.robot.read_finished_at : '');
+    $('robotread').textContent = line + (S.robot.motors_enabled_by_trova ? ' · motori abilitati da Trova' : ' · motori non abilitati da Trova') + (S.robot.read_finished_at ? ' · posa letta ' + S.robot.read_finished_at : '');
   }
   showCalib();
-  loadSamples();
-  if (S.safety && $('safetyinfo')) {
+  if (S.safety) {
     const current = $('safetyinfo').textContent || '';
-    if (!current || current.startsWith('missing')) {
-      const missing = (S.safety.missing || []).join(', ') || 'none';
-      $('safetyinfo').textContent = `missing ${missing} · workspace ${S.safety.workspace} · keep-out ${S.safety.keep_out} · camera ${S.safety.camera} · collision avoidance: no`;
-    }
+    if (!current || current.startsWith('mancano')) $('safetyinfo').textContent = `mancano ${(S.safety.missing || []).join(', ') || 'nessuno'}`;
+    $('safetyextra').textContent = `Il workspace vale per il TCP e la sfera camera configurata, non per tutti i link. Lo STOP software non è un arresto di sicurezza; l'arresto fisico è indipendente da questo software.`;
   }
-  if (S.reference_check && $('locinfo') && !['refx', 'refy', 'refz', 'reftrack'].includes(document.activeElement && document.activeElement.id)) {
+  if (S.reference_check && !['refx', 'refy', 'refz', 'reftrack'].includes(document.activeElement && document.activeElement.id)) {
     const r = S.reference_check;
     $('locinfo').textContent = r.estimate_from_calibration
-      ? `predicted ${(r.predicted_mm || []).join(', ')} mm · measured ${(r.measured_mm || []).join(', ')} mm · error ${r.error_mm} mm · version ${r.calibration_version} · image ${r.image_time || '–'} · pose ${r.pose_source} · uncertainty ${r.uncertainty_mm} · motion not authorized`
-      : (r.reason || 'localization blocked');
+      ? `previsto ${(r.predicted_mm || []).join(', ')} mm · misurato ${(r.measured_mm || []).join(', ')} mm · errore ${r.error_mm} mm · versione ${r.calibration_version} · immagine ${r.image_time || '–'} · posa ${r.pose_source} · incertezza ${r.uncertainty_mm} · movimento non autorizzato`
+      : (r.reason || 'localizzazione bloccata');
   }
-  if (S.safety && $('safetyextra')) $('safetyextra').textContent =
-    `Workspace: ${S.safety.workspace_limits || 'not configured'} (robot-base mm; TCP, not all links). ` + (S.safety.unchecked || []).join(' ');
-  if (S.latency && $('timeread')) {
-    const parts = Object.keys(S.latency).filter(k => S.latency[k] && S.latency[k].mean_s != null).map(k => `${k} mean ${S.latency[k].mean_s}s n=${S.latency[k].n}`);
-    $('timeread').textContent = (parts.join(' · ') || 'no stage times yet') + ' · realtime not claimed';
+  if (S.latency) {
+    const parts = Object.keys(S.latency).filter(k => S.latency[k] && S.latency[k].mean_s != null).map(k => `${k} media ${S.latency[k].mean_s} s n=${S.latency[k].n}`);
+    $('timeread').textContent = (parts.join(' · ') || 'nessun tempo misurato') + ' · tempo reale non dichiarato';
   }
-  if (S.motion) $('motioninfo').textContent = `motion ${S.motion.mode} · workspace ${S.motion.workspace || 'unknown'} · clearance ${S.motion.clearance} · keep-out ${S.motion.keep_out || 'not_assessed'} · collision avoidance: no · software stop is not the physical e-stop`;
+  if (S.motion) $('motioninfo').textContent = `movimento ${S.motion.mode} · workspace ${S.motion.workspace || 'sconosciuto'} · clearance ${S.motion.clearance} · keep-out ${S.motion.keep_out || 'not_assessed'} · anticollisione: no · lo STOP software non è l'arresto fisico`;
   if (S.agent && document.activeElement !== $('agentq')) showAgent(S.agent);
   if (S.scan) showScan(S.scan);
-  if (S.camera_on_arm) $('srcinfo').textContent += S.at_survey ? ' · arm camera at the survey pose' : ' · arm camera: moving view';
-  if (S.camera_error) { $('srcinfo').textContent = 'CAMERA: ' + S.camera_error; $('srcinfo').style.color = 'var(--bad)'; } else $('srcinfo').style.color = '';
-  $('bginfo').textContent = S.background ? 'set' : 'not set';
-  $('calinfo').textContent = (S.calibration ? `${S.calibration.source}, err ${S.calibration.error_mm ?? '–'} mm` : '') + (S.click_points.length ? `, ${S.click_points.length} clicks` : '') + (S.arm_points ? `, ${S.arm_points} arm points` : '') + (S.arm_blocked ? ' · arm: ' + S.arm_blocked : '');
-  $('demorow').style.display = S.source.kind === 'demo' ? 'flex' : 'none';
+  $('bginfo').textContent = S.background ? 'acquisito' : 'non acquisito';
+  $('calinfo').textContent = (S.calibration ? `${S.calibration.source}, errore ${S.calibration.error_mm ?? '–'} mm` : '') + (S.click_points.length ? `, ${S.click_points.length} clic` : '') + (S.arm_points ? `, ${S.arm_points} punti braccio` : '') + (S.arm_blocked ? ' · braccio: ' + S.arm_blocked : '');
+  $('demorow').style.display = src.kind === 'demo' ? 'flex' : 'none';
   if (document.activeElement !== $('thresh')) $('thresh').value = S.tuning.thresh;
   if (document.activeElement !== $('minarea')) $('minarea').value = S.tuning.min_area_frac;
-  if (S.reference) $('refinfo').textContent = `reference ${S.reference.time}: ${S.reference.n_objects} objects`;
+  if (S.reference) $('refinfo').textContent = `riferimento ${S.reference.time}: ${S.reference.n_objects} oggetti`;
   const M = S.metrics; $('m-found').textContent = `${M.find_ok}/${M.find_judged}`; $('m-time').textContent = M.avg_find_s ?? '–'; $('m-fa').textContent = M.false_alarms;
-  $('m-more').textContent = `checks ${M.check_ok}/${M.checks} right · missed ${M.missed} · Grok calls ${S.grok.calls}, avg ${S.grok.avg_latency_s ?? '–'}s` + (S.grok.dropped_fields.length ? ' · API rejected: ' + S.grok.dropped_fields.join(', ') : '');
-  $('absentbtn').style.display = S.label_wait ? 'inline-block' : 'none';
-  if (S.label_wait) { const el = $('clickmode'); el.className = 'mode on'; el.textContent = 'Wrong find: click the object that should have been found (even if it has no box), or press "not on the table".'; }
-  else if (!clickMode) $('clickmode').className = 'mode';
+  $('m-more').textContent = `controlli giusti ${M.check_ok}/${M.checks} · mancati ${M.missed} · chiamate Grok ${S.grok.calls}, media ${S.grok.avg_latency_s ?? '–'} s` + (S.grok.dropped_fields.length ? ' · campi rifiutati dalla API: ' + S.grok.dropped_fields.join(', ') : '');
+  $('absentbtn').style.display = S.label_wait ? 'inline-flex' : 'none';
+  $('labelwait').className = 'mode' + (S.label_wait ? ' on' : '');
   showDog(); showWatch(); showRoom();
-  $('poseinfo').textContent = S.camera_on_arm ? (S.at_survey ? 'at the survey pose ✓' : 'away from the survey pose') +
-    ` · survey ${S.poses.home_joints ? '✓' : '–'} · look ${S.poses.look_joints ? '✓' : '–'}` : 'off (TROVA_CAMERA_ON_ARM=1 to use)';
-  $('batchinfo').textContent = S.batch && S.batch.lot ? 'current: LOT ' + S.batch.lot : 'no batch set';
-  try { const fl = await (await fetch('/api/failures')).json();
-    $('m-fail').textContent = fl.total ? 'Failures: ' + fl.by_cause.map(c => `${c.cause.replace(/_/g, ' ')} ${c.count} (${c.owner})`).join(' · ') : ''; } catch (e) {}
-  try { const z = await (await fetch('/api/zones')).json(); $('zoneinfo').textContent = z.zones.length ? z.zones.map(x => x.name).join(', ') : (z.draft.length ? z.draft.length + ' corners' : 'no zones'); } catch (e) {}
-  const log = await (await fetch('/api/log?n=30')).json();
-  $('log').innerHTML = log.map(e => `<div>${esc(e.time.slice(11))} <b>${esc(e.kind)}</b> ${esc(e.kind === 'find' ? (e.request || '[photo]') + ' → ' + e.result.status + ' ' + (e.result.label || '') : e.kind === 'grok_call' ? e.name + ' ' + e.latency_s + 's' : e.kind === 'change_check' ? e.result.changes.length + ' changes' : e.error || '')}</div>`).join('');
+  $('poseinfo').textContent = S.camera_on_arm ? (S.at_survey ? 'in posa di rilievo' : 'fuori dalla posa di rilievo') +
+    ` · rilievo ${S.poses.home_joints ? 'insegnata' : 'mancante'} · sguardo ${S.poses.look_joints ? 'insegnata' : 'mancante'}` : 'camera sul braccio spenta (TROVA_CAMERA_ON_ARM=1)';
+  $('batchinfo').textContent = S.batch && S.batch.lot ? 'lotto corrente ' + S.batch.lot : 'nessun lotto';
+  drawCallouts(false);
+  renderRequests();
+  if (Date.now() - lastSlow > 4000) {   // panels that are open only: no extra polling for closed tools
+    lastSlow = Date.now();
+    if (openToolName === 'jury') try { const fl = await (await fetch('/api/failures')).json();
+      $('m-fail').textContent = fl.total ? 'Errori: ' + fl.by_cause.map(c => `${c.cause.replace(/_/g, ' ')} ${c.count} (${c.owner})`).join(' · ') : ''; } catch (e) {}
+    if (openToolName === 'line') try { const z = await (await fetch('/api/zones')).json(); $('zoneinfo').textContent = z.zones.length ? z.zones.map(x => x.name).join(', ') : (z.draft.length ? z.draft.length + ' angoli' : 'nessuna zona'); } catch (e) {}
+    if (openToolName === 'calib') loadSamples();
+    if (openToolName === 'log') try { const log = await (await fetch('/api/log?n=40')).json();
+      $('log').innerHTML = log.map(e => `<div>${esc(e.time.slice(11))} <b>${esc(e.kind)}</b> ${esc(e.kind === 'find' ? (e.request || '[foto]') + ' → ' + e.result.status + ' ' + (e.result.label || '') : e.kind === 'grok_call' ? e.name + ' ' + e.latency_s + 's' : e.kind === 'change_check' ? e.result.changes.length + ' cambiamenti' : e.error || '')}</div>`).join(''); } catch (e) {}
+  }
 }
 refresh(); setInterval(refresh, 1500);
+loadOutputs(); setInterval(loadOutputs, 6000);
+const savedTool = store.get('trova.tool'); if (savedTool && $('tool-' + savedTool)) setTimeout(() => openTool(savedTool), 300);
 </script>
 </body>
 </html>

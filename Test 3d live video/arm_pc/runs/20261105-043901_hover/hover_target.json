@@ -1,0 +1,60 @@
+{
+ "q0": [
+  -93.544184,
+  -0.2407,
+  -43.002889,
+  -43.494429,
+  48.565851
+ ],
+ "pixel": [
+  801.9577897008454,
+  538.3601602354696
+ ],
+ "height_mm": 55.0,
+ "find": "disk",
+ "diameter_mm": 44.0,
+ "target_mm": [
+  -3.791009227330246,
+  -478.3740327101078,
+  13.974798842912662
+ ],
+ "boxes": [
+  [
+   -162.2,
+   -506.6,
+   -98.2,
+   -442.6,
+   13.4
+  ],
+  [
+   99.0,
+   -508.1,
+   163.0,
+   -444.1,
+   12.0
+  ]
+ ],
+ "above_mm": 120.0,
+ "calib": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\v2\\camera_robot.json",
+ "table_z_mm": -40.97,
+ "predicted": {
+  "lens_above_top_mm": 120.1,
+  "lens_off_axis_mm": 0.0,
+  "head_cad_bottom_above_top_mm": 107.1,
+  "head_sphere_bottom_above_top_mm": 97.0,
+  "min_gap_on_the_way_mm": {
+   "cube 0": [
+    79.9,
+    "link3"
+   ],
+   "cube 1": [
+    94.4,
+    "link4"
+   ],
+   "object": [
+    48.3,
+    "link3"
+   ]
+  }
+ }
+}

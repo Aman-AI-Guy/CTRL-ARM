@@ -1,0 +1,231 @@
+{
+ "q0": [
+  -93.5442,
+  -0.2407,
+  -43.0029,
+  -43.4944,
+  48.5659
+ ],
+ "args": {
+  "q0": [
+   -93.5442,
+   -0.2407,
+   -43.0029,
+   -43.4944,
+   48.5659
+  ],
+  "go": false,
+  "dist": 432,
+  "orbit_dist": [
+   170.0
+  ],
+  "tilts": [
+   25.0,
+   45.0
+  ],
+  "step": 90.0,
+  "span": 180.0,
+  "start_az": null,
+  "direction": null,
+  "shift": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "cam_offset": [
+   -34.86581083085153,
+   22.617350508867943,
+   33.85540112250672
+  ],
+  "axis_flange": [
+   -0.7059341024357954,
+   0.7075060579911647,
+   -0.03304876584640115
+  ],
+  "axis_from": "cad",
+  "head_snap": 45,
+  "head_turn": null,
+  "no_cad": false,
+  "obj_height": 53.0,
+  "obj_radius": 32.0,
+  "table_margin": null,
+  "obj_margin": null,
+  "self_margin": 10.0,
+  "speed": 10.0,
+  "acc": 60,
+  "dwell": [
+   1.5
+  ],
+  "j5_max": 400,
+  "max_views": 0,
+  "pause": false,
+  "ret": true,
+  "force": false,
+  "out": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\ring-2_dry.json",
+  "log": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\20261105-035239_log.json",
+  "calib": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\calib\\camera_robot.json",
+  "target": [
+   -139.4,
+   -415.1,
+   22.5
+  ],
+  "branch_from_view": null,
+  "table_z": null,
+  "box": [
+   [
+    -171.4,
+    -447.1,
+    -107.4,
+    -383.1,
+    22.5
+   ],
+   [
+    87.2,
+    -481.3,
+    151.2,
+    -417.3,
+    18.9
+   ]
+  ],
+  "snapshots": null,
+  "snapshot_url": "http://192.168.5.160:8080/snapshot.jpg"
+ },
+ "target_mm": [
+  -139.4,
+  -415.1,
+  22.5
+ ],
+ "table_z_mm": -34.1,
+ "camera_axis_flange": [
+  -0.7059341024357955,
+  0.7075060579911648,
+  -0.03304876584640116
+ ],
+ "camera_offset_flange": [
+  -34.86581083085153,
+  22.617350508867943,
+  33.85540112250672
+ ],
+ "collision_model": "cad",
+ "poses": [
+  {
+   "i": 0,
+   "ring": 0,
+   "az": 176.5,
+   "el": 65.0,
+   "q": [
+    -120.11,
+    31.1,
+    -40.48,
+    -70.88,
+    67.28
+   ],
+   "camera_mm": [
+    -211.0,
+    -410.6,
+    176.7
+   ],
+   "jump_deg": 31.3
+  },
+  {
+   "i": 1,
+   "ring": 0,
+   "az": 266.5,
+   "el": 65.0,
+   "q": [
+    -106.99,
+    28.85,
+    -48.71,
+    -47.65,
+    39.43
+   ],
+   "camera_mm": [
+    -143.8,
+    -486.8,
+    176.6
+   ],
+   "jump_deg": 27.9
+  },
+  {
+   "i": 2,
+   "ring": 0,
+   "az": 356.5,
+   "el": 65.0,
+   "q": [
+    -97.92,
+    34.59,
+    -36.92,
+    -91.8,
+    20.13
+   ],
+   "camera_mm": [
+    -67.7,
+    -419.5,
+    176.6
+   ],
+   "jump_deg": 44.1
+  },
+  {
+   "i": 3,
+   "ring": 1,
+   "az": 356.5,
+   "el": 45.0,
+   "q": [
+    -89.55,
+    40.49,
+    -38.44,
+    -91.22,
+    0.04
+   ],
+   "camera_mm": [
+    -19.3,
+    -422.2,
+    142.8
+   ],
+   "jump_deg": 20.1
+  },
+  {
+   "i": 4,
+   "ring": 1,
+   "az": 266.5,
+   "el": 45.0,
+   "q": [
+    -105.61,
+    34.51,
+    -62.62,
+    -19.45,
+    36.56
+   ],
+   "camera_mm": [
+    -146.8,
+    -535.1,
+    142.7
+   ],
+   "jump_deg": 71.8
+  },
+  {
+   "i": 5,
+   "ring": 1,
+   "az": 176.5,
+   "el": 45.0,
+   "q": [
+    -126.18,
+    32.97,
+    -44.33,
+    -52.81,
+    81.65
+   ],
+   "camera_mm": [
+    -259.4,
+    -407.6,
+    142.8
+   ],
+   "jump_deg": 45.1
+  }
+ ],
+ "reachable": 6,
+ "j5_span_deg": 81.61,
+ "start_az": 176.4558,
+ "direction": 1,
+ "time": "2026-11-05 03:52:47"
+}

@@ -33,7 +33,7 @@ def main() -> int:
     port, data = free_port(), tempfile.mkdtemp(prefix="trova_smoke_")
     env = {**os.environ, "XAI_API_KEY": "", "TROVA_MOCK": "1", "TROVA_DATA": data, "TROVA_PORT": str(port),
            "TROVA_HOST": "127.0.0.1", "TROVA_CAMERA": "demo", "TROVA_ARM": "sim", "TROVA_DOG": "sim",
-           "TROVA_ALLOW_LIFT": "1", "TROVA_TOKEN": "", "TROVA_ARM_READ": "off", "TROVA_HARDWARE_UNLOCK": ""}
+           "TROVA_ALLOW_LIFT": "1", "TROVA_TOKEN": "", "TROVA_ARM_READ": "off", "TROVA_MOTION_MODE": "simulation", "TROVA_HARDWARE_UNLOCK": ""}
     server = subprocess.Popen([sys.executable, "-m", "trova"], cwd=ROOT, env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     base = f"http://127.0.0.1:{port}"
@@ -56,7 +56,7 @@ def main() -> int:
                 page.on("pageerror", lambda e: problems.append(f"{name}: JS error: {e}"))
                 page.on("response", lambda r: problems.append(f"{name}: HTTP {r.status} {r.request.method} {r.url}")
                         if r.status >= 500 or (r.status >= 400 and not r.url.split("?")[0].endswith(EXPECTED_4XX)) else None)
-                page.on("dialog", lambda d: d.accept({"Zone name": "line area"}.get(d.message.split(" (")[0], "")
+                page.on("dialog", lambda d: d.accept({"Nome della zona": "area linea"}.get(d.message.split(" (")[0], "")
                                                      if d.type == "prompt" else None))
             pg = ctx.new_page()
             watch(pg, "main")
@@ -80,30 +80,37 @@ def main() -> int:
             def wait_text(sel, gone, timeout=20000):
                 pg.wait_for_function(f"!document.querySelector('{sel}').innerText.includes({gone!r})", timeout=timeout)
 
+            def tool(label):
+                """Secondary tools live in the Strumenti dropdown; open one the way an operator does."""
+                pg.get_by_role("button", name="Strumenti", exact=True).click()
+                pg.get_by_role("menuitem", name=label, exact=False).first.click()
+                pg.wait_for_timeout(250)
+
             def find(q):
+                if pg.locator("#tool-objects").is_hidden():
+                    tool("Oggetti sul tavolo")
                 pg.fill("#q", q)
-                press("Find")
-                pg.wait_for_function("document.getElementById('findbtn').textContent === 'Find'", timeout=20000)
+                press("Trova")
+                pg.wait_for_function("document.getElementById('findbtn').textContent === 'Trova'", timeout=20000)
                 return text("#findres")
 
             step("load", lambda: (pg.goto(base + "/"),
                                   pg.wait_for_function("document.getElementById('live').naturalWidth > 0", timeout=15000),
                                   text("#mode"))[2])
-            step("preflight", lambda: (press("preflight"), wait_text("#preres", "Checking"), text("#preres")[:80])[2])
-            pg.click("summary:has-text('Setup')")
-            step("capture empty table", lambda: (press("Capture empty table"), pg.wait_for_timeout(500), text("#bginfo"))[2])
+            step("preflight", lambda: (tool("Controllo preliminare"), wait_text("#preres", "Controllo camera"), text("#preres")[:80])[2])
+            step("capture empty table", lambda: (tool("Camera e tavolo"), press("Cattura tavolo vuoto"), pg.wait_for_timeout(500), text("#bginfo"))[3])
             unique = _unique(pg)
             step("find by words", lambda: find(f"the {unique} one")[:90])
-            step("jury: correct", lambda: (press("✓ correct"), pg.wait_for_timeout(400))[1])
+            step("jury: correct", lambda: (tool("Giuria e metriche"), press("Corretto"), pg.wait_for_timeout(400))[2])
             step("find absent object", lambda: find("a stapler")[:60])
             step("clarify + spoken answer", lambda: (find("the black one"),
                                                      pg.evaluate("runSpoken('number 2')"), pg.wait_for_timeout(1200),
                                                      text("#findres")[:60])[3])
-            step("find all + space STOP", lambda: (pg.fill("#q", "all the black things"), press("Find all"),
-                                                   wait_text("#findres", "Looking for every match"),
+            step("find all + space STOP", lambda: (pg.fill("#q", "all the black things"), press("Trova tutti"),
+                                                   wait_text("#findres", "Cerco tutte"),
                                                    pg.click("body", position={"x": 5, "y": 990}), pg.keyboard.press("Space"),
                                                    pg.wait_for_timeout(600), text("#armst"))[6])
-            step("what's on the table", lambda: (press("What's on the table?"), wait_text("#findres", "Naming every"),
+            step("what's on the table", lambda: (press("Cosa c'è sul tavolo?"), wait_text("#findres", "Do un nome"),
                                                  text("#findres")[:60])[2])
             step("spoken selection + approach refusal", lambda: (
                 pg.evaluate("async () => { const s = await (await fetch('/api/state')).json(); await runSpoken('seleziona oggetto ' + s.inventory.snapshot.objects[0].track_id); }"),
@@ -111,32 +118,33 @@ def main() -> int:
             if not pg.locator('#agentblocker').count() or 'calibrazione' not in text('#agentblocker'):
                 problems.append('uncalibrated spoken approach did not explain its calibration blocker')
             step("confirmation refused without proposal", lambda: (pg.evaluate("runSpoken('Sì, procedi.')"), text('#agentblocker'))[1])
-            if pg.get_by_role('button', name='Confirm validated motion', exact=True).count():
+            if pg.get_by_role('button', name='Conferma il movimento validato', exact=True).count():
                 problems.append('confirmation button exists without a valid trajectory')
-            step("scan next view remains blocked", lambda: (press('Plan next scan view'), pg.wait_for_timeout(300), text('#agentblocker'))[2])
+            step("scan next view remains blocked", lambda: (tool('Scansione e ricostruzione'), press('Pianifica la vista successiva'), pg.wait_for_timeout(300), text('#agentblocker'))[3])
             step("reconstruction capability", lambda: pg.request.get(base + '/api/reconstruction/capabilities').json()['reason'])
-            step("save reference", lambda: (press("Save reference"), pg.wait_for_timeout(1500), text("#refinfo"))[2])
-            step("set batch + old-lot carton", lambda: (pg.fill("#lot", "A123"), press("Set batch"),
-                                                        press("+ old-lot carton"), pg.wait_for_timeout(600),
-                                                        text("#batchinfo"))[4])
-            step("read labels", lambda: (press("Read labels"), wait_text("#checkres", "Reading labels"),
-                                         text("#checkres")[:90])[2])
-            step("draw a zone", lambda: (press("Draw a zone (click corners)"),
-                                         [pg.mouse.click(*xy) for xy in _corners(pg)], press("Finish zone"),
+            step("save reference", lambda: (tool("Line clearance e lotti"), press("Salva riferimento"), pg.wait_for_timeout(1500), text("#refinfo"))[3])
+            step("set batch + old-lot carton", lambda: (pg.fill("#lot", "A123"), press("Imposta lotto"),
+                                                        tool("Camera e tavolo"), press("Cartone lotto vecchio"),
+                                                        pg.wait_for_timeout(600), text("#batchinfo"))[5])
+            step("read labels", lambda: (tool("Line clearance e lotti"), press("Leggi etichette"),
+                                         wait_text("#checkres", "Leggo le etichette"), text("#checkres")[:90])[3])
+            step("draw a zone", lambda: (press("Disegna una zona (clic sugli angoli)"),
+                                         [pg.mouse.click(*xy) for xy in _corners(pg)], press("Chiudi la zona"),
                                          pg.wait_for_timeout(800), text("#zoneinfo"))[4])
-            step("check now", lambda: (press("Check now"), wait_text("#checkres", "Checking"), text("#checkres")[:90])[2])
-            step("sign off (reject)", lambda: (pg.fill("#operator", "Smoke Test"), press("Reject"),
+            step("check now", lambda: (press("Controlla ora"), wait_text("#checkres", "Controllo"), text("#checkres")[:90])[2])
+            step("sign off (reject)", lambda: (pg.fill("#operator", "Smoke Test"), press("Rifiuta"),
                                                pg.wait_for_timeout(500))[2])
             step("record + PDF", lambda: (pg.request.get(base + "/api/report").ok and
                                           pg.request.get(base + "/api/report.pdf").body()[:4] == b"%PDF") or _fail("record"))
             step("watch: alarm + acknowledge", lambda: _watch(pg, press, text))
-            step("tray lift + STOP", lambda: (find(f"the {_unique(pg)} one"), press("Lift its tray", exact=False),
-                                              pg.mouse.click(*_corners(pg)[2]), pg.wait_for_timeout(800), press("STOP"),
+            step("tray lift + STOP", lambda: (find(f"the {_unique(pg)} one"), press("Solleva il vassoio", exact=False),
+                                              pg.mouse.click(*_corners(pg)[2]), pg.wait_for_timeout(800), pg.click("#stop"),
                                               pg.wait_for_timeout(500), text("#armst"))[6])
+            tool("Oggetti sul tavolo")
             step("manual image region", lambda: _manual_region(pg, press))
-            step("arm home", lambda: (press("Arm home"), pg.wait_for_timeout(500), text("#armst"))[2])
-            step("dog search", lambda: (press("Send the dog to look"), pg.wait_for_timeout(6000),
-                                        text("#dogres")[:60])[2])
+            step("arm home", lambda: (tool("Braccio"), press("Vai a home"), pg.wait_for_timeout(500), text("#armst"))[3])
+            step("dog search", lambda: (tool("Cane robot"), press("Manda il cane a cercare"), pg.wait_for_timeout(6000),
+                                        text("#dogres")[:60])[3])
             for path, name in (("/jury", "jury"), ("/history", "history")):
                 page = ctx.new_page()
                 watch(page, name)
@@ -172,7 +180,7 @@ def main() -> int:
 
 
 def _manual_region(pg, press):
-    press('Select image region')
+    press('Seleziona una regione')
     pg.wait_for_selector('#regionDialog[open]')
     pg.fill('#regionLabel', 'operator test region')
     box = pg.locator('#regionCanvas').bounding_box()
@@ -183,7 +191,7 @@ def _manual_region(pg, press):
     pg.mouse.up()
     pg.wait_for_function("!document.getElementById('regionDialog').open")
     assert 'operator test region' in pg.inner_text('#findres')
-    press('Mark support-plane point')
+    press('Segna il punto sul piano')
     pg.wait_for_selector('#regionDialog[open]')
     pg.mouse.click(x + box['width']*.05, y + box['height']*.05)
     pg.wait_for_function("!document.getElementById('regionDialog').open")
@@ -197,16 +205,16 @@ def _corners(pg):
 
 
 def _watch(pg, press, text):
-    press("Save reference")
+    press("Salva riferimento")
     pg.wait_for_timeout(1500)
-    press("👁 Watch the line")
+    press("Sorveglia la linea")
     pg.wait_for_timeout(2000)
     pg.evaluate("sendForm('/api/demo/tamper', {kind: 'add'})")
     pg.wait_for_function("document.getElementById('alarm').style.display === 'block'", timeout=10000)
     alarm = text("#alarmtext")
-    press("Acknowledge")
+    press("Preso atto")
     pg.wait_for_timeout(1200)
-    press("⏹ Stop watching")
+    press("Smetti di sorvegliare")
     return alarm[:90]
 
 

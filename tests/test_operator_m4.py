@@ -374,9 +374,9 @@ def test_api_reference_safety_and_page_do_not_move(tmp_path, monkeypatch, capsys
     cleared = client.post("/api/vision/sample/drop", json={"kind": "intrinsics", "index": 0}).json()
     assert cleared["ok"] is True and cleared["moved"] is False and st.vision.intrinsics is None
     page = client.get("/").text
-    for needle in ("runAgent(true)", "previewBoard()", "captureBoard('handeye')", "Store measured values",
-                   'id="calibnext"', 'id="locinfo"', "physical e-stop", "collision avoidance: no",
-                   "calibration not valid", "movement not executed", "Grok online"):
+    for needle in ("runAgent(true)", "previewBoard()", "captureBoard('handeye')", "Salva i valori misurati",
+                   'id="calibnext"', 'id="locinfo"', "arresto di emergenza fisico", "anticollisione: no",
+                   "calibrazione non valida", "movimento eseguito", 'id="mode"'):
         assert needle in page, needle
     tools = client.get("/api/voice/config").json()["session"]["tools"]
     task_tool = next(item for item in tools if item["name"] == "run_vision_task")

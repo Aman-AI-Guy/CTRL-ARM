@@ -30,25 +30,36 @@ def main():
             page=browser.new_page(viewport={'width':1400,'height':1000})
             page.on('pageerror',lambda error:errors.append(str(error)))
             page.goto(f'http://127.0.0.1:{port}')
+            page.evaluate("openTool('scan')")
             page.locator('#m5panel > summary').click()
-            page.get_by_role('button',name='Calibration / retained evidence',exact=True).click()
+            page.get_by_role('button',name='Evidenze di calibrazione',exact=True).click()
             page.wait_for_function("document.querySelector('#m5evidence').textContent.includes('Historical calibration')")
-            page.get_by_role('button',name='Preview calibrated joint orbit',exact=True).click()
+            page.get_by_role('button',name='Anteprima orbita calibrata',exact=True).click()
             page.wait_for_function("document.querySelector('#orbitpreview').textContent.includes('Select an object')")
-            page.get_by_role('button',name='Import recorded mouse · 60 views',exact=True).click()
-            page.wait_for_function("document.querySelector('#scanres').textContent.includes('60 views')")
-            page.get_by_role('button',name='Replay retained cloud → new mesh',exact=True).click()
+            page.get_by_role('button',name='Importa scansione registrata del mouse, 60 viste',exact=True).click()
+            page.wait_for_function("document.querySelector('#scanres').textContent.includes('60 viste')")
+            page.get_by_role('button',name='Rigenera la mesh dalla nuvola registrata',exact=True).click()
             page.wait_for_function("document.querySelector('#reconstructionres').textContent.includes('recorded_postprocessing_replay')",timeout=90000)
             page.wait_for_function("document.querySelectorAll('#reconstructionres img').length===4")
             assert page.locator('#reconstructionres').get_by_role('link',name='object.glb',exact=True).count()==1
-            assert 'full COLMAP rerun: no' in page.locator('#reconstructionres').inner_text()
+            assert 'rerun COLMAP completo: no' in page.locator('#reconstructionres').inner_text()
             job=page.evaluate('reconstructionJob')
             report=page.request.get(f'http://127.0.0.1:{port}/api/reconstruction/{job}').json()
             assert report['reconstructed'] and not report['textured_mesh']
             assert report['quality']['registered_images']==60
             response=page.request.get(f'http://127.0.0.1:{port}/api/reconstruction/{job}/artifacts/object.glb')
             assert response.ok and response.body()[:4]==b'glTF'
-            page.get_by_role('button',name='Saved reconstruction jobs',exact=True).click()
+            # The main console reviews real replay renders and records operator answers.
+            page.evaluate("closeTool()")
+            page.locator('#reviewbtn').click()
+            page.wait_for_function("document.getElementById('reqlist').innerText.includes('Capovolgi')", timeout=15000)
+            page.locator('#reqlist').get_by_role('button', name='Fatto', exact=True).first.click()
+            page.wait_for_function("!document.getElementById('reqlist').innerText.includes('Fatto')", timeout=15000)
+            review=page.request.get(f'http://127.0.0.1:{port}/api/scan/review').json()
+            assert review['job_id']==job and review['requests'][0]['status']=='done'
+            assert review['moves_arm'] is False
+            page.evaluate("openTool('scan')")
+            page.get_by_role('button',name='Ricostruzioni salvate',exact=True).click()
             page.wait_for_function("document.querySelector('#reconstructionjobs button')!==null")
             page.set_viewport_size({'width':390,'height':844})
             assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth+1')

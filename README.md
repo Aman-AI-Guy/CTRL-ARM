@@ -1,5 +1,7 @@
 # Trova
 
+For the current Pi camera and xArm 5 workstation, follow [START_HERE.md](START_HERE.md). Start the camera/voice preview with `.venv/bin/python -m trova.station --camera-fallback 192.168.5.160`; the preview uses simulated motion. The guide covers operator calibration and physical testing.
+
 **Tell it (type, talk, in English or Italian) or show it with a phone photo what you need. Trova finds it on the table and the robot arm points at it. Then it checks the table against a reference and reports what was added, removed or moved: line clearance you can talk to.**
 
 Concept video (101 s, made from this code): [`media/trova_concept.mp4`](media/trova_concept.mp4). Regenerate with `python media/make_concept_video.py`.
@@ -124,3 +126,17 @@ AGENTS.md        shared state file: features, rules, API, changelog. Update it i
 To be transparent with the jury: the software skeleton (everything in this repository at the first commit) was written the night before kick-off and runs on a synthetic table and a simulated arm. At the event we connect the real arm and camera, calibrate on the station, tune with real Grok calls on SEA Vision's objects, record the evaluation and add voice. The git history shows which is which.
 
 Licences: OpenCV (Apache-2.0), FastAPI (MIT). We avoided YOLO-World (GPL-3.0) on purpose so a company can reuse this.
+
+### Main operator console
+
+The console v2 from `trova-ui-console-v2` is integrated into `trova/static/` and served at `/` by both `python -m trova` and `python -m trova.station`. No separate frontend server or build is required. The package folder is an import reference; edit the integrated files in `trova/`. Self-hosted fonts are included in installed packages.
+
+For this workstation, use the existing environment with reconstruction dependencies:
+
+```bash
+/home/simostocco/hackathon/.venv/bin/python -m trova.station --profile qualify --camera-fallback 192.168.5.160 --robot-ip 192.168.1.111 --port 8011
+```
+
+This profile reads the real camera and arm telemetry with a simulated motion driver and `dry_run`. Use a currently reachable camera address. For a local demo, `.venv/bin/python -m trova` uses the configured camera and arm settings.
+
+The Strumenti menu connects object search/selection, calibration, scanning/reconstruction, line clearance, reports, arm controls and diagnostics to the existing backend. Finished reconstruction renders feed the Grok requests panel and voice tools; marking a flip or rotation done requires reselection in a new orientation group. `TROVA_AUTO_REVIEW=0` disables automatic review; manual review remains available. Coverage and cross-orientation mesh registration are not claimed.

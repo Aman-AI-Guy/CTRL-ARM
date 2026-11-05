@@ -5,6 +5,11 @@ __pycache__/
 /Test_3d_live_video/
 *:Zone.Identifier
 *.part
+# Keep operator instructions visible even when a local global rule ignores Markdown.
+!/START_HERE.md
+!/INTEGRATION_TEST_HANDOFF.md
+!/DEMO_PLAN.md
+!/CHAT_SUMMARY.md
 .env
 .pytest_cache/
 data/*

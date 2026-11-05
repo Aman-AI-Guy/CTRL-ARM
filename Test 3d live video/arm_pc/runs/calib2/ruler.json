@@ -1,0 +1,57 @@
+[
+ {
+  "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-2",
+  "view": 0,
+  "gap_mm": 151.0,
+  "label": "A/check-2",
+  "to": "marker",
+  "marker": 2
+ },
+ {
+  "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-4",
+  "view": 0,
+  "gap_mm": 151.0,
+  "label": "A/check-4",
+  "to": "marker",
+  "marker": 4
+ },
+ {
+  "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\A\\check-table",
+  "view": 0,
+  "gap_mm": 200.0,
+  "label": "A/check-table",
+  "to": "table"
+ },
+ {
+  "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-2",
+  "view": 0,
+  "gap_mm": 153.0,
+  "label": "B/check-2",
+  "to": "marker",
+  "marker": 2
+ },
+ {
+  "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\B\\check-4",
+  "view": 0,
+  "gap_mm": 153.0,
+  "label": "B/check-4",
+  "to": "marker",
+  "marker": 4
+ },
+ {
+  "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-2",
+  "view": 0,
+  "gap_mm": 181.0,
+  "label": "C/check-2",
+  "to": "marker",
+  "marker": 2
+ },
+ {
+  "folder": "C:\\Users\\ferra\\Desktop\\Hackaton\\Test 3d live video\\arm_pc\\runs\\calib2\\C\\check-4",
+  "view": 0,
+  "gap_mm": 180.0,
+  "label": "C/check-4",
+  "to": "marker",
+  "marker": 4
+ }
+]

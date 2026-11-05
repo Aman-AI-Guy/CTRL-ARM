@@ -43,6 +43,7 @@ from .localization import make_router, finite, stationary
 from .arm.telemetry import observation_record, open_reader, XArmTelemetry
 from .acquire import ScanBook
 from .reconstruction import ReconstructionJobs
+from . import scan_review
 from . import agent as agent_mod
 from .workflow import feedback, receipt_error, refers_to_selection
 from . import failures as fail_log
@@ -227,6 +228,17 @@ class OrientReq(BaseModel):
     orientation: str
 
 
+class ReviewReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: str = ""
+
+
+class ReviewStatusReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    status: str
+
+
 def _observe_clearance() -> float | None:
     raw = os.getenv("TROVA_OBSERVE_CLEARANCE_MM", "").strip()
     if not raw:
@@ -312,9 +324,9 @@ class State:
         self.scans = ScanBook(s.data_dir / "scans")
         from .scan3d.service import OrbitStore
         self.orbits = OrbitStore(s.data_dir / 'orbit_settings.json')
-        self.reconstruction = ReconstructionJobs(s.data_dir / "reconstructions", on_done=lambda job:
-            self.audit.event('scan', action='reconstruction_finished', job=job['id'], status=job['status'],
-                             reconstructed=job['reconstructed'], textured_mesh=job['textured_mesh'], reason=job['reason']))
+        self.scan_review: dict | None = scan_review.load(s.data_dir / "scan_review.json")
+        self.review_lock = threading.Lock()
+        self.reconstruction = ReconstructionJobs(s.data_dir / "reconstructions", on_done=self._reconstruction_done)
         self.last_agent: dict | None = None
         self.task_resume: dict | None = None
         self.last_reference: dict | None = None
@@ -326,6 +338,54 @@ class State:
         self.pending_motion: dict | None = None
         self.orbit_permit = None
         self.orbit_worker = None
+
+    def _reconstruction_done(self, job: dict) -> None:
+        """Runs in the job thread. A finished mesh with renders is reviewed by Grok right away."""
+        self.audit.event('scan', action='reconstruction_finished', job=job['id'], status=job['status'],
+                         reconstructed=job['reconstructed'], textured_mesh=job['textured_mesh'], reason=job['reason'])
+        has_renders = any(str(n).lower().endswith('.png') for n in (job.get('artifacts') or {}))
+        if job.get('status') != 'completed' or not has_renders or os.getenv('TROVA_AUTO_REVIEW', '1') == '0':
+            return
+        try:
+            self.review_reconstruction(job['id'])
+        except Exception as e:  # noqa: BLE001 - a failed review never changes the reconstruction result
+            self.audit.event('error', where='scan_review', error=str(e))
+
+    def review_reconstruction(self, job_id: str | None = None) -> dict:
+        """Grok looks at the renders and lists what the operator must change on the object. No motion."""
+        jobs = self.reconstruction
+        if not job_id:
+            done = [j for j in jobs.jobs.values() if j.get('status') == 'completed'
+                    and any(str(n).lower().endswith('.png') for n in (j.get('artifacts') or {}))]
+            if not done:
+                raise KeyError('No completed reconstruction with renders to review.')
+            job_id = max(done, key=lambda j: j.get('started_at') or 0)['id']
+        job = jobs.get(job_id)
+        names = sorted(n for n in (job.get('artifacts') or {}) if str(n).lower().endswith('.png'))
+        renders = [(n, cv2.imread(str(jobs.artifact(job_id, n)))) for n in names[:scan_review.MAX_RENDERS]]
+        groups = len({j.get('orientation') for j in jobs.jobs.values()
+                      if j.get('status') == 'completed' and j.get('session_id') == job.get('session_id')})
+        selected = (self.selected_context or {}).get('selected') or {}
+        name = str(selected.get('name') or '')
+        lang = (os.getenv('TROVA_REVIEW_LANG', 'it').strip().lower() or 'it')
+        rev = scan_review.review(self.grok, job, renders, name='' if name == 'unknown' else name,
+                                 groups=groups, lang=lang)
+        with self.review_lock:
+            self.scan_review = rev
+            scan_review.save(self.s.data_dir / 'scan_review.json', rev)
+        self.audit.event('scan', action='review', job=job_id, grok_mode=rev['grok_mode'], complete=rev['complete'],
+                         requests=[q['instruction'] for q in rev['requests']])
+        return rev
+
+    def mark_review_request(self, request_id: str, status: str) -> dict:
+        with self.review_lock:
+            if not self.scan_review:
+                raise KeyError('No scan review exists yet.')
+            req = scan_review.set_status(self.scan_review, request_id, status)
+            scan_review.save(self.s.data_dir / 'scan_review.json', self.scan_review)
+        self.audit.event('scan', action='review_request', request=request_id, status=status,
+                         instruction=req['instruction'])
+        return req
 
     def note_stage(self, stage: str, seconds: float) -> None:
         self.stage_samples.append({"stage": stage, "seconds": round(float(seconds), 3), "at": time.time()})
@@ -1050,12 +1110,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return (STATIC / "index.html").read_text()
+        return (STATIC / "index.html").read_text(encoding="utf-8")
 
     @app.get("/jury", response_class=HTMLResponse)
     def jury():
         """Feature 4: full-screen live scoreboard for the projector."""
-        return (STATIC / "jury.html").read_text()
+        return (STATIC / "jury.html").read_text(encoding="utf-8")
 
     @app.post("/api/metrics/reset")
     def api_metrics_reset():
@@ -1151,6 +1211,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "latency": agent_mod._timing_summary(st.stage_samples) | {
                 "realtime_claimed": False, "n": len(st.stage_samples)},
             "agent": st.last_agent,
+            "scan_review": st.scan_review,
             "orbit_scope": None if st.orbit_permit is None else st.orbit_permit.public(),
             "scan": None if not st.scans.active else st.scans.public(st.scans.sessions[st.scans.active]),
             "labels": None if not st.labels else {k: v for k, v in st.labels.items() if k != "codes"},
@@ -2674,6 +2735,9 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 if not st.scans.active:
                     return _refused("No scan session is open.", text)
                 changed = api_scan_orientation(OrientReq(orientation='reoriented-' + str(time.time_ns())))
+                asked = next((q for q in scan_review.pending(st.scan_review) if q.get('reorients')), None)
+                if asked:                       # the operator did what Grok asked: tick it off
+                    st.mark_review_request(asked['id'], 'done')
                 return _agent_result({"ok": True, "status": "awaiting_reselection", "workflow_state": "object_reoriented",
                                       "reason": changed['reason'], "hardware_moved": False, "confirmation": None,
                                       "spoken_message": "Ho aperto un nuovo gruppo di acquisizione. Ora seleziona di nuovo l'oggetto; la posizione precedente non è più valida."}, text)
@@ -2899,6 +2963,50 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             return result
         except KeyError as exc:
             raise HTTPException(400, str(exc)) from None
+
+    @app.get("/api/scan/review")
+    def api_scan_review_get():
+        return st.scan_review or {"job_id": None, "requests": [], "complete": False, "moves_arm": False,
+                                  "reason": "No reconstruction has been reviewed yet."}
+
+    @app.post("/api/scan/review")
+    def api_scan_review(body: ReviewReq):
+        """Grok reviews the renders of a completed reconstruction (the latest when job_id is empty)."""
+        try:
+            return st.review_reconstruction(body.job_id.strip() or None)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except GrokError as exc:
+            raise HTTPException(502, str(exc)) from None
+
+    @app.post("/api/scan/review/request")
+    def api_scan_review_request(body: ReviewStatusReq):
+        """The operator did (or cannot do) one request. Done on a turn or flip opens a new orientation group."""
+        current = next((q for q in (st.scan_review or {}).get('requests', [])
+                        if q['id'] == body.request_id), None)
+        reorienting = bool(current and current.get('reorients') and body.status == 'done'
+                           and current.get('status') != 'done')
+        if reorienting and st.arm.status().get('state') == 'moving':
+            raise HTTPException(409, 'Stop the arm before reorienting the object')
+        try:
+            req = st.mark_review_request(body.request_id, body.status)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        out = {"request": req, "review": st.scan_review, "hardware_moved": False, "requires_reselection": False}
+        if reorienting:
+            if st.scans.active:
+                out["orientation"] = api_scan_orientation(OrientReq(orientation=f"{req['action']}-{req['id']}-{time.time_ns()}"))
+                out["requires_reselection"] = True
+                out["spoken_message"] = ("Ho aperto un nuovo gruppo di acquisizione. Seleziona di nuovo l'oggetto e "
+                                         "riprendi la scansione; i due gruppi non vengono ancora uniti in una sola mesh.")
+            else:
+                out["spoken_message"] = ("Nessuna sessione di scansione aperta: avvia una nuova scansione e seleziona "
+                                         "di nuovo l'oggetto.")
+        return out
 
     @app.post("/api/scan/finish")
     def api_scan_finish():
