@@ -9,7 +9,8 @@ Grok returns structured JSON. Plain code checks it, converts pixels to millimetr
 ## Demo
 
 - Scan, then the 3D result: [hackathon media/Ctrl+Arm xArm5 scan.mp4](<hackathon media/Ctrl+Arm xArm5 scan.mp4>)
-- Pitch: [media/ctrl_arm_ad.mp4](media/ctrl_arm_ad.mp4)
+- Pitch slides: [hackathon media/ctrl-arm pitch.pdf](<hackathon media/ctrl-arm pitch.pdf>)
+- Pitch video: [media/ctrl_arm_ad.mp4](media/ctrl_arm_ad.mp4)
 
 ## 3D results
 
