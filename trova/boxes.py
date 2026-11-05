@@ -52,7 +52,7 @@ class Box:
         return Box(min(self.x0, other.x0), min(self.y0, other.y0),
                    max(self.x1, other.x1), max(self.y1, other.y1),
                    source=self.source, score=self.score + other.score,
-                   touches_border=self.touches_border or other.touches_border)
+                   touches_border=self.touches_border or other.touches_border, extra={**other.extra, **self.extra})
 
     def to_list(self) -> list[int]:
         return [int(round(v)) for v in (self.x0, self.y0, self.x1, self.y1)]
@@ -64,6 +64,16 @@ class Box:
     @classmethod
     def from_list(cls, xs, **kw) -> "Box":
         return cls(float(xs[0]), float(xs[1]), float(xs[2]), float(xs[3]), **kw)
+
+    @staticmethod
+    def valid_norm1000(xs) -> bool:
+        """A model's [x0, y0, x1, y1] on the 0-1000 scale: four numbers inside the picture, x0 < x1 and y0 < y1.
+        Anything else is refused, never clamped into a target."""
+        if not isinstance(xs, (list, tuple)) or len(xs) != 4:
+            return False
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1000 for v in xs):
+            return False
+        return xs[0] < xs[2] and xs[1] < xs[3]
 
     @classmethod
     def from_norm1000(cls, xs, width: int, height: int, **kw) -> "Box":

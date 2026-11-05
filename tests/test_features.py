@@ -312,7 +312,7 @@ def test_too_many_changes_skip_grok_and_stay_not_clear():
     class NoGrok:
         def json(self, **k):
             raise AssertionError("must not call Grok")
-    real, filtered, clear, summary, _ = verify_changes(NoGrok(), f, f, many)
+    real, filtered, clear, summary, _, _ = verify_changes(NoGrok(), f, f, many)
     assert len(real) == 15 and not clear and "camera" in summary and real[0].risk == "high"
 
 
@@ -940,6 +940,7 @@ def test_state_stays_json_after_a_room_scan(tmp_path, monkeypatch):
 def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
     """The arm's Pi camera streams MJPEG over Wi-Fi: it must use the newest-frame reader with the 2 s stale check."""
     import threading
+
     import numpy as np
 
     import trova.camera as cam_mod
@@ -947,7 +948,7 @@ def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
     failed_read = threading.Event()
 
     class FakeStream:
-        def __init__(self, src):
+        def __init__(self, src, *a):
             self.src = src
 
         def isOpened(self):

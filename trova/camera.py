@@ -56,46 +56,72 @@ class DemoSource(FrameSource):
 
 
 STALE_S = 2.0   # a webcam frame older than this is refused
+STREAM_TIMEOUT_MS = 1500   # network streams: open/read give up before close() stops waiting for the reader
 
 
 class WebcamSource(FrameSource):
+    """Only the reader thread touches the capture after start-up, and it releases it on its way out: releasing it
+    under a blocked cap.read() crashes on macOS."""
     kind = "webcam"
+    JOIN_S = 2.0            # close(): how long to wait for the reader
+    FIRST_FRAME_S = 5.0     # start-up: how long to wait for the first frame
 
     def __init__(self, index: int | str, width: int = 1920, height: int = 1080):
-        self.index = index
-        self.cap = cv2.VideoCapture(index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.index, self.width, self.height = index, width, height
+        self.cap = self._open()
         if not self.cap.isOpened():
+            self.cap.release()
             raise RuntimeError(f"Cannot open camera {index}")
         self._frame: np.ndarray | None = None
         self._ts = 0.0                    # when the newest frame arrived
+        self._size: list[int] | None = None
+        self.size_changed: str | None = None
         self._lock = threading.Lock()
         self._run = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         t0 = time.time()
-        while self._frame is None and time.time() - t0 < 5:
+        while self._frame is None and time.time() - t0 < self.FIRST_FRAME_S:
             time.sleep(0.05)
         if self._frame is None:
+            self.close()                  # never leave a reader reconnecting forever
             raise RuntimeError(f"Camera {index} opened but sent no frames")
 
+    def _open(self):
+        if isinstance(self.index, str) and "://" in self.index:
+            cap = cv2.VideoCapture(self.index, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, STREAM_TIMEOUT_MS,
+                                                                cv2.CAP_PROP_READ_TIMEOUT_MSEC, STREAM_TIMEOUT_MS])
+        else:
+            cap = cv2.VideoCapture(self.index)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)      # also after every reopen: calibration needs the same size
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        return cap
+
+    def _reopen(self) -> None:
+        self.cap.release()
+        time.sleep(0.5)
+        self.cap = self._open()
+
     def _loop(self):
-        fails = 0
-        while self._run:   # always keep only the newest frame, so finds never use a stale one
-            ok, f = self.cap.read()
-            if ok:
-                fails = 0
-                with self._lock:
-                    self._frame, self._ts = f, time.time()
-                continue
-            fails += 1
-            time.sleep(0.02)
-            if fails >= 100 and self._run:      # ~2 s without a frame (Continuity Camera dropped): reopen
-                fails = 0
-                self.cap.release()
-                time.sleep(0.5)
-                self.cap = cv2.VideoCapture(self.index)
+        try:
+            opened = time.time()
+            while self._run:   # always keep only the newest frame, so finds never use a stale one
+                ok, f = self.cap.read()
+                if ok:
+                    size = [f.shape[1], f.shape[0]]
+                    if self._size and size != self._size:
+                        self.size_changed = f"{self._size[0]}x{self._size[1]} -> {size[0]}x{size[1]} at {time.strftime('%H:%M:%S')}"
+                        print(f"Camera {self.index}: frame size changed {self.size_changed}", flush=True)
+                    self._size = size
+                    with self._lock:
+                        self._frame, self._ts = f, time.time()
+                    continue
+                time.sleep(0.02)
+                if self._run and time.time() - max(self._ts, opened) >= STALE_S:   # dropped (Continuity, Wi-Fi)
+                    self._reopen()
+                    opened = time.time()
+        finally:
+            self.cap.release()
 
     def read(self) -> np.ndarray:
         with self._lock:
@@ -107,12 +133,12 @@ class WebcamSource(FrameSource):
     def info(self) -> dict:
         f = self._frame
         return {"kind": self.kind, "index": self.index, "size": None if f is None else [f.shape[1], f.shape[0]],
+                "requested": [self.width, self.height], "size_changed": self.size_changed,
                 "frame_age_s": round(time.time() - self._ts, 1)}
 
     def close(self) -> None:
         self._run = False
-        self._thread.join(timeout=2)      # release only after the reader left cap.read() (macOS crashes otherwise)
-        self.cap.release()
+        self._thread.join(timeout=self.JOIN_S)   # the reader releases the capture itself once it leaves cap.read()
 
 
 class VideoSource(FrameSource):

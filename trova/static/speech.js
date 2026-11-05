@@ -10,9 +10,9 @@ const TrovaSpeech = (() => {
     ['watch_off', /\b(stop watching|smetti di sorvegliare)\b/],
     ['watch_on', /\b(watch the line|start watching|guard the line|sorveglia( la linea)?)\b/],
     ['inventory', /\b(what('s| is) on the table|describe the table|cosa c'?(è|e) sul tavolo|descrivi il tavolo)\b/],
-    ['check', /^\s*(check|check now|controlla|controlla ora)\s*$|\b(check (the line|for changes)|what changed|line clearance|cosa (è|e) cambiato)\b/],
+    ['check', /^\s*(check|check now|controlla|controlla ora)\s*$|\b(check (the line|for changes)|what changed|line clearance|cosa (è|e) cambiato|is the line clear|controlla la linea|(la )?linea (è |e )?libera)\b/],
     ['reference', /\b(save (the )?reference|salva (il )?riferimento)\b/],
-    ['home', /\b(go home|park the arm|vai a casa|parcheggia)\b/],
+    ['home', /\b(go home|park( the arm)?|vai a casa|torna a casa|parcheggia)\b/],
   ];
   const ALL = /\b(all the|every|tutti i|tutte le|tutti gli)\b/;
   const ROOM = /\b(look around( the room)?( for)?|in the room|guarda (in giro|intorno)( per)?|nella stanza)\b/g;
@@ -62,7 +62,8 @@ const TrovaSpeech = (() => {
     rec.onresult = e => {
       const res = e.results[e.results.length - 1], text = res[0].transcript;
       if (!stopped && parse(text, stopWords).cmd === 'stop') { stopped = true; onStop(text); }   // do not wait for the end
-      if (res.isFinal) { if (!stopped) onFinal(text); } else onInterim(text);
+      // after a stop, the final sentence still runs if it is a stop too: "stop watching" also turns the watch off
+      if (res.isFinal) { if (!stopped || parse(text, stopWords).cmd === 'stop') onFinal(text); } else onInterim(text);
     };
     rec.onerror = e => onEnd('mic: ' + e.error);
     rec.onend = () => { rec = null; onEnd(''); };

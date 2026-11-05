@@ -156,6 +156,9 @@ def _direct(grok, frame, request, query_image, photo_line, res: FindResult) -> N
     res.label, res.reason = d.get("label", res.label), d.get("reason", res.reason)
     res.confidence = float(d.get("confidence") or 0)
     if d.get("found") and d.get("box_2d"):
+        if not Box.valid_norm1000(d["box_2d"]):      # Grok output is validated before it can become an arm target
+            res.reason = f"Grok's box {d['box_2d']} is not inside the picture: not used. {res.reason}".strip()
+            return
         H, W = frame.shape[:2]
         box = Box.from_norm1000(d["box_2d"], W, H, id=0, source="grok", label=res.label)
         if box.area > 16:

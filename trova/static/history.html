@@ -16,6 +16,7 @@ main{max-width:1300px;margin:0 auto;padding:12px 16px}
 button,.chip{padding:7px 12px;border-radius:8px;border:1px solid var(--line);background:var(--btn);color:var(--ink);font-size:13px;cursor:pointer}
 .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
 input[type=search]{flex:1;min-width:160px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-size:15px}
+#stop{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:700;padding:8px 18px}
 #verify{font-weight:600}.ok{color:var(--ok)}.bad{color:var(--bad)}
 .row{display:grid;grid-template-columns:150px 110px minmax(0,1fr) minmax(0,1.4fr) 96px;gap:10px;align-items:start;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
 .row.head{font-weight:600;color:var(--muted);background:none;position:sticky;top:52px}
@@ -28,7 +29,8 @@ input[type=search]{flex:1;min-width:160px;padding:8px 10px;border-radius:8px;bor
 </head>
 <body>
 <header><h1>Trova audit trail</h1><span class="muted">every request, decision, alarm and sign-off, newest first</span>
-  <span style="margin-left:auto" class="muted"><a href="/">back to Trova</a></span></header>
+  <span style="margin-left:auto" class="muted"><a href="/">back to Trova</a></span>
+  <button id="stop" onclick="stopArm()" title="Space bar or Escape">STOP</button></header>
 <main>
   <div class="bar" id="chips"></div>
   <div class="bar"><input type="search" id="q" placeholder="search: a request, an operator, a lot number…" oninput="load()">
@@ -51,8 +53,8 @@ function chips(counts) {
 function toggleGroup(g) { if (!g) on.clear(); else on.has(g) ? on.delete(g) : on.add(g); load(); }
 function verdict(r) { return esc(r).replace(/^LINE CLEAR/, '<b class="clear">LINE CLEAR</b>').replace(/^NOT CLEAR/, '<b class="notclear">NOT CLEAR</b>'); }
 async function load() {
-  const qs = new URLSearchParams({groups: [...on].join(','), q: $('q').value, n: 400});
-  $('csv').href = '/api/history.csv?' + qs;
+  const filters = {groups: [...on].join(','), q: $('q').value}, qs = new URLSearchParams({...filters, n: 400});
+  $('csv').href = '/api/history.csv?' + new URLSearchParams(filters);     // the export is never capped
   let d; try { d = await (await fetch('/api/history?' + qs)).json(); } catch (e) { return; }
   groups = d.groups; chips(d.counts);
   $('count').textContent = `${d.rows.length} events shown · ${d.grok_calls} Grok calls logged (not shown)`;
@@ -63,11 +65,17 @@ async function load() {
 }
 async function verify() {
   const d = await (await fetch('/api/history/verify')).json();
-  $('verify').className = d.ok ? 'ok' : 'bad';
-  $('verify').textContent = d.ok ? `✓ intact: ${d.hashed} of ${d.events} events chained (last ${d.last_hash})`
-    : `✗ broken at line ${d.broken_at}: ${d.reason}`;
+  $('verify').className = d.ok && !d.warning ? 'ok' : 'bad';
+  $('verify').textContent = d.ok ? `✓ intact: ${d.hashed} of ${d.events} events chained (last ${d.last_hash})` + (d.warning ? ` · ⚠ ${d.warning}` : '')
+    : `✗ broken${d.broken_at ? ' at line ' + d.broken_at : ''}: ${d.reason}`;
 }
 load(); setInterval(() => { if ($('auto').checked && document.activeElement !== $('q')) load(); }, 3000);
+// STOP from this page too: Escape always, space bar unless typing in the search box
+const stopArm = () => fetch('/api/arm/stop', {method: 'POST'});
+document.addEventListener('keydown', e => {
+  const a = document.activeElement, typing = a && a.tagName === 'INPUT' && ['text', 'search'].includes(a.type);
+  if (e.key === 'Escape' || (e.code === 'Space' && !typing)) { e.preventDefault(); stopArm(); }
+});
 </script>
 </body>
 </html>

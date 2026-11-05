@@ -92,10 +92,11 @@ def find_blobs(frame: np.ndarray, background: np.ndarray | None = None, thresh: 
             continue
         x, y, w, h = cv2.boundingRect(c)
         touches = x <= 1 or y <= 1 or x + w >= W - 1 or y + h >= H - 1
-        if a > max_area_frac * W * H and not touches:
-            continue
+        # Larger than max_area_frac: a tray, a binder, or the light changed. Never dropped: it is kept and flagged,
+        # so a check sees it as a change and Grok cannot call it a false alarm.
+        extra = {"oversize": True} if a > max_area_frac * W * H and not touches else {}
         boxes.append(Box(float(x), float(y), float(x + w), float(y + h), source="blob", score=float(a),
-                         touches_border=touches))
+                         touches_border=touches, extra=extra))
     return number_boxes(merge_boxes(boxes))
 
 

@@ -11,6 +11,7 @@ Zones are saved in data/zones.json (image coordinates, so redraw them if the cam
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from .boxes import Box
 from .config import atomic_json_write
 
 RULES = ("empty", "allowed")
+EMPTY_OVERLAP = 0.05     # an object with more than this fraction of its box inside an 'empty' zone violates it
+SEVERAL = re.compile(r"(\band\b|\bwith\b|\be\b|\bcon\b|[&+,/])")   # "leaflet and blister pack" is two objects
 
 
 @dataclass
@@ -34,6 +37,18 @@ class Zone:
         poly = np.array(self.polygon, np.float32).reshape(-1, 1, 2)
         return cv2.pointPolygonTest(poly, tuple(float(v) for v in box.center), False) >= 0
 
+    def overlap(self, box: Box) -> float:
+        """Fraction of the box's area that lies inside the zone."""
+        x0, y0 = int(np.floor(box.x0)), int(np.floor(box.y0))
+        w, h = max(1, int(np.ceil(box.x1)) - x0), max(1, int(np.ceil(box.y1)) - y0)
+        m = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(m, [np.round(np.array(self.polygon, np.float64) - (x0, y0)).astype(np.int32).reshape(-1, 1, 2)], 1)
+        return float(m.mean())
+
+    def touches(self, box: Box) -> bool:
+        """'empty' zones: any real part of the object inside counts, not only its centre."""
+        return self.contains(box) or self.overlap(box) > EMPTY_OVERLAP
+
 
 def load_zones(path: Path) -> list[Zone]:
     if not Path(path).exists():
@@ -45,17 +60,30 @@ def save_zones(path: Path, zones: list[Zone]) -> None:
     atomic_json_write(Path(path), [asdict(z) for z in zones])
 
 
+def _words(s: str) -> list[str]:
+    return [w[:-1] if len(w) > 3 and w.endswith("s") else w for w in re.findall(r"[a-zà-ù0-9]+", s.lower())]
+
+
 def _allowed(name: str, allowed: list[str]) -> bool:
+    """Whole words: every word of an allowed item, in order, in the object's name ("blue blister pack" is a
+    "blister pack"; "pencil sharpener" is not a "pen"). A name that joins several objects is never allowed."""
     n = name.lower().strip()
-    return any(a.lower().strip() in n or n in a.lower().strip() for a in allowed if a.strip())
+    if not n or SEVERAL.search(n):
+        return False
+    nw = _words(n)
+    for a in allowed:
+        aw = _words(a)
+        if aw and any(nw[i:i + len(aw)] == aw for i in range(len(nw) - len(aw) + 1)):
+            return True
+    return False
 
 
 def evaluate(zones: list[Zone], boxes: list[Box], names: dict[int, str] | None = None) -> list[dict]:
     names = names or {}
     out = []
     for z in zones:
-        inside = [b for b in boxes if z.contains(b)]
-        objs = [{"id": b.id, "name": names.get(b.id, f"object {b.id}")} for b in inside]
+        inside = [b for b in boxes if (z.touches(b) if z.rule == "empty" else z.contains(b))]
+        objs = [{"id": b.id, "name": names.get(b.id, f"object {b.id}"), "box": b.to_list()} for b in inside]
         problems = []
         if z.rule == "empty":
             problems = [f"{o['name']} must not be in {z.name}" for o in objs]

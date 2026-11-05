@@ -17,6 +17,8 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .changes import OFFLINE_NOTE
+
 INK, MUTED, LINE = colors.HexColor("#16181D"), colors.HexColor("#5D6370"), colors.HexColor("#D0D0CA")
 OK, BAD = colors.HexColor("#137333"), colors.HexColor("#B3261E")
 
@@ -47,7 +49,7 @@ def _img(path: Path, width_mm: float):
     return Image(str(path), width=width_mm * mm, height=width_mm * mm * h / w)
 
 
-def build(check: dict, data_dir: Path) -> bytes:
+def build(check: dict, data_dir: Path, audit: dict | None = None) -> bytes:
     r = check["result"]
     clear = r["line_clear"]
     s = [Paragraph("Line clearance record", h1),
@@ -56,6 +58,9 @@ def build(check: dict, data_dir: Path) -> bytes:
          Paragraph(f"<font color='{'#137333' if clear else '#B3261E'}'><b>{'LINE CLEAR' if clear else 'NOT CLEAR'}</b></font>",
                    ParagraphStyle("v", parent=base, fontSize=16, leading=20)),
          _p(r.get("summary", ""), base), Spacer(1, 6)]
+    if check.get("offline"):
+        s += [_p(OFFLINE_NOTE, ParagraphStyle("off", parent=base, fontName="Helvetica-Bold", textColor=colors.HexColor("#9A6700"))),
+              Spacer(1, 6)]
     ref, cur = Path(data_dir) / check["ref_marked"], Path(data_dir) / check["cur_marked"]
     if ref.exists() and cur.exists():
         imgs = Table([[_p("Reference (approved)", cellb), _p("Current", cellb)], [_img(ref, 84), _img(cur, 84)]],
@@ -76,7 +81,7 @@ def build(check: dict, data_dir: Path) -> bytes:
         s.append(_table(zrows, [34, 40, 22, 78]))
     if r.get("batch"):        # feature 11
         b = r["batch"]
-        s.append(Paragraph(f"Labels (current batch LOT {b.get('lot', '')})", h2))
+        s.append(Paragraph(f"Labels (current batch LOT {escape(str(b.get('lot', '')))})", h2))
         if b.get("error"):
             s.append(_p(f"Labels could not be read: {b['error']}. Check them by hand.", base))
         lrows = [["Object", "Lot", "Expiry", "Code", "Print"]] + [
@@ -97,6 +102,9 @@ def build(check: dict, data_dir: Path) -> bytes:
         s.append(_p("Not signed off yet. Operator: ____________________   Decision: approve / reject   Time: ________", base))
     s += [Spacer(1, 10), _p("Trova assists the operator; the operator decides. Every request, Grok decision and "
                             f"sign-off is in the audit log (data/events.jsonl), check id {check['event_id']}.", small)]
+    if audit:
+        s.append(_p(f"Audit log when printed: {audit['events']} events, last hash {audit['last_hash']}. "
+                    "Verify on the history page: the log must still reach this hash.", small))
     buf = io.BytesIO()
     SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
                       title=f"Line clearance record {check['event_id']}", author="Trova").build(s)

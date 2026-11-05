@@ -20,8 +20,10 @@ GROUPS = {
     "clearance": {"reference", "change_check", "signoff", "record_pdf", "judge_check", "labels", "batch", "zone"},
     "alarms": {"watch", "watch_alert", "watch_ack", "watch_false_alarm"},
     "arm": {"arm_stop", "arm_home", "arm_point", "arm_tour", "arm_lift_tray", "arm_freedrive", "arm_compliant",
-            "arm_approach", "arm_approach_confirmed", "arm_accuracy"},
-    "setup": {"background", "source", "upload_scene", "calibration", "marker_from_arm", "preflight", "metrics_reset"},
+            "arm_approach", "arm_approach_confirmed", "arm_accuracy", "arm_reset", "arm_lift_recovery",
+            "arm_clear_errors", "room_scan", "room_find"},
+    "setup": {"background", "source", "upload_scene", "calibration", "marker_from_arm", "preflight", "metrics_reset",
+              "teach_pose"},
     "voice": {"voice"},
     "dog": {"dog_search", "dog_stop"},
     "errors": {"error", "unreadable_line"},
@@ -31,6 +33,16 @@ GROUP_OF = {k: g for g, ks in GROUPS.items() for k in ks}
 
 def _txt(v) -> str:
     return "" if v is None else str(v)
+
+
+def _rest(e: dict) -> str:
+    return ", ".join(f"{a}={_txt(b)[:40]}" for a, b in e.items() if a not in ("id", "ts", "time", "kind", "hash"))[:200]
+
+
+def _cell(v) -> str:
+    """A spreadsheet must show the text, never run it as a formula."""
+    s = _txt(v)
+    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
 
 
 def summarize(e: dict) -> dict:
@@ -88,7 +100,11 @@ def summarize(e: dict) -> dict:
         elif "target_mm" in e:      # first supervised run
             result = f"stage {e.get('stage', '-')}: target {e['target_mm']} mm, controller {e.get('tcp_mm')}" + (
                 f", ruler error {e['measured_error_mm']} mm" if "measured_error_mm" in e else "")
+        elif "operator" in e:       # operator reset / lift recovery: who (authenticated) and why
+            result = f"by {e.get('operator')}" + (f": {e['note']}" if e.get("note") else "")
         result += f" ({e['after']})" if e.get("after") else ""
+        if not result:
+            result = _rest(e)
     elif k == "calibration":
         what, result = "calibration", f"{e.get('source')}, error {e.get('error_mm')} mm"
     elif k == "preflight":
@@ -102,7 +118,7 @@ def summarize(e: dict) -> dict:
         image = e.get("photo")
     else:
         what = k.replace("_", " ")
-        result = ", ".join(f"{a}={_txt(b)[:40]}" for a, b in e.items() if a not in ("id", "ts", "time", "kind", "hash"))[:200]
+        result = _rest(e)
     return {"id": e.get("id", ""), "time": e.get("time", ""), "kind": k, "group": GROUP_OF.get(k, "other"),
             "what": _txt(what)[:300], "result": _txt(result)[:400], "image": image}
 
@@ -129,7 +145,7 @@ def to_csv(rs: list[dict]) -> str:
     w = csv.writer(buf)
     w.writerow(["time", "event id", "kind", "group", "what", "result", "image"])
     for r in rs:
-        w.writerow([r["time"], r["id"], r["kind"], r["group"], r["what"], r["result"], r["image"] or ""])
+        w.writerow([_cell(x) for x in (r["time"], r["id"], r["kind"], r["group"], r["what"], r["result"], r["image"])])
     return buf.getvalue()
 
 

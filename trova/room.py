@@ -176,7 +176,7 @@ def find(grok: GrokClient, views: list[View], request: str) -> RoomFind:
                    images=[v.frame], mock_context={"request": request, "stats": stats[k - 1]})
     res.grok_latency_s += rb.latency_s
     d = rb.data
-    if d.get("found") and d.get("box_2d"):
+    if d.get("found") and Box.valid_norm1000(d.get("box_2d")):
         H, W = v.frame.shape[:2]
         res.box = Box.from_norm1000(d["box_2d"], W, H, id=0, source="grok", label=res.label)
         res.view, res.status = k - 1, "found"

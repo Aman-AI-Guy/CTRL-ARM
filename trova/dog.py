@@ -74,7 +74,8 @@ class SimDog(DogDriver):
 
 def load_route(data_dir: Path) -> list[Spot]:
     folder = Path(data_dir) / "dog_route"
-    files = sorted(folder.glob("*.jpg")) + sorted(folder.glob("*.png")) if folder.exists() else []
+    files = sorted((f for f in folder.iterdir() if f.suffix.lower() in (".jpg", ".jpeg", ".png")),
+                   key=lambda f: f.name.lower()) if folder.exists() else []
     if files:
         return [Spot(re.sub(r"^\d+[_-]", "", f.stem).replace("_", " "), f) for f in files]
     return [Spot("Room 2, desk", seed=211), Spot("Room 2, shelf", seed=212), Spot("Room 3, workbench", seed=213)]
@@ -142,7 +143,7 @@ def run_search(dog: DogDriver, grok: GrokClient, route: list[Spot], request: str
         r = grok.json(name="trova_dog_look", prompt=LOOK_PROMPT.format(spot=spot.name, request=request),
                       schema=LOOK_SCHEMA, images=[img], mock_context=ctx)
         d = r.data
-        if d.get("found") and d.get("box_2d"):
+        if d.get("found") and Box.valid_norm1000(d.get("box_2d")):
             H, W = img.shape[:2]
             b = Box.from_norm1000(d["box_2d"], W, H)
             marked = img.copy()
