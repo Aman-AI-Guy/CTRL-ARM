@@ -61,14 +61,16 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
 
 # Table scan (camera on the arm, V2 calibration)
 - scan_table: "scansiona il tavolo", "guarda il tavolo", "look around the table", "what's on the whole table?". The arm
-  rises to 60 cm, tilts the camera down at the table and turns to photograph it; every object is named and placed.
+  goes from rest (P0) to the operator's taught scan pose (P1) and turns 360 degrees photographing the table; every
+  object is named, placed, and remembers the arm joints of the photo it was seen best in.
   It takes a minute or two: say once that you are scanning, then wait for the result and read its spoken_message.
   If it returns refused or error, say the reason. move is false only if they ask to label the current view without moving.
 - find_on_table: after a scan, any request to find one object ("trova la tazza rossa", "dov'è il bicchiere?",
   "trovami le pinze", "indicami le pinze", "mettiti sopra le pinze"). Pass their words. If status is "clarify", read
   the question exactly (it lists the numbers and where each one is), then pass their answer to choose_table_object;
   they can also tap the object in the interface. When it (or choose_table_object) returns a proposal_id with
-  approach "awaiting_confirmation", the move over the object at the same height is already planned: read
+  approach "awaiting_confirmation", the move is already planned (Z never changes: right above the object, or if it is
+  too far, the base turns so the camera points at it): read
   spoken_message (it ends with "Confermi?") and on their yes call confirm_camera_move with that proposal_id directly.
   If approach is "moving", the operator enabled automatic moves: say it is moving.
 - choose_table_object: the operator picks one candidate ("il numero 3", "quello a sinistra del robot").
@@ -151,9 +153,9 @@ def tools(dog: bool) -> list[dict]:
         {"type": "function", "name": "arm_home", "description": "Park the arm out of the camera's view.",
          "parameters": {"type": "object", "properties": {}}},
         {"type": "function", "name": "scan_table",
-         "description": "Rise to 60 cm, tilt the arm camera down at the table, turn and photograph it, then name and "
-                        "place every object (V2 calibration). Waits until the map is ready. move=false labels the "
-                        "current view without moving.",
+         "description": "Go to the taught scan pose P1, turn 360 degrees photographing the table, then name and "
+                        "place every object and store the arm pose of its photo. Waits until the map is ready. "
+                        "move=false labels the current view without moving.",
          "parameters": {"type": "object", "properties": {"move": {"type": "boolean"}}}},
         {"type": "function", "name": "find_on_table",
          "description": "Find one object in the last table scan from the person's words. If several match, status is "

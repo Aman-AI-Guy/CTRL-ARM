@@ -45,6 +45,7 @@ button:disabled{opacity:.45;cursor:not-allowed;background:transparent;color:var(
 button.primary{background:var(--green-deep);border-color:var(--green-deep);color:#fff}
 button.primary:hover{background:#436656;color:#fff}
 button.quiet{border-color:var(--rule-strong)}
+button.sm,.btn.sm{min-height:30px;padding:4px 10px;font-size:13px;gap:6px}
 input[type=text],input[type=number],select,textarea{font:15px/1.3 "Archivo",Arial,sans-serif;color:var(--ink);background:var(--field);border:1px solid var(--rule-strong);border-radius:2px;padding:7px 10px;min-height:36px;min-width:0}
 input:focus,select:focus,textarea:focus{border-color:var(--ink);outline:2px solid var(--green-deep);outline-offset:1px}
 input::placeholder,textarea::placeholder{color:#646A63}
@@ -92,9 +93,15 @@ label.file input{position:absolute;opacity:0;width:1px;height:1px}
 .work{padding:16px 24px;min-width:0;display:flex;flex-direction:column;gap:12px}
 #alarm{display:none;background:var(--red);color:#fff;padding:10px 14px;font-weight:600}
 #alarm button{border-color:#fff;color:#fff;margin-left:10px;min-height:30px;padding:4px 10px}#alarm button:hover{background:var(--red-deep)}#alarm a{color:#fff}
-.fighead{display:flex;align-items:baseline;gap:8px 16px;border-bottom:1px solid var(--ink);padding-bottom:6px;flex-wrap:wrap}
+.fighead{display:flex;align-items:center;gap:8px 16px;border-bottom:1px solid var(--ink);padding-bottom:6px;flex-wrap:wrap;min-height:44px}
 .fighead h2{flex:none}
-.fighead .tail{margin-left:auto;display:flex;gap:6px 16px;align-items:baseline;min-width:0;flex-wrap:wrap}
+.fighead .tail{margin-left:auto;display:flex;gap:6px 12px;align-items:center;justify-content:flex-end;min-width:0;flex:1 1 auto;flex-wrap:wrap}
+.fighead .tail .ell{flex:0 1 auto}
+/* camera read-out on the picture, like an instrument display */
+.osd{position:absolute;left:10px;bottom:10px;max-width:calc(100% - 20px);display:block;padding:3px 9px 3px 8px;background:rgba(26,26,26,.74);color:var(--paper);font-size:11.5px;line-height:1.45;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.osd:empty{display:none}
+.osd::before{content:"";display:inline-block;width:7px;height:7px;margin-right:7px;vertical-align:1px;border-radius:50%;background:var(--rule-strong)}
+.osd.live::before{background:#8FD0A8}.osd.off::before{background:var(--red)}
 .figrow{display:flex;flex-direction:column;gap:8px;margin-top:10px;min-height:0}
 .figbox{position:relative;width:100%;aspect-ratio:var(--ar,16/9);container-type:size}
 .frame{position:relative;background:var(--frame);overflow:hidden;width:min(100cqw,calc(100cqh * var(--arn,1.7778)));height:min(100cqh,calc(100cqw / var(--arn,1.7778)));margin:0 auto}
@@ -107,40 +114,61 @@ label.file input{position:absolute;opacity:0;width:1px;height:1px}
 .banners{position:absolute;left:10px;right:10px;top:10px;display:flex;flex-direction:column;gap:6px;pointer-events:none}
 .mode{display:none;background:var(--ochre-wash);padding:7px 12px;font-size:14px;align-items:center;gap:12px;flex-wrap:wrap;pointer-events:none}.mode.on{display:flex}
 .mode button{min-height:30px;padding:4px 10px;pointer-events:auto}
-#fignotes{max-height:6em;overflow:auto}
 .capwrap{min-width:0;display:flex;flex-direction:column;gap:6px}
 .captions{list-style:none;padding:0;display:flex;gap:10px 22px;flex-wrap:wrap}
 .captions li{display:flex;gap:8px;align-items:baseline;font-size:13px;line-height:1.35;min-width:0;max-width:100%}
 .captions li b{font-size:14px}
 .num{width:22px;height:22px;flex:none;border-radius:50%;display:inline-grid;place-items:center;font:700 12px "Archivo",sans-serif;background:var(--ochre);color:var(--ink);align-self:center}
 .captions .stale{color:var(--ochre-ink)}
-.notes{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:2px 18px;font-size:13px;color:var(--mute)}
+.num.ring{background:transparent;box-shadow:inset 0 0 0 1.5px var(--rule-strong);color:var(--mute)}
+.notes{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:3px 18px;font-size:13px;line-height:1.4;color:var(--mute)}
+.notes li{min-width:0;max-width:100%}
 .notes li b{color:var(--ink);font-weight:600}
+.notes li.why{flex:1 1 100%}
+.notes details>summary{cursor:pointer;list-style:none;display:flex;align-items:baseline;gap:8px;min-width:0}
+.notes details>summary::-webkit-details-marker{display:none}
+.notes summary b{flex:none}
+.notes summary .ell{flex:0 1 auto}
+.notes summary .count{flex:none;margin-left:auto;padding-left:6px;display:inline-flex;align-items:center;gap:5px;color:var(--ink);font-weight:600;font-size:12px;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.notes summary:hover .count{color:var(--green-deep)}
+.notes summary .count svg{transition:transform .2s var(--ease)}.notes details[open] summary .count svg{transform:rotate(180deg)}
+.notes details ol{margin:6px 0 2px;padding:6px 6px 6px 26px;max-height:9.6em;overflow:auto;border-top:1px solid var(--rule);color:var(--ink);font-size:12.5px}
+.notes details ol li{padding:1px 0}
 
 /* outputs strip */
-.outhead{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;border-bottom:1px solid var(--ink);padding-bottom:4px}
-.outhead .tail{margin-left:auto;display:flex;gap:10px;align-items:center}
-.tabs{display:flex;gap:0;flex-wrap:wrap}
-.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;padding:6px 10px;min-height:32px;font-weight:600;font-size:13px;color:var(--mute);white-space:nowrap}
+/* the two panels under the figure share one head height, so their rules line up */
+.outhead,.reqhead{display:flex;align-items:center;gap:8px 12px;flex-wrap:nowrap;border-bottom:1px solid var(--ink);padding-bottom:4px;min-height:40px;min-width:0}
+.outhead h2,.reqhead h2{flex:none}
+.outhead .tail,.reqhead .tail{margin-left:auto;display:flex;gap:10px;align-items:center;min-width:0;flex:none}
+.reqhead .tail{flex:0 1 auto}
+.tabs{display:flex;gap:2px;flex-wrap:nowrap;overflow-x:auto;min-width:0;flex:none;scrollbar-width:none;border-bottom:1px solid var(--rule)}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:none;border:0;border-bottom:2px solid transparent;border-radius:0;padding:5px 8px 4px;min-height:30px;margin-bottom:-1px;font-weight:600;font-size:13px;color:var(--mute);white-space:nowrap}
+.tabs button:first-child{padding-left:0}
+.tabs button:hover{background:transparent;color:var(--ink)}
+.tabs button:active{background:transparent;color:var(--ink)}
 .tabs button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--ink)}
 .tabs button span{font:500 11px "JetBrains Mono",monospace;margin-left:4px}
-.strip{display:grid;grid-auto-flow:column;grid-auto-columns:clamp(150px,13vw,210px);gap:14px;overflow-x:auto;overflow-y:hidden;padding:10px 0 6px;min-height:0}
-.cell{display:flex;flex-direction:column;gap:3px;min-height:0;min-width:0;border-top:2px solid var(--ink);padding-top:6px}
-.cell .code{font:600 12px "JetBrains Mono",monospace;color:var(--green-deep)}
-.cell .th{flex:1 1 auto;min-height:34px;background:var(--paper-deep);display:grid;place-items:center;overflow:hidden}
-.cell .th img{width:100%;height:100%;object-fit:cover;display:block}
+.tabs button span:empty{display:none}
+.strip{display:grid;grid-auto-flow:column;grid-auto-columns:clamp(140px,12vw,196px);gap:12px;overflow-x:auto;overflow-y:hidden;padding:10px 0 6px;min-height:0;scrollbar-width:thin}
+/* code and links share the top line, so the picture keeps the height */
+.cell{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:18px minmax(0,1fr) 17px 16px;gap:3px 8px;min-height:0;min-width:0;border-top:2px solid var(--ink);padding-top:5px}
+.cell .code{grid-area:1/1;font:600 12px "JetBrains Mono",monospace;color:var(--green-deep)}
+.cell .act{grid-area:1/2;justify-self:end}
+.cell .th{grid-area:2/1/3/3}.cell>b{grid-area:3/1/4/3}.cell>.sub2{grid-area:4/1/5/3}
+.cell .th{position:relative;min-height:0;background:var(--paper-deep);display:grid;place-items:center;overflow:hidden}
+.cell .th img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 .cell .th .v{font:600 17px "JetBrains Mono",monospace;padding:0 8px;text-align:center}
-.cell b{font-size:13px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.cell .sub2{font-size:12px;color:var(--mute)}
-.cell .act{display:flex;gap:10px;font-size:13px;font-weight:600}
+.cell b{font-size:13px;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell .sub2{font-size:12px;line-height:16px;color:var(--mute)}
+.cell .act{display:flex;gap:10px;font-size:12px;font-weight:600;line-height:1.5}
 .empty{padding:14px 0;color:var(--mute);max-width:70ch;font-size:14px}
 
 /* Grok's requests to the operator, beside the outputs */
 .deck{display:grid;grid-template-columns:minmax(240px,5fr) minmax(0,7fr);gap:24px;min-height:0}
 #sec-requests,#sec-output{display:flex;flex-direction:column;min-height:0;min-width:0}
-.reqhead{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;border-bottom:1px solid var(--ink);padding-bottom:4px;min-height:41px}
-.reqhead .tail{margin-left:auto;display:flex;gap:10px;align-items:center;min-width:0}
 #reqlist{padding-top:4px;min-height:0}
+#reqlist .empty{font-size:13px;padding-top:10px}
 .reqsum{font-size:14px;margin:6px 0 2px}
 .reqs{list-style:none;padding:0;display:flex;flex-direction:column}
 .req{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:4px 10px;padding:10px 0;border-bottom:1px solid var(--rule)}
@@ -179,12 +207,28 @@ table.out td.tm{white-space:nowrap;color:var(--mute)}
 .unchecked{padding-left:18px;font-size:13px;color:var(--mute)}
 
 /* results */
-.result{display:none;padding:8px 0 4px;border-top:2px solid var(--ink)}
+.result{display:none;padding:10px 0 8px;border-top:2px solid var(--ink)}
 .result.show{display:block}
-.tsobj{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:6px 4px;border-bottom:1px solid var(--rule)}
-.tsobj.cand{background:var(--paper-deep)}
-.tsobj.sel{outline:2px solid var(--green-deep);outline-offset:-2px}
-.tsobj .row{margin:0}
+.rhead{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap}
+.rhead .big{margin-right:auto}
+.rhead .step{flex:1 1 100%;font-size:13px;color:var(--mute)}
+.tsfind{margin-top:10px}.tsfind input{flex:1 1 140px}
+.tsmsg{margin-top:8px;padding:7px 10px;background:var(--paper-deep);font-size:14px}
+.tsobjs{list-style:none;padding:0;margin-top:8px;border-top:1px solid var(--rule)}
+.tsobj{display:grid;grid-template-columns:22px minmax(0,1fr);gap:2px 10px;align-items:start;padding:8px 6px 8px 4px;border-bottom:1px solid var(--rule)}
+.tsobj .num{margin-top:1px;align-self:start}
+.tsobj>.row{grid-column:2;margin-top:5px}
+.tsobj .nm{font-size:14px;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+.tsobj .pos{font-size:12px;color:var(--mute);line-height:1.35}
+.tsobj .pos .mono{font-size:11.5px;color:var(--ink)}
+.tsobj.cand{background:var(--ochre-wash)}
+.tsobj.sel{background:var(--green-wash);box-shadow:inset 0 0 0 2px var(--green-deep)}
+.tsobj.sel .num{background:var(--green-deep);color:#fff}
+.tsobj .row{margin:0;gap:6px;flex-wrap:nowrap}
+.tsobj .row button{min-height:28px;padding:3px 9px;font-size:12.5px}
+.confirmbox{margin-top:10px;padding:10px 12px 12px;background:var(--field);border:1px solid var(--ink);display:flex;flex-direction:column;gap:8px;font-size:14px}
+.confirmbox button{width:100%;justify-content:center;min-height:44px;font-size:15px}
+.tskey{margin-top:10px;font-size:12px;color:var(--mute);line-height:1.4}
 .result+.result.show{margin-top:10px}
 .st-found{border-top-color:var(--green-deep)}.st-not_found{border-top-color:var(--red)}.st-clarify{border-top-color:var(--ochre)}
 .result>div+div{margin-top:6px}
@@ -209,8 +253,17 @@ ul.changes{padding-left:18px;margin:6px 0}ul.changes li{padding:2px 0}li.risk-hi
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.55)}100%{box-shadow:0 0 0 10px rgba(255,255,255,0)}}
 #pttrow{flex:none}
 #vlog{font-size:14px;overflow:auto;min-height:40px;border-top:1px solid var(--rule)}
-#vlog:empty::before{content:"Nessuna conversazione. Parla con Grok, usa il push to talk o scrivi un comando.";color:var(--mute);font-size:13px;display:block;padding-top:6px}
-#vlog>div{padding:5px 0;border-bottom:1px solid var(--rule)}#vlog b{margin-right:6px}
+#vlog:empty{display:none}
+#vlog>div{display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px;padding:6px 0;border-bottom:1px solid var(--rule);line-height:1.4}
+#vlog b{font-size:11px;font-weight:600;font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);padding-top:2px}
+#vlog>div[class^=live-]{color:var(--mute)}
+/* empty voice log: teach the phrases instead of leaving a hole */
+#vhint{border-top:1px solid var(--rule);padding-top:10px;font-size:13px;color:var(--mute)}
+#vhint dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin-top:6px;align-items:baseline}
+#vhint dt{font-weight:600;color:var(--ink);font-size:14px;white-space:nowrap}
+#vhint dt::before{content:"«"}#vhint dt::after{content:"»"}
+#vhint dd{line-height:1.35}
+#sec-voice:has(#vlog:not(:empty)) #vhint,#sec-voice:has(.result.show) #vhint{display:none}
 #results{overflow:auto;min-height:0}
 #results:not(:has(.result.show)){display:none}
 .cmd{display:flex;gap:8px;flex:none}.cmd input{flex:1}
@@ -225,6 +278,12 @@ ul.changes{padding-left:18px;margin:6px 0}ul.changes li{padding:2px 0}li.risk-hi
 .modechip{background:var(--ink);color:var(--paper);padding:2px 10px;font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase}
 .modechip.hw{background:var(--red)}
 .safeact{margin-top:10px}
+/* while a result needs the space, safety folds to one line; the full panel is one click away */
+.safesum{display:none;align-items:center;gap:6px 12px;margin-top:8px;font-size:13px;color:var(--mute);line-height:1.4}
+.safesum button{margin-left:auto;flex:none}
+.safesum b{color:var(--ink);font-weight:600}
+.safesum .miss{white-space:nowrap}
+#results,#vlog,#reqlist,#vhint,.notes details ol,#toolarea{scrollbar-width:thin}
 
 dialog{border:1px solid var(--ink);border-radius:0;background:var(--paper);color:var(--ink);padding:20px;max-width:92vw;max-height:92vh}
 dialog::backdrop{background:rgba(26,26,26,.45)}
@@ -240,7 +299,7 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
   .figbox{flex:0 1 auto;min-height:150px}
   .capwrap{flex:none}
   .captions li{max-width:48%}
-  .deck{flex:1 1 0;min-height:150px}
+  .deck{flex:1 1 0;min-height:212px}
   .strip{flex:1 1 0}
   #reqlist{flex:1 1 0;overflow:auto}
   #toolarea{display:none}
@@ -256,13 +315,19 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
   body.tool-open .notes{flex-direction:column}
   .side{height:100vh;overflow:hidden;border-left:1px solid var(--ink)}
   #sec-voice{flex:1 1 auto;overflow:hidden}
-  #results{flex:0 1 auto;max-height:55%}
-  #vlog{flex:1 1 0;min-height:0}
+  #results{flex:0 1 auto;max-height:none;padding-right:4px}
+  .side:has(.result.show) .safesum{display:flex}
+  .side:has(.result.show) #sec-safety:not(.open) :is(.facts2,.armline,.safeact){display:none}
+  #vlog{flex:1 1 64px;min-height:64px}
+  #vhint{flex:0 1 auto;min-height:0;overflow:auto}
 }
 @media (min-width:1100px) and (max-height:820px){
   .side{gap:12px;padding-top:12px;padding-bottom:12px}
   #sec-voice{gap:8px}
   #voicebtn{min-height:48px;padding:6px 14px}#voicebtn .t b{font-size:17px}#voicebtn .t small{font-size:11px}
+  #vhint{overflow:hidden;padding-top:8px}
+  #vhint .vlead,#vhint dd{display:none}
+  #vhint dl,#vhint dt{display:inline;margin:0}#vhint dt{margin-right:10px;font-size:13px}
   .fact{padding:3px 0}
   .safeact{margin-top:6px}
   .statuslist{margin-top:12px}
@@ -305,7 +370,7 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
   table.out td.act{text-align:left;grid-column:2}table.out td.act a{margin:0 12px 0 0}
   table.out td.tm{grid-column:2}
 }
-@media (prefers-reduced-motion:reduce){#callouts .lead,#voicebtn.on .dot{animation:none}#toolsbtn svg,details.more>summary svg{transition:none}}
+@media (prefers-reduced-motion:reduce){#callouts .lead,#voicebtn.on .dot{animation:none}#toolsbtn svg,details.more>summary svg,.notes summary .count svg{transition:none}}
 </style>
 </head>
 <body>
@@ -355,15 +420,16 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
 
   <section id="sec-camera" aria-labelledby="h-camera">
     <div class="fighead"><h2 id="h-camera" tabindex="-1">Fig. 1 · Vista camera</h2>
-      <div class="tail"><span class="muted mono" id="figmeta"></span><span class="muted ell" id="srcinfo"></span>
+      <div class="tail"><span class="muted ell" id="srcinfo"></span>
         <label class="check" id="boxesopt"><input type="checkbox" id="showboxes" checked> riquadri candidati</label>
-        <button class="quiet" id="tsbtn" onclick="tableScan(true)" title="Sale a 60 cm, inclina la camera sul tavolo, gira e mappa ogni oggetto (calibrazione V2)">Scansiona tavolo</button>
+        <button class="quiet" id="tsbtn" onclick="tableScan(true)" title="P0 (rest) → P1 (posa insegnata) → giro di 360° con le foto; ogni oggetto ricorda i giunti della foto in cui si vede meglio">Scansiona tavolo</button>
         <button class="quiet" onclick="tableScan(false)" title="Etichetta solo la vista attuale, senza muovere il braccio">Etichetta vista</button></div></div>
     <div class="figrow">
       <div class="figbox">
         <div class="frame" id="frame">
           <img id="live" src="/api/frame.jpg?boxes=1" alt="Vista dal vivo della camera">
           <svg id="callouts" aria-hidden="true"></svg>
+          <div class="osd mono" id="figmeta"></div>
           <div id="camoff"><div><b>Camera non raggiungibile</b><span id="camofftext">Nuovo tentativo tra poco.</span></div></div>
           <div class="banners">
             <div id="clickmode" class="mode"></div>
@@ -381,23 +447,23 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
   <div class="deck">
   <section id="sec-requests" aria-labelledby="h-requests">
     <div class="reqhead"><h2 id="h-requests" tabindex="-1">Richieste di Grok</h2>
-      <div class="tail"><span class="muted ell" id="reqmeta"></span><button class="quiet" id="reviewbtn" onclick="reviewRender()">Rivedi il render</button></div></div>
+      <div class="tail"><span class="muted ell" id="reqmeta"></span><button class="quiet sm" id="reviewbtn" onclick="reviewRender()">Rivedi il render</button></div></div>
     <div id="reqnote" role="status"></div>
     <div id="reqlist" aria-live="polite"></div>
-    <p class="reqfoot">Valutazione dai render, non una misura della superficie. Dopo un capovolgimento i gruppi di orientamento non vengono ancora uniti in una sola mesh.</p>
+    <p class="reqfoot" id="reqfoot" hidden>Valutazione dai render, non una misura della superficie. Dopo un capovolgimento i gruppi di orientamento non vengono ancora uniti in una sola mesh.</p>
   </section>
 
   <section id="sec-output" aria-labelledby="h-output">
     <div class="outhead"><h2 id="h-output" tabindex="-1">Output</h2>
-      <div class="tabs" role="tablist" aria-label="Tipo di output" id="outtabs">
-        <button role="tab" data-tab="all" aria-selected="true">Tutti<span></span></button>
-        <button role="tab" data-tab="mesh" aria-selected="false">Mesh e CAD<span></span></button>
-        <button role="tab" data-tab="render" aria-selected="false">Render<span></span></button>
-        <button role="tab" data-tab="image" aria-selected="false">Immagini<span></span></button>
-        <button role="tab" data-tab="measure" aria-selected="false">Misure<span></span></button>
-        <button role="tab" data-tab="dataset" aria-selected="false">Dataset<span></span></button>
-      </div>
-      <div class="tail"><span class="muted" id="outcount"></span><button class="quiet" onclick="openTool('outputs')">Elenco completo</button></div>
+      <div class="tail"><button class="quiet sm" onclick="openTool('outputs')">Elenco completo</button></div>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Tipo di output" id="outtabs">
+      <button role="tab" data-tab="all" aria-selected="true">Tutti<span></span></button>
+      <button role="tab" data-tab="mesh" aria-selected="false">Mesh e CAD<span></span></button>
+      <button role="tab" data-tab="render" aria-selected="false">Render<span></span></button>
+      <button role="tab" data-tab="image" aria-selected="false">Immagini<span></span></button>
+      <button role="tab" data-tab="measure" aria-selected="false">Misure<span></span></button>
+      <button role="tab" data-tab="dataset" aria-selected="false">Dataset<span></span></button>
     </div>
     <div class="strip" id="outstrip" aria-label="Output recenti"></div>
     <div class="empty" id="outempty" hidden></div>
@@ -609,11 +675,19 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
     <label class="check"><input type="checkbox" id="confirm" checked> chiedi conferma prima che il braccio si muova</label>
     <div class="cmd"><input type="text" id="agentq" aria-label="Comando scritto" placeholder="Scrivi un comando a Grok" onkeydown="if(event.key==='Enter')runAgent()"><button onclick="runAgent()">Esegui</button></div>
     <div id="results"><div id="agentres" class="result" aria-live="polite"></div><div id="findres" class="result" aria-live="polite"></div><div id="approach" class="result" aria-live="polite"></div><div id="tablescan" class="result" aria-live="polite"></div></div>
+    <div id="vhint"><span class="vlead">Nessuna conversazione. </span>Prova a dire:
+      <dl>
+        <dt>scansiona il tavolo</dt><dd>mappa ogni oggetto</dd>
+        <dt>trovami le pinze</dt><dd>lo cerca nella mappa</dd>
+        <dt>mettiti sopra</dt><dd>camera sopra l'oggetto</dd>
+        <dt>stop</dt><dd>il braccio si ferma</dd>
+      </dl></div>
     <div id="vlog" aria-live="polite"></div>
   </section>
 
   <section id="sec-safety" aria-labelledby="h-safety">
     <div class="sechead"><h2 id="h-safety" tabindex="-1">Sicurezza</h2><span id="safemode" class="modechip">…</span></div>
+    <div class="safesum" id="safesum"><span id="safesumtext"></span><button class="quiet sm" id="safemore" aria-expanded="false" aria-controls="safetylist" onclick="toggleSafety()">Mostra tutto</button></div>
     <div class="facts2" id="safetylist"></div>
     <div class="armline" id="armlist"></div>
     <div class="row safeact"><button onclick="openTool('safety')">Modifica parametri</button><span class="muted" id="uncheckedcount"></span></div>
@@ -690,7 +764,8 @@ const IT = {'intrinsics are not solved': 'intrinseci non risolti', 'hand-eye is 
   'The table edge beyond the measured plane is not checked.': 'Il bordo del tavolo oltre il piano misurato non è controllato.',
   'People in the workspace are not detected.': 'Le persone nel workspace non vengono rilevate.',
   'collision_avoidance stays false. A path whose clearance cannot be checked is refused.': 'Nessuna anticollisione: un percorso di cui non si può verificare la clearance viene rifiutato.'};
-const tr = x => IT[x] || x;
+const tr = x => IT[x] || String(x).replace(/^Current (\w+) has not been measured\/identified\.$/, '$1 non misurato o identificato');
+const CHEV = '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 // ---- live view: Pi MJPEG stream, otherwise the next frame only after the previous one loaded
 const live = $('live');
@@ -766,19 +841,24 @@ function renderCaptions(list, moving) {
     ((moving || Date.now() - n.t > 60000) ? `<span class="stale">posizione dell'istantanea delle ${hhmmss(n.t)}, la vista può essere cambiata</span>` : `istantanea delle ${hhmmss(n.t)}`) + `</span></li>`).join('');
   const notes = [];
   if (S) {
-    const vis = S.vision || {}, src = S.source || {};
-    notes.push(vis.valid ? `<b>Coordinate metriche</b> disponibili, calibrazione versione ${esc(vis.version)}`
-      : `<b>Nessuna coordinata metrica</b>: ${esc((vis.reasons || []).map(tr).join(', ') || 'calibrazione non valida')}`);
-    if (S.mock || (S.grok && S.grok.offline)) notes.push(`<b>${S.mock ? 'Riconoscimento simulato' : 'Grok offline'}</b>: i nomi degli oggetti non autorizzano movimenti`);
-    if (src.kind === 'demo' || src.kind === 'armsim') notes.push('<b>Immagine sintetica</b>: non autorizza movimenti');
-    if (!list.length) notes.push('Seleziona o trova un oggetto: il suo riquadro compare numerato sulla figura');
+    const vis = S.vision || {}, src = S.source || {}, why = (vis.reasons || []).map(tr);
+    // the reasons list can be long: one line with the first few, the full list on request
+    notes.push(vis.valid ? `<li><b>Coordinate metriche</b> disponibili, calibrazione versione ${esc(vis.version)}</li>`
+      : !why.length ? '<li><b>Nessuna coordinata metrica</b>: calibrazione non valida</li>'
+      : `<li class="why"><details${reasonsOpen ? ' open' : ''}><summary><b>Nessuna coordinata metrica</b><span class="ell">${esc(why.slice(0, 3).join(', '))}</span>` +
+        `<span class="count">${why.length} ${why.length === 1 ? 'motivo' : 'motivi'}${CHEV}</span></summary><ol>${why.map(w => `<li>${esc(w)}</li>`).join('')}</ol></details></li>`);
+    if (S.mock || (S.grok && S.grok.offline)) notes.push(`<li><b>${S.mock ? 'Riconoscimento simulato' : 'Grok offline'}</b>: i nomi degli oggetti non autorizzano movimenti</li>`);
+    if (src.kind === 'demo' || src.kind === 'armsim') notes.push('<li><b>Immagine sintetica</b>: non autorizza movimenti</li>');
+    if (!list.length) notes.push('<li>Seleziona o trova un oggetto: il suo riquadro compare numerato sulla figura</li>');
   }
   const html = marks + '|' + notes.join('');
   if (html === captionHtml) return;
   captionHtml = html;
   $('captions').innerHTML = marks; $('captions').hidden = !marks;
-  $('fignotes').innerHTML = notes.map(x => `<li>${x}</li>`).join('');
+  $('fignotes').innerHTML = notes.join('');
 }
+let reasonsOpen = false;
+$('fignotes').addEventListener('toggle', e => { reasonsOpen = e.target.open; }, true);   // survives the next re-render
 
 function photoChosen() { photoFile = $('photo').files[0] || null; $('photoname').textContent = photoFile ? 'foto pronta' : ''; }
 
@@ -826,31 +906,37 @@ function showTableScan() {
   const f = t.find || {}, p = t.proposal, ap = t.approach || {};
   const key = JSON.stringify([t.status, t.step, (t.views || []).length, (t.views || []).filter(v => v.annotated).length,
     t.summary, (t.objects || []).length, t.selected, f.status,
-    f.spoken_message, p && p.id, ap.spoken_message, t.reason, t.over && t.over.image]);
+    f.spoken_message, p && p.id, ap.spoken_message, t.reason, t.over && t.over.image, t.photo_pose && t.photo_pose.image]);
   if (key === showTableScan.key) return;          // keep a half-typed request
   showTableScan.key = key;
   const STATUS = {planned: 'pianificata', moving: 'braccio in movimento', capturing: 'foto', labelling: 'Grok etichetta gli oggetti',
     done: 'mappa pronta', stopped: 'fermata', error: 'errore', refused: 'rifiutata', approaching: 'camera in arrivo',
-    over_object: "camera sopra l'oggetto"};
+    over_object: "camera sopra l'oggetto", at_photo_pose: 'alla posizione della foto', pointing: "camera puntata sull'oggetto"};
+  const pose = o => { const ph = o.photo || {}; return ph.joints ? ` · foto ${esc(ph.view || '')}: J1 ${ph.joints[0].toFixed(1)}°` +
+    (ph.tcp_mm ? `, TCP ${ph.tcp_mm.slice(0, 3).map(v => v.toFixed(0)).join(', ')}` : '') : ''; };
   const cands = new Set(f.status === 'clarify' ? (f.candidates || []) : []);
-  let h = `<div class="big">Scansione tavolo · ${esc(STATUS[t.status] || t.status)}${t.step ? ' · ' + esc(t.step) : ''}</div>`;
+  const tone = {done: 'ok', over_object: 'ok', at_photo_pose: 'ok', error: 'bad', refused: 'bad', stopped: 'bad'}[t.status] || '';
+  let h = `<div class="rhead"><span class="big">Scansione tavolo</span><span class="tag ${tone}">${esc(STATUS[t.status] || t.status)}</span>` +
+    (t.step ? `<span class="step">${esc(t.step)}</span>` : '') + `</div>`;
   if (t.reason) h += `<div style="color:var(--bad)">${esc(t.reason)}</div>`;
   if (t.summary) h += `<div>${esc(t.summary)}</div>`;
   if (t.physical_positions === false) h += `<div class="muted">Posizioni simulate: il braccio reale non si è mosso.</div>`;
   if ((t.objects || []).length) {
-    h += `<div class="row"><input type="text" id="tsq" placeholder="cosa cerco? es. il bicchiere" onkeydown="if(event.key==='Enter')tableFind()"><button onclick="tableFind()">Trova</button></div>`;
-    if (f.spoken_message) h += `<div>${esc(f.spoken_message)}</div>`;
-    h += t.objects.map(o => `<div class="tsobj${cands.has(o.id) ? ' cand' : ''}${t.selected === o.id ? ' sel' : ''}"><b>${o.id}</b>` +
-      `<div>${esc(o.name)}<div class="muted">${esc(o.place || '')} · x ${o.centre_mm[0].toFixed(0)}, y ${o.centre_mm[1].toFixed(0)} mm${o.partial ? ' · visto in parte' : ''}</div></div>` +
-      `<div class="row"><button onclick="tableChoose(${o.id})">Scegli</button><button onclick="tableAbove(${o.id})">Camera sopra</button></div></div>`).join('');
+    h += `<div class="row tsfind"><input type="text" id="tsq" aria-label="Oggetto da trovare nella mappa" placeholder="cosa cerco? es. il bicchiere" onkeydown="if(event.key==='Enter')tableFind()"><button onclick="tableFind()">Trova</button></div>`;
+    if (f.spoken_message) h += `<div class="tsmsg">${esc(f.spoken_message)}</div>`;
+    h += `<ol class="tsobjs">` + t.objects.map(o => `<li class="tsobj${cands.has(o.id) ? ' cand' : ''}${t.selected === o.id ? ' sel' : ''}"><span class="num">${o.id}</span>` +
+      `<div><div class="nm">${esc(o.name)}</div><div class="pos">${esc(o.place || '')}${o.place ? ' · ' : ''}<span class="mono">x ${o.centre_mm[0].toFixed(0)}, y ${o.centre_mm[1].toFixed(0)} mm</span>${o.partial ? ' · visto in parte' : ''}${pose(o)}</div></div>` +
+      `<div class="row"><button onclick="tableChoose(${o.id})">Scegli</button><button onclick="tableAbove(${o.id})" title="Sopra l'oggetto alla stessa Z; se è troppo lontano gira la base e lo punta">Vai sopra / punta</button></div></li>`).join('') + `</ol>`;
   }
-  if (p) h += `<div class="row"><span>${esc(p.summary)}</span><button class="primary" onclick="tableConfirm('${esc(p.id)}')">Conferma movimento</button></div>`;
-  else if (ap.spoken_message) h += `<div class="muted">${esc(ap.spoken_message)}</div>`;
+  if (p) h += `<div class="confirmbox"><span>${esc(p.summary)}</span><button class="primary" onclick="tableConfirm('${esc(p.id)}')">Conferma movimento</button></div>`;
+  else if (ap.spoken_message) h += `<div class="tsmsg">${esc(ap.spoken_message)}</div>`;
   const boxed = (t.views || []).filter(v => v.annotated);
-  if (boxed.length) h += `<div class="muted">Foto con i box OpenCV: verde = etichettato e sul tavolo (numero, x/y mm) · arancio = fuori tavolo · grigio = non riconosciuto</div>` +
+  if (boxed.length) h += `<div class="tskey">Foto con i box OpenCV: verde = etichettato e sul tavolo (numero, x/y mm) · arancio = fuori tavolo · grigio = non riconosciuto</div>` +
     `<div class="thumbs">${boxed.map(v => `<a href="/files/${v.annotated}" target="_blank" title="${esc(v.label)}"><img src="/files/${v.annotated}" alt="${esc(v.label)}"></a>`).join('')}</div>`;
   const img = (t.over && t.over.image) || t.sheet;
-  if (img) h += `<div class="thumbs"><a href="/files/${img}" target="_blank"><img src="/files/${img}" alt="${t.over ? "Vista dalla camera sopra l'oggetto" : 'Primi piani numerati degli oggetti'}"></a></div>`;
+  const again = t.photo_pose && t.photo_pose.image;
+  if (img || again) h += `<div class="thumbs">${again ? `<a href="/files/${again}" target="_blank" title="Di nuovo dalla posa della foto (stessi giunti della scansione)"><img src="/files/${again}" alt="Vista dalla posa della foto"></a>` : ''}` +
+    (img ? `<a href="/files/${img}" target="_blank"><img src="/files/${img}" alt="${t.over ? "Vista dalla camera sopra l'oggetto" : 'Primi piani numerati degli oggetti'}"></a>` : '') + `</div>`;
   el.className = 'result show'; el.innerHTML = h;
 }
 
@@ -1542,7 +1628,6 @@ function renderOutputs() {
   items.forEach(it => { counts[it.kind] = (counts[it.kind] || 0) + 1; });
   document.querySelectorAll('#outtabs [role=tab]').forEach(b => { b.setAttribute('aria-selected', String(b.dataset.tab === outTab)); b.querySelector('span').textContent = counts[b.dataset.tab] || ''; });
   const shown = outTab === 'all' ? items : items.filter(it => it.kind === outTab), empty = EMPTY[outTab] || EMPTY.all;
-  $('outcount').textContent = items.length ? items.length + ' elementi' : '';
   const sh = shown.slice(0, 40).map(cellHtml).join('');
   if (sh !== stripHtml) { stripHtml = sh; $('outstrip').innerHTML = sh; }
   $('outstrip').hidden = !shown.length; $('outempty').hidden = shown.length > 0; $('outempty').textContent = empty;
@@ -1568,6 +1653,7 @@ function renderRequests() {
   $('reqbadge').textContent = !rv ? 'nessuna revisione' : pend ? `${pend} in attesa` : qs.length ? 'tutte gestite' : 'nessuna';
   $('reqbadge').className = 'badge ' + (pend ? 'mock' : rv ? 'live' : '');
   $('reqmeta').textContent = rv ? `ricostruzione ${rv.job_id.slice(0, 8)} · Grok ${GMODE_IT[rv.grok_mode] || rv.grok_mode} · ${rv.time}` : '';
+  $('reqfoot').hidden = !rv;
   let html;
   if (!rv) html = `<p class="empty">Dopo una ricostruzione Grok guarda i render e scrive qui cosa cambiare sull'oggetto per completare la scansione: capovolgerlo, ruotarlo, spostare un cavo che copre un lato.</p>`;
   else {
@@ -1625,6 +1711,14 @@ function renderSafety() {
   const arm = `<div class="ell"><span class="k">TCP</span><span class="mono">${esc(pose || '–')}</span> &nbsp; <span class="k">Giunti</span><span class="mono">${esc(joints || '–')}</span></div>` +
     `<div class="muted">posa ${esc(SRC_IT[r.source] || r.source || '–')} · può muovere ${r.process_can_move ? '<b>sì</b>' : 'no'} · in movimento ${r.moving ? '<b>sì</b>' : 'no'} · errore ${esc(r.error_code ?? '–')}/${esc(r.warn_code ?? '–')}</div>`;
   if ($('armlist').innerHTML !== arm) $('armlist').innerHTML = arm;
+  const nmiss = rows.filter(([, v]) => v.includes('class="miss"')).length;
+  const sum = `velocità max <b class="mono">${esc(sf.max_speed_mm_s ?? mo.max_speed_mm_s ?? '–')} mm/s</b> · jog <b class="mono">${esc(sf.jog_max_mm ?? mo.jog_max_mm ?? '–')} mm</b>` +
+    (nmiss ? ` · ${miss(nmiss + ' non misurati')}` : '') + ' · anticollisione no';
+  if ($('safesumtext').innerHTML !== sum) $('safesumtext').innerHTML = sum;
+}
+function toggleSafety() {
+  const s = $('sec-safety'), open = !s.classList.contains('open');
+  s.classList.toggle('open', open); $('safemore').setAttribute('aria-expanded', String(open)); $('safemore').textContent = open ? 'Riduci' : 'Mostra tutto';
 }
 
 const ARM_STATE = {idle: 'fermo', moving: 'in movimento', stopped: 'fermato', error: 'errore', disconnected: 'scollegato'};
@@ -1647,6 +1741,7 @@ async function refresh() {
   if (usePiStream() && live.dataset.mode !== 'stream') nextFrame();
   if (src.kind === 'pi') camOffline(src.online === false, `${src.host}:${src.port} non risponde. ${src.error || ''}`);
   $('figmeta').textContent = src.kind === 'pi' ? `${src.host} · ${(src.size || frameSize).join(' × ')} · ${src.online === false ? 'offline' : 'dal vivo'} ${hhmmss(Date.now())}` : `${src.kind} · ${frameSize.join(' × ')}`;
+  $('figmeta').className = 'osd mono' + (src.kind === 'pi' ? (src.online === false ? ' off' : ' live') : '');
   const cam = $('cambadge');
   cam.textContent = src.kind === 'pi' ? (src.online ? 'Pi online' : 'Pi offline') : synth ? 'sintetica' : src.kind;
   cam.className = 'badge ' + (src.kind === 'pi' ? (src.online ? 'live' : 'bad') : synth ? 'mock' : '');

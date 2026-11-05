@@ -19,6 +19,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
@@ -71,6 +72,11 @@ CONFIRM_TTL_S = 60.0            # a first-run confirmation older than this is st
 COLLISION_WARNING = "Collision avoidance: NOT PRESENT. Hold the physical E-stop."
 # Captured before route locks/model calls; remains cancelled even after an operator reset.
 MOTION_TICKET: ContextVar[threading.Event | None] = ContextVar("motion_ticket", default=None)
+# TROVA_AUTO_REARM=1: every other POST /api/ is a new command and re-arms first (State.auto_rearm).
+NO_REARM_PATHS = frozenset({
+    "/api/arm/reset", "/api/arm/recover_lift", "/api/arm/clear_errors", "/api/arm/freedrive",
+    "/api/arm/compliant", "/api/voice/log", "/api/voice/session", "/api/watch/ack", "/api/metrics/reset",
+})
 
 
 class ArmBusy(RuntimeError):
@@ -368,6 +374,9 @@ class State:
             self.stop_epoch.set()
             self.cancel.set()
             self.arm.latch_stop()              # local event only: controller recovery is NEVER automatic
+        # Operator choice (a physical E-stop is in reach): the next new command re-arms by itself (auto_rearm).
+        self.auto_rearm_on = os.getenv("TROVA_AUTO_REARM", "0").lower() in ("1", "true", "yes")
+        self.rearm_note: str | None = None
         self.thresh, self.min_area = s.blob_thresh, s.min_area_frac
         self.last_find: dict | None = None
         self.pending: dict | None = None
@@ -431,6 +440,7 @@ class State:
         self.table_frames: dict[str, np.ndarray] = {}
         self.table_sheet: np.ndarray | None = None
         self.table_pending: dict | None = None
+        self._table_load_map()           # the last scan's map survives a server restart (data/table_map.json)
         # first supervised run on hardware: find -> confirm -> hover -> confirm -> descend -> measure (off by default)
         self.first_run = os.getenv("TROVA_FIRST_RUN", "0").lower() in ("1", "true", "yes")
         self.first_run_speed = min(FIRST_RUN_MAX_SPEED, float(os.getenv("TROVA_FIRST_RUN_SPEED_MM_S", "20")))
@@ -535,6 +545,8 @@ class State:
         """Why the arm must not move right now (None = it may). pixels=False: the target is given in robot mm,
         so only the safety rules apply, not the camera calibration."""
         if interlocks and self.stop_latched.is_set():
+            if self.auto_rearm_on:
+                return self.rearm_note or "Software STOP is latched: the next command re-arms automatically"
             return "Software STOP is latched: operator safety checks and /api/arm/reset required" + (
                 "; a tray lift was interrupted: recover the fork separately" if self.lift_interrupted else "")
         if interlocks and self.manual_mode:
@@ -684,6 +696,9 @@ class State:
     def authorize_motion(self, *, pixels: bool = False, ticket=None, since=None) -> None:
         """The single admission check, used for pointing AND all preparatory/home/room moves."""
         if (ticket is not None and ticket.is_set()) or (since is not None and self.stop_ts >= since):
+            if self.auto_rearm_on:
+                raise ArmBusy(self.rearm_note if self.stop_latched.is_set() and self.rearm_note
+                              else "STOP cancelled this pending command: give the command again")
             raise ArmBusy("STOP cancelled this pending command: submit a new command after operator reset")
         blocked = self.arm_blocked(pixels=pixels)
         if blocked:
@@ -843,6 +858,78 @@ class State:
                     self.lift_store.write("in_progress")
                 except OSError as e:
                     self.persistence_error = str(e)
+            self.arm_lock.release()
+
+    def auto_rearm(self) -> None:
+        """TROVA_AUTO_REARM=1: a new command re-enables a stopped/disabled controller (state 4/5, no error) and
+        clears the software STOP. Requests admitted before the STOP keep their cancelled ticket. Never overrides a
+        live or still-stopping worker, manual mode, a failed driver STOP, a STOP racing this call or a controller
+        error code (that one stays with the operator: 'Cancella errori del braccio')."""
+        if not self.auto_rearm_on:
+            return
+        if self.stop_latched.is_set() and self.arm_thread and self.arm_thread.is_alive():
+            self.arm_thread.join(timeout=5)       # the cancelled worker is winding down
+        if not self.arm_lock.acquire(timeout=5):
+            return
+        try:
+            if (self.arm_thread and self.arm_thread.is_alive()) or self.manual_mode:
+                return
+            with self.safety_lock:
+                latched, sequence = self.stop_latched.is_set(), self.stop_sequence
+            backend = getattr(self.arm, "backend", None)
+            read = getattr(backend, "read_status", None)
+            enabled = False
+            if read is not None:
+                try:
+                    ctl = read()
+                except Exception as e:  # noqa: BLE001 - leave everything latched, say why
+                    self.rearm_note = "Automatic re-arm: cannot read the controller: " + str(e)
+                    return
+                if ctl.get("moving"):
+                    return
+                if ctl.get("error_code"):
+                    self.rearm_note = (f"Controller error {ctl['error_code']}: check the arm, then press "
+                                       "'Cancella errori del braccio'")
+                    return
+                if ctl.get("state_code") in (4, 5):
+                    try:
+                        backend.clear_errors()     # motion_enable + ready state; sends no motion
+                    except Exception as e:  # noqa: BLE001
+                        self.rearm_note = "Automatic re-arm: controller enable failed: " + str(e)
+                        return
+                    enabled = True
+            if latched:
+                with self.safety_lock:
+                    if self.stops_pending or self.stop_error or self.persistence_error:
+                        self.rearm_note = ("Automatic re-arm refused: " + (self.stop_error or self.persistence_error
+                                           or "a STOP is still in flight") + "; press STOP again, then retry")
+                        return
+                if self.lift_interrupted:
+                    if lift_allowed():
+                        self.rearm_note = "A tray lift was interrupted: recover the fork (/api/arm/recover_lift)"
+                        return
+                    if self.lift_store:     # TROVA_ALLOW_LIFT is off: no lift can have run in this process
+                        try:
+                            self.lift_store.write("clear")
+                        except OSError as e:
+                            self.persistence_error = str(e)
+                            self.rearm_note = "Cannot persist the lift record: " + str(e)
+                            return
+                    self.lift_interrupted = False
+                with self.safety_lock:
+                    if self.stops_pending or self.stop_sequence != sequence:
+                        return                     # a new STOP arrived meanwhile: it wins
+                    self.arm.ready()
+                    self.stop_epoch = threading.Event()
+                    self.stop_latched.clear()
+                    self.stop_nonce = uuid.uuid4().hex
+            if latched or enabled:
+                self.arm.state = "idle"
+                if hasattr(self.arm, "last_error"):
+                    self.arm.last_error = None
+                self.audit.event("arm_auto_rearm", software_stop=latched, controller_enabled=enabled)
+            self.rearm_note = None
+        finally:
             self.arm_lock.release()
 
     def set_manual_mode(self, on: bool, change_mode) -> None:
@@ -1023,22 +1110,31 @@ class State:
                          z_mm=plan["z_mm"], aim_mm=plan["aim_mm"], mode=self.arm.gateway.mode, physical_pose=physical)
         return self.table_public()
 
-    def _table_go(self, q, cfg) -> bool:
-        """One joint move through CartesianArm.go_joints (gateway, safety box, STOP latch, reached check), slower."""
+    def _table_go(self, q, cfg, fast: bool = False) -> bool:
+        """One joint move through CartesianArm.go_joints (gateway, safety box, STOP latch, reached check).
+        Scan moves (rise to P1, the 360 turn): <= TROVA_TABLE_SCAN_SPEED_DEG_S and TROVA_ARM_SPEED_MM_S.
+        fast=True, the moves after the 360 (back to P1, to a photo pose, over an object): <= the post-scan
+        TROVA_TABLE_SCAN_GO_SPEED_DEG_S / _GO_TCP_MM_S, never above the gateway caps (TROVA_ARM_MAX_*)."""
         arm, speed = self.arm, self.arm.joint_speed
-        cap = cfg.joint_speed_deg_s
-        try:   # joint speed so the sampled TCP never exceeds the workspace TCP speed (TROVA_ARM_SPEED_MM_S)
+        gw = arm.gateway
+        gw_joint = float(getattr(gw, "max_joint_speed_deg_s", speed) or speed)
+        gw_tcp = float(getattr(gw, "max_speed_mm_s", 100.0) or 100.0)
+        work_tcp = float(getattr(arm, "speed", None) or gw_tcp)
+        if fast:
+            cap, tcp_cap = min(cfg.go_speed_deg_s, gw_joint), min(cfg.go_tcp_mm_s or work_tcp, gw_tcp)
+        else:
+            cap, tcp_cap = min(speed, cfg.joint_speed_deg_s, gw_joint), min(work_tcp, gw_tcp)
+        try:   # joint speed so the sampled TCP never exceeds the TCP speed cap
             fk, q0, q1 = arm.backend.fk_mm, np.asarray(arm.backend.joints()[:5], float), np.asarray(q, float)
             span = float(np.max(np.abs(q1 - q0)))
             if span > 0.1:
                 pts = [np.asarray(fk(q0 + (q1 - q0) * t)[:3], float) for t in np.linspace(0, 1, 25)]
                 mm_per_deg = max(float(np.linalg.norm(b - a)) for a, b in zip(pts, pts[1:])) / (span / 24)
-                tcp_cap = float(getattr(arm.gateway, "max_speed_mm_s", 100.0) or 100.0)
                 if mm_per_deg > 1e-6:
                     cap = min(cap, max(1.0, tcp_cap / mm_per_deg))
         except Exception:  # noqa: BLE001 - no FK/telemetry: keep the configured cap (the gateway still checks)
             pass
-        arm.joint_speed = min(speed, cap)
+        arm.joint_speed = cap
         try:
             return bool(arm.go_joints([float(v) for v in q]))
         finally:
@@ -1061,8 +1157,14 @@ class State:
         path = self.audit.save_image(f"table_{label.replace(' ', '_')}", frame)
         with self.table_lock:
             self.table_frames[label] = frame
+        tcp = None
+        if physical:    # the controller's own TCP pose at the photo (x, y, z mm, roll, pitch, yaw deg)
+            tcp = (self.robot_telemetry().get("pose6") or None)
+        if not tcp:
+            from .scan3d.flange import flange_pose
+            tcp = [float(v) for v in flange_pose(np.asarray(q, float))[:3, 3]]
         return {"label": label, "q": q, "physical": physical, "image": path, "boxes": boxes, "flipped": flipped,
-                "size": [int(frame.shape[1]), int(frame.shape[0])]}
+                "size": [int(frame.shape[1]), int(frame.shape[0])], "tcp_mm": [round(float(v), 1) for v in tcp]}
 
     def _table_views_public(self, views: list[dict]) -> list[dict]:
         with self.table_lock:
@@ -1102,7 +1204,7 @@ class State:
                     ended = ("stopped", "STOP")
                     break
                 self._table_set(step=step["label"])
-                if not self._table_go(step["q"], cfg):
+                if not self._table_go(step["q"], cfg, fast=bool(step.get("fast"))):
                     ended = ("stopped" if self.stop_latched.is_set() else "error", self.arm.last_error or self.arm.state)
                     break
                 if step.get("capture"):
@@ -1196,6 +1298,7 @@ class State:
                     continue
                 s = {"view": view["label"], "name": name, "category": item.get("category", ""),
                      "note": item.get("note", ""), "box": box, "image": view["image"],
+                     "q": [round(float(v), 3) for v in view["q"]], "tcp_mm": view.get("tcp_mm"),
                      "authoritative": bool(item.get("label_authoritative")) and view["physical"], **loc}
                 sightings.append(s)
                 entries.append({"box": box, "text": name, "kind": "mapped", "sighting": s})
@@ -1241,9 +1344,41 @@ class State:
             if final:
                 self.table_scan.update(status="done", finished_at=time.time(), sheet=sheet_path)
         if final:
+            self._table_save_map(sheet_path)
             self.audit.event("table_scan", action="mapped",
                              objects=[{k: o[k] for k in ("id", "name", "centre_mm")} for o in objects],
                              grok_mode=sorted(modes), physical_positions=physical)
+
+    def _table_save_map(self, sheet_path: str | None) -> None:
+        """The finished map (objects with their photo poses, the numbered close-up sheet) to data/table_map.json."""
+        try:
+            with self.table_lock:
+                d = {"saved_at": time.time(), "objects": self.table_objects, "sheet": sheet_path,
+                     "summary": self.table_scan.get("summary"), "views": self.table_scan.get("views") or [],
+                     "physical_positions": self.table_scan.get("physical_positions"),
+                     "center_deg": (self.table_scan.get("plan") or {}).get("center_deg")}
+            path = self.s.data_dir / "table_map.json"
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(d, default=float, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception as e:  # noqa: BLE001 - the map stays usable in memory
+            self.audit.event("error", where="table_save_map", error=str(e))
+
+    def _table_load_map(self) -> None:
+        path = self.s.data_dir / "table_map.json"
+        if not path.exists():
+            return
+        try:
+            d = json.loads(path.read_text(encoding="utf-8"))
+            sheet = cv2.imread(str(self.s.data_dir / d["sheet"])) if d.get("sheet") else None
+            self.table_objects, self.table_sheet = list(d.get("objects") or []), sheet
+            when = time.strftime("%H:%M", time.localtime(d.get("saved_at") or 0))
+            self.table_scan = {"status": "done", "restored": True, "sheet": d.get("sheet"),
+                               "summary": f"Mappa della scansione delle {when}: " + (d.get("summary") or ""),
+                               "views": d.get("views") or [], "physical_positions": d.get("physical_positions"),
+                               "plan": {"center_deg": d.get("center_deg")}, "find": None, "selected": None}
+        except Exception as e:  # noqa: BLE001 - a bad file only means: scan again
+            self.audit.event("error", where="table_load_map", error=str(e))
 
     def _table_center(self) -> float:
         """The table-middle bearing the last scan used (from the start pose unless set), for left/right words."""
@@ -1304,7 +1439,7 @@ class State:
             except ArmBusy as e:
                 return {"approach": "refused", "spoken_message": prefix + str(e)}
         return {"approach": "awaiting_confirmation", "proposal_id": prop["proposal_id"],
-                "spoken_message": prefix + prop["spoken_message"]}
+                "expires_at": prop["expires_at"], "spoken_message": prefix + prop["spoken_message"]}
 
     def table_choose(self, object_id: int | None = None, answer: str | None = None) -> dict:
         lang, objects = self._table_lang(), list(self.table_objects)
@@ -1341,9 +1476,15 @@ class State:
                           + " joints but the arm now reads " + ("real" if physical else "simulated")
                           + " joints: scan the table again in this profile")
         limits = getattr(self.arm, "limits", None) or None
-        level = os.getenv("TROVA_TABLE_SCAN_APPROACH", "level").strip().lower() != "hover"
-        try:      # level (default): same TCP height, over it or pointing at it; hover: the old 30 cm descent
-            plan = (table_scan_mod.plan_level_over(cal, cfg, q, o["centre_mm"], limits) if level else
+        how_to = os.getenv("TROVA_TABLE_SCAN_APPROACH", "over").strip().lower() or "over"
+        if how_to == "photo" and not (o.get("photo") or {}).get("joints"):
+            how_to = "over"                        # a map from before photo poses were stored
+        look_q = load_poses(self.s.data_dir).get("table_look_joints")
+        try:      # over (default): Z never changes; right above it if the arm can, else turn the base toward it;
+                  # photo: back to the photo's joints first; level: over/lean at the current height; hover: old descent
+            plan = (table_scan_mod.plan_over_or_point(cal, cfg, q, o["centre_mm"], look_q, limits) if how_to == "over" else
+                    table_scan_mod.plan_photo_over(cal, cfg, q, o, limits) if how_to == "photo" else
+                    table_scan_mod.plan_level_over(cal, cfg, q, o["centre_mm"], limits) if how_to != "hover" else
                     table_scan_mod.plan_camera_over(cal, cfg, q, o["centre_mm"], limits))
         except ValueError as e:
             plan = {"problems": [str(e)]}
@@ -1353,9 +1494,35 @@ class State:
             self.audit.event("table_scan", action="approach_refused", object_id=object_id, problems=plan["problems"])
             raise ArmBusy(msg)
         x, y, _z = o["centre_mm"]
-        if plan.get("kind") == "level_over":
-            how = ("mi metto sopra" if plan["above"] else "lo indico da qui (troppo lontano per andarci sopra)")
-            how_en = ("I go right above it" if plan["above"] else "I point at it from here (too far to go above)")
+        if plan.get("kind") == "point":
+            far = o.get("distance_mm") or 0
+            summary = (f"Numero {object_id}, {o['name']}: è troppo lontano per andarci sopra ({far / 10:.0f} cm dalla base), "
+                       f"giro la base e lo punto con la camera, Z resta {plan['z_mm']:.0f} mm. Confermi?"
+                       if lang == "it" else
+                       f"Number {object_id}, {o['name']}: too far to go above it ({far / 10:.0f} cm from the base), "
+                       f"I turn the base and point the camera at it, Z stays {plan['z_mm']:.0f} mm. Confirm?")
+            if not plan["steps"]:
+                summary = (f"Numero {object_id}, {o['name']}: la camera lo sta già puntando." if lang == "it"
+                           else f"Number {object_id}, {o['name']}: the camera already points at it.")
+        elif plan.get("kind") == "photo_over":
+            ph = plan["photo"]
+            j1 = ph["joints"][0]
+            then = ((" poi mi metto sopra" if plan["above"] else " poi lo indico da lì (troppo lontano per andarci sopra)")
+                    if plan["over"] else " e mi fermo lì (non riesco ad andarci sopra)")
+            then_en = ((" then I go right above it" if plan["above"] else " then I point at it from there (too far)")
+                       if plan["over"] else " and stop there (cannot get above it)")
+            summary = (f"Numero {object_id}, {o['name']}: torno alla posizione della foto ({ph['view']}, J1 "
+                       f"{j1:.0f}°),{then}, sempre a Z {plan['z_mm']:.0f} mm o più in alto. Confermi?"
+                       if lang == "it" else
+                       f"Number {object_id}, {o['name']}: back to the photo pose ({ph['view']}, J1 {j1:.0f} deg),"
+                       f"{then_en}, always at Z {plan['z_mm']:.0f} mm or higher. Confirm?")
+        elif plan.get("kind") == "level_over":
+            tx, ty = plan["tcp_mm"][:2]
+            how = ("mi metto sopra" if plan["above"] else
+                   f"è troppo lontano per andarci sopra: mi avvicino il più possibile (fino a x {tx:.0f}, y {ty:.0f}) "
+                   "e lo punto con la camera")
+            how_en = ("I go right above it" if plan["above"] else
+                      f"too far to go above it: I get as close as I can (to x {tx:.0f}, y {ty:.0f}) and point at it")
             summary = (f"Numero {object_id}, {o['name']} (x {x:.0f}, y {y:.0f} mm): {how}, alla stessa altezza "
                        f"Z {plan['z_mm']:.0f} mm, camera {plan['look_down_deg']:.0f}° in giù. Confermi?"
                        if lang == "it" else
@@ -1411,15 +1578,29 @@ class State:
                 "spoken_message": "Mi muovo." if self._table_lang() == "it" else "Moving."}
 
     def _table_run_approach(self, p: dict, cfg) -> None:
+        photo_again = None
         for step in p["plan"]["steps"]:
             if self.cancel.is_set() or self.stop_latched.is_set():
                 self._table_set(status="stopped", reason="STOP")
                 return
             self._table_set(step=step["label"])
-            if not self._table_go(step["q"], cfg):
+            fast = bool(step.get("fast")) or p["plan"].get("kind") in ("photo_over", "level_over", "point")  # after 360
+            if not self._table_go(step["q"], cfg, fast=fast):
                 self._table_set(status="stopped" if self.stop_latched.is_set() else "error",
                                 reason=self.arm.last_error or self.arm.state)
                 return
+            if step.get("capture") == "photo_pose":     # same joints as the scan photo: the object should be there
+                try:
+                    time.sleep(cfg.settle_s)
+                    frame, _meta = self.capture_frame()
+                    cal = table_scan_mod.for_frame(table_scan_mod.load_v2()[0], frame.shape[1], frame.shape[0])
+                    if table_scan_mod.image_flipped(cal, self.table_pose()[0]):
+                        frame = cv2.rotate(frame, cv2.ROTATE_180)
+                    photo_again = self.audit.save_image(f"table_photo_pose_{p['object_id']}", frame)
+                    self._table_set(photo_pose={"object_id": p["object_id"], "image": photo_again,
+                                                "scan_image": (p["plan"].get("photo") or {}).get("view")})
+                except Exception as e:  # noqa: BLE001 - only the picture failed; the move goes on
+                    self.audit.event("error", where="table_photo_pose_picture", error=str(e))
         view = None
         try:
             time.sleep(cfg.settle_s)
@@ -1430,10 +1611,14 @@ class State:
             view = self.audit.save_image(f"table_over_{p['object_id']}", frame)
         except Exception as e:  # noqa: BLE001 - the move finished; only the confirmation picture failed
             self.audit.event("error", where="table_over_picture", error=str(e))
-        self._table_set(status="over_object", step=None, over={"object_id": p["object_id"], "image": view,
-                                                               "target_mm": p["plan"]["target_mm"],
-                                                               "camera_mm": p["plan"]["camera_mm"]})
-        self.audit.event("table_scan", action="over_object", object_id=p["object_id"], image=view)
+        only_photo = p["plan"].get("kind") == "photo_over" and not p["plan"].get("over")
+        self._table_set(status="at_photo_pose" if only_photo else "pointing" if p["plan"].get("kind") == "point"
+                        else "over_object", step=None,
+                        over={"object_id": p["object_id"], "image": view, "photo_pose_image": photo_again,
+                              "target_mm": p["plan"]["target_mm"], "camera_mm": p["plan"]["camera_mm"]})
+        self.audit.event("table_scan", action="at_photo_pose" if only_photo else "over_object",
+                         object_id=p["object_id"], image=view, photo_pose_image=photo_again,
+                         min_z_mm=p["plan"].get("min_z_mm"))
 
     def run_lift(self, wps: list) -> None:
         """Feature 7: if the lift does not finish, block automatic moves until the operator frees the arm."""
@@ -1972,6 +2157,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def _motion_request_ticket(request, call_next):
+        path = request.url.path
+        if (st.auto_rearm_on and request.method == "POST" and path.startswith("/api/")
+                and path not in NO_REARM_PATHS and not path.endswith(("/stop", "/cancel"))):
+            await run_in_threadpool(st.auto_rearm)    # before the ticket: this new command gets the fresh epoch
         token = MOTION_TICKET.set(st.stop_epoch)
         try:
             return await call_next(request)
@@ -2088,7 +2277,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
             "motion": st.arm.gateway.public() if hasattr(st.arm, "gateway") else None,
             "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
-            "stop_latched": st.stop_latched.is_set(),
+            "stop_latched": st.stop_latched.is_set(), "auto_rearm": st.auto_rearm_on, "rearm_note": st.rearm_note,
             "stop_error": st.stop_error,
             "stop_nonce": st.stop_nonce,
             "physical_arm": st.physical, "safety_persistence_error": st.persistence_error,
@@ -2599,13 +2788,13 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     def api_arm_clear_errors(request: Request):
         """Controller recovery only; never resets the software STOP or interrupted-lift interlock."""
         arm = _need_cartesian()
-        if st.physical:
+        if st.physical and not st.auto_rearm_on:
             st.authenticate_operator(request.headers.get("x-trova-operator-token", ""))
         try:
             with st.arm_lock:
                 if st.arm_thread and st.arm_thread.is_alive():
                     raise ArmBusy("Wait for the motion worker to finish before controller recovery")
-                if st.physical and not st.stop_latched.is_set():
+                if st.physical and not st.stop_latched.is_set() and not st.auto_rearm_on:
                     raise ArmBusy("Latch software STOP before explicit controller recovery")
                 arm.backend.clear_errors()
         except ArmBusy:

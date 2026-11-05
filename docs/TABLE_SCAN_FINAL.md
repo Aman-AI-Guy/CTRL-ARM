@@ -113,6 +113,23 @@ default scan settings.
   table, but nothing models people or objects taller than ~12 cm.
 - Software STOP is not a safety-rated E-stop.
 
+## 6b. P0 / P1 and photo poses (2026-11-05 afternoon)
+
+- **P0** = rest, all joints 0 (`TROVA_ARM_HOME_JOINTS`). **P1** = the scan pose the operator set by hand and taught as
+  `table_look_joints`: `2.45, -30.22, -49.65, 119.24, 221.76` (TCP 251, 11, 433 mm, camera 39 deg down).
+- Scan: P0 -> P1 -> J1 -330 deg in 30 deg steps (12 photos, 20 deg/s) -> back to P1 at the post-scan speed. Started away
+  from P0, it goes straight to P1 and never below the lower of the two heights.
+- Every object stores the arm pose of the photo it is seen best in (`photo`: view, 5 joints, controller TCP pose) and of
+  every other photo it is in (`photos`). The UI shows it next to each object.
+- "Trovami X" / **Vai (foto + sopra)**: back to the joints of X's best photo (J1 the short way round, e.g. -267.6 ->
+  +92.4), one picture there (`table_photo_pose_<id>`), then lean over X at the same height. If it cannot get over X,
+  it stops at the photo pose (X is in that picture).
+- After the 360 the TCP never goes below the scan height: sagging joint moves are split into waypoints lifted back to
+  that height (sampled TCP within 2 mm). Speed after the 360: 30 deg/s and 150 mm/s TCP (`TROVA_TABLE_SCAN_GO_*`,
+  gateway caps `TROVA_ARM_MAX_JOINT_SPEED_DEG_S=30`, `TROVA_ARM_MAX_SPEED_MM_S=150`); everything else stays at
+  `TROVA_ARM_SPEED_MM_S=100`.
+- Leaning over from P1 rolls the wrist from J4 119 / J5 222 to J4 ~-60 / J5 ~44 in the air (8 short moves).
+
 ## 7. Open questions for the operator
 
 1. Where should the pliers be for the next test (55–60 cm from the base, in the front view)?

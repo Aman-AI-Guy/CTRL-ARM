@@ -64,7 +64,10 @@ class Settings:
     far_mm: float = 800.0               # the top image edge must land on the table within this radius
     hover_mm: float = 300.0             # camera-to-object distance when the camera is placed above it
     object_max_mm: float = 120.0        # tallest object assumed under the camera head
-    joint_speed_deg_s: float = 10.0     # cap for every table-scan move
+    joint_speed_deg_s: float = 10.0     # cap for the scan itself (rise to P1 + the 360 photo turn)
+    go_speed_deg_s: float = 0.0         # moves AFTER the 360 (back to P1, to a photo pose, over an object);
+                                        # 0 = same as joint_speed_deg_s. The gateway cap still applies.
+    go_tcp_mm_s: float = 0.0            # TCP speed cap for those moves; 0 = TROVA_ARM_SPEED_MM_S
     settle_s: float = 0.8               # wait after arriving before the picture
     merge_mm: float = 60.0              # two sightings closer than this are the same object
     clearance_mm: float = 30.0          # camera head surface above the table along every path
@@ -80,7 +83,8 @@ def settings(env: dict | None = None) -> Settings:
     num = {"z_mm": "TROVA_TABLE_SCAN_Z_MM", "center_deg": "TROVA_TABLE_SCAN_CENTER_DEG",
            "far_mm": "TROVA_TABLE_SCAN_FAR_MM", "hover_mm": "TROVA_TABLE_SCAN_HOVER_MM",
            "object_max_mm": "TROVA_TABLE_SCAN_OBJECT_MAX_MM", "joint_speed_deg_s": "TROVA_TABLE_SCAN_SPEED_DEG_S",
-           "settle_s": "TROVA_TABLE_SCAN_SETTLE_S", "merge_mm": "TROVA_TABLE_SCAN_MERGE_MM"}
+           "settle_s": "TROVA_TABLE_SCAN_SETTLE_S", "merge_mm": "TROVA_TABLE_SCAN_MERGE_MM",
+           "go_speed_deg_s": "TROVA_TABLE_SCAN_GO_SPEED_DEG_S", "go_tcp_mm_s": "TROVA_TABLE_SCAN_GO_TCP_MM_S"}
     for attr, key in num.items():
         raw = str(env.get(key, "") or "").strip()
         if raw:
@@ -92,6 +96,8 @@ def settings(env: dict | None = None) -> Settings:
             raise ValueError("TROVA_TABLE_SCAN_PAN_DEG must be from,to,step with from <= to and step > 0")
         s.pan_deg = [round(a + i * step, 6) for i in range(int(math.floor((b - a) / step + 1e-9)) + 1)]
     s.joint_speed_deg_s = min(max(1.0, s.joint_speed_deg_s), 20.0)       # never faster than 20 deg/s
+    s.go_speed_deg_s = s.joint_speed_deg_s if s.go_speed_deg_s <= 0 else min(max(1.0, s.go_speed_deg_s), 80.0)
+    s.go_tcp_mm_s = max(0.0, min(s.go_tcp_mm_s, 250.0))                  # 250 = MotionGateway hard cap
     if not 150.0 <= s.hover_mm <= 600.0:
         raise ValueError("TROVA_TABLE_SCAN_HOVER_MM must be between 150 and 600")
     return s
@@ -277,7 +283,8 @@ def camera_over_pose(cal: FlangeCalibration, target, hover_mm: float, seed) -> n
     return q
 
 
-def level_over_pose(cal: FlangeCalibration, target, z_mm: float, seed, limits=None) -> np.ndarray:
+def level_over_pose(cal: FlangeCalibration, target, z_mm: float, seed, limits=None,
+                    margin_mm: float = 40.0) -> np.ndarray:
     """Camera over (or, if it cannot get there, pointing at) target with the TCP held at height z_mm: the
     image-centre ray goes through the object, the camera looks down as steeply as the arm allows, the TCP stays
     inside the workspace box. No descent: the height of the look pose is kept."""
@@ -289,7 +296,8 @@ def level_over_pose(cal: FlangeCalibration, target, z_mm: float, seed, limits=No
     def outside(p):
         if not box:
             return [0.0, 0.0]
-        return [max(0.0, lo + 40 - v) + max(0.0, v - hi + 40) for v, (lo, hi) in zip(p[:2], box)]  # joint paths bulge
+        return [max(0.0, lo + margin_mm - v) + max(0.0, v - hi + margin_mm)       # joint paths bulge
+                for v, (lo, hi) in zip(p[:2], box)]
 
     def residual(q):
         miss, along, cam = _aim(cal, dcam, target, q)
@@ -315,31 +323,248 @@ def level_over_pose(cal: FlangeCalibration, target, z_mm: float, seed, limits=No
     return _nearest([q for q in good if -float(cal.camera_pose(q)[2, 2]) >= steep - 0.02], ref)
 
 
-def plan_level_over(cal: FlangeCalibration, s: Settings, start_q, target_mm, limits=None) -> dict:
-    """'Mettiti sopra': turn J1 toward the object at constant height, then lean over it at the same TCP height."""
+# ---------------------------------------------------------------- never lower Z (moves after the 360)
+Z_TOL_MM = 2.0          # sampled TCP may sit at most this much under the kept height (joint-path sampling noise)
+
+
+def tcp_z(q) -> float:
+    return float(flange_pose(np.asarray(q, float))[2, 3])
+
+
+def min_z_on_path(qa, qb, n: int = 40) -> float:
+    """Lowest TCP Z along the straight joint-space path qa -> qb (what go_joints does)."""
+    qa, qb = np.asarray(qa, float), np.asarray(qb, float)
+    return min(tcp_z(qa + (qb - qa) * t) for t in np.linspace(0.0, 1.0, n))
+
+
+def _lift_to(q_ref, z_goal: float) -> np.ndarray:
+    """The joints nearest q_ref whose TCP is at least z_goal high (used for intermediate waypoints)."""
+    q_ref = np.asarray(q_ref, float)
+    if tcp_z(q_ref) >= z_goal:
+        return q_ref
+    from scipy.optimize import least_squares
+    hi = HI.copy()
+    hi[3] = min(hi[3], max(WRIST_FOLD_MAX_DEG, float(q_ref[3])))   # never fold the wrist further than it is
+    res = least_squares(lambda q: [tcp_z(q) - z_goal, *(0.02 * (q - q_ref))], np.clip(q_ref, LO, hi), bounds=(LO, hi))
+    return res.x
+
+
+def level_path(qa, qb, z_floor: float, max_waypoints: int = 32) -> list[np.ndarray]:
+    """Joint waypoints from qa to qb (qb last) whose sampled TCP never goes below z_floor - Z_TOL_MM.
+
+    A straight joint-space move between two poses at the same height sags in the middle (a few mm when leaning
+    over an object from P1). The intermediate poses are lifted back to z_floor + 1 mm, doubling their number until
+    every segment holds the height. Raises ValueError if qb itself is too low or no split holds it."""
+    qa, qb = np.asarray(qa, float), np.asarray(qb, float)
+    if tcp_z(qb) < z_floor - Z_TOL_MM:
+        raise ValueError(f"the target pose is at Z {tcp_z(qb):.0f} mm, below the kept height {z_floor:.0f} mm")
+    if min_z_on_path(qa, qb) >= z_floor - Z_TOL_MM:
+        return [qb]
+    n = 4
+    while n <= max_waypoints:
+        pts = [_lift_to(qa + (qb - qa) * i / n, z_floor + 1.0) for i in range(1, n)] + [qb]
+        prev, ok = qa, True
+        for p in pts:
+            if min_z_on_path(prev, p, 20) < z_floor - Z_TOL_MM:
+                ok = False
+                break
+            prev = p
+        if ok:
+            return pts
+        n *= 2
+    raise ValueError(f"no joint path keeps the TCP at Z >= {z_floor:.0f} mm")
+
+
+def near_j1(q, ref_q) -> np.ndarray:
+    """Same pose with J1 shifted by a multiple of 360 deg (J1 is the base turn: the arm ends up identical) so it is
+    the nearest to ref_q's J1 within the joint limits. A solver's J1 in -180..180 could otherwise send the base the
+    long way round (e.g. -268 -> +108 = 376 deg)."""
+    q = np.asarray(q, float).copy()
+    j1 = float(ref_q[0]) + _wrap(float(q[0]) - float(ref_q[0]))
+    if LO[0] <= j1 <= HI[0]:
+        q[0] = j1
+    return q
+
+
+def path_low_z(steps: list[dict], start_q) -> float:
+    prev, low = np.asarray(start_q, float), tcp_z(start_q)
+    for st in steps:
+        low = min(low, min_z_on_path(prev, st["q"]))
+        prev = np.asarray(st["q"], float)
+    return low
+
+
+def _level_steps(qa, qb, z_floor: float, label: str, fast: bool = True) -> list[dict]:
+    pts = level_path(qa, qb, z_floor)
+    return [{"label": label if i == len(pts) - 1 else f"{label} ({i + 1}/{len(pts)}, Z kept)", "q": q, "fast": fast}
+            for i, q in enumerate(pts)]
+
+
+def plan_level_over(cal: FlangeCalibration, s: Settings, start_q, target_mm, limits=None,
+                    z_floor: float | None = None, margin_mm: float = 40.0) -> dict:
+    """'Mettiti sopra': turn J1 toward the object at constant height, then lean over it at the same TCP height.
+    The TCP never goes below z_floor (default: the start height) on the way: a sagging joint move is split."""
     start_q = np.asarray(start_q, float)
     target = np.asarray(target_mm, float)
-    z = float(flange_pose(start_q)[2, 3])
-    final = level_over_pose(cal, target, z, start_q, limits)
+    z = tcp_z(start_q)
+    floor = z if z_floor is None else float(z_floor)
+    final = near_j1(level_over_pose(cal, target, z, start_q, limits, margin_mm), start_q)
     turn = start_q.copy()
     turn[0] = final[0]
-    steps = ([{"label": "turn toward the object", "q": turn}] if abs(final[0] - start_q[0]) > 0.5 else []) + \
-            [{"label": "over the object, same height", "q": final}]
-    problems = path_problems(cal, s, steps, start_q, limits)
-    prev, low = start_q, z
-    for st in steps:                                   # how much a joint-space move sags below the kept height
-        for t in np.linspace(0, 1, 30):
-            low = min(low, float(flange_pose(prev + (np.asarray(st["q"]) - prev) * t)[2, 3]))
-        prev = np.asarray(st["q"])
-    if low < z - 60:
-        problems.append(f"the move would dip {z - low:.0f} mm below the kept height")
+    steps, problems = [], []
+    if abs(final[0] - start_q[0]) > 0.5:          # J1 alone: the height does not change
+        steps.append({"label": "turn toward the object", "q": turn, "fast": True})
+    try:
+        steps += _level_steps(steps[-1]["q"] if steps else start_q, final, floor, "over the object, same height")
+    except ValueError as e:
+        steps.append({"label": "over the object, same height", "q": final, "fast": True})
+        problems.append(str(e))
+    problems += path_problems(cal, s, steps, start_q, limits)
+    low = path_low_z(steps, start_q)
+    if low < floor - Z_TOL_MM:
+        problems.append(f"the move would go {floor - low:.0f} mm below Z {floor:.0f} mm (never lower Z)")
     cam = cal.camera_pose(final)
     down = math.degrees(math.asin(min(1.0, max(-1.0, -float(cam[2, 2])))))
     return {"kind": "level_over", "target_mm": [round(float(v), 1) for v in target], "z_mm": round(z, 1),
-            "steps": steps, "problems": problems, "start_q": start_q.tolist(), "dip_mm": round(z - low, 1),
-            "camera_mm": [round(float(v), 1) for v in cam[:3, 3]], "look_down_deg": round(down, 1),
-            "above": down >= 75.0, "distance_mm": round(float(np.linalg.norm(cam[:3, 3] - target)), 1),
+            "steps": steps, "problems": problems, "start_q": start_q.tolist(), "dip_mm": round(max(0.0, z - low), 1),
+            "min_z_mm": round(low, 1), "camera_mm": [round(float(v), 1) for v in cam[:3, 3]],
+            "look_down_deg": round(down, 1), "above": down >= 75.0,
+            "distance_mm": round(float(np.linalg.norm(cam[:3, 3] - target)), 1),
             "tcp_mm": [round(float(v), 1) for v in flange_pose(final)[:3, 3]]}
+
+
+def _bearing_miss_deg(cal: FlangeCalibration, dcam: np.ndarray, target: np.ndarray, q) -> float:
+    """Horizontal angle between the image-centre ray and the direction camera -> target (deg, signed)."""
+    cam = cal.camera_pose(q)
+    d = cam[:3, :3] @ dcam
+    v = target - cam[:3, 3]
+    return math.degrees(math.atan2(d[0] * v[1] - d[1] * v[0], d[0] * v[0] + d[1] * v[1]))
+
+
+def point_j1(cal: FlangeCalibration, base_q, target, ref_j1: float | None = None) -> np.ndarray:
+    """base_q with only J1 changed so the camera faces target (image centre on the target's bearing). J1 is the
+    base turn: TCP height, tilt and wrist stay exactly as in base_q. The J1 nearest ref_j1 within the limits."""
+    base_q = np.asarray(base_q, float)
+    target = np.asarray(target, float)
+    dcam = _centre_dir_cam(cal)
+    ref = float(base_q[0] if ref_j1 is None else ref_j1)
+
+    def miss(j1):
+        q = base_q.copy()
+        q[0] = j1
+        return _bearing_miss_deg(cal, dcam, target, q)
+    grid = np.arange(ref - 180.0, ref + 180.0, 2.0)
+    vals = [abs(miss(j)) for j in grid]
+    j = float(grid[int(np.argmin(vals))])
+    for step in (1.0, 0.25, 0.05, 0.01):                 # refine around the best grid point
+        cands = [j + k * step for k in range(-4, 5)]
+        j = min(cands, key=lambda c: abs(miss(c)))
+    q = base_q.copy()
+    q[0] = j
+    q = near_j1(q, [ref])
+    if not LO[0] <= q[0] <= HI[0]:
+        raise ValueError("the base cannot turn toward that object within the J1 limits")
+    return q
+
+
+def plan_point(cal: FlangeCalibration, s: Settings, start_q, target_mm, look_q, limits=None) -> dict:
+    """'Too far to go above it': turn only the base so the camera faces the object, at the scan pose's height and
+    tilt. From P1 (or any pose with P1's J2..J5) this is J1 alone, so Z cannot change; from elsewhere the arm first
+    goes back to P1's shape without going lower."""
+    start_q = np.asarray(start_q, float)
+    target = np.asarray(target_mm, float)
+    base = np.asarray(look_q if look_q is not None else start_q, float)
+    same_shape = float(np.max(np.abs(start_q[1:] - base[1:]))) < 1.0
+    final = point_j1(cal, start_q if same_shape else base, target, ref_j1=float(start_q[0]))
+    steps, problems = [], []
+    if same_shape:
+        if abs(final[0] - start_q[0]) > 0.3:
+            steps.append({"label": "turn the base toward the object (Z unchanged)", "q": final, "fast": True})
+    else:
+        try:
+            steps = _level_steps(start_q, final, min(tcp_z(start_q), tcp_z(final)), "face the object from P1")
+        except ValueError as e:
+            steps = [{"label": "face the object from P1", "q": final, "fast": True}]
+            problems.append(str(e))
+    problems += path_problems(cal, s, steps, start_q, limits) if steps else []
+    cam = cal.camera_pose(final)
+    down = math.degrees(math.asin(min(1.0, max(-1.0, -float(cam[2, 2])))))
+    return {"kind": "point", "target_mm": [round(float(v), 1) for v in target], "z_mm": round(tcp_z(final), 1),
+            "steps": steps, "problems": problems, "start_q": start_q.tolist(), "above": False,
+            "bearing_miss_deg": round(abs(_bearing_miss_deg(cal, _centre_dir_cam(cal), target, final)), 2),
+            "min_z_mm": round(path_low_z(steps, start_q) if steps else tcp_z(start_q), 1),
+            "camera_mm": [round(float(v), 1) for v in cam[:3, 3]], "look_down_deg": round(down, 1),
+            "distance_mm": round(float(np.linalg.norm(cam[:3, 3] - target)), 1),
+            "tcp_mm": [round(float(v), 1) for v in flange_pose(final)[:3, 3]]}
+
+
+def plan_over_or_point(cal: FlangeCalibration, s: Settings, start_q, target_mm, look_q, limits=None) -> dict:
+    """The operator's rule (2026-11-05): never change Z; go right above the object if the arm can.
+    Too far to get above it: the TCP still goes as close as it can in X/Y at the same Z (to the workspace box edge,
+    minus a margin, or the arm's reach) and the camera points at it from there. The margin grows if a joint path
+    would bulge out of the box. Only if no such pose exists does the base alone turn toward it."""
+    reasons = []
+    for margin in (40.0, 80.0, 130.0):
+        try:
+            over = plan_level_over(cal, s, start_q, target_mm, limits, margin_mm=margin)
+        except ValueError as e:
+            reasons.append(str(e))
+            continue
+        if not over["problems"]:
+            over["approach"] = "above" if over["above"] else "closest"
+            over["box_margin_mm"] = margin
+            return over
+        reasons.append("; ".join(over["problems"]))
+    pt = plan_point(cal, s, start_q, target_mm, look_q, limits)
+    pt["approach"] = "point"
+    pt["why_point"] = reasons[-1] if reasons else None
+    return pt
+
+
+def plan_photo_over(cal: FlangeCalibration, s: Settings, start_q, obj: dict, limits=None) -> dict:
+    """'Trovami X' after a scan: back to the joints of the photo where X was seen best (same height: from P1 only
+    J1 differs), then lean over X at that height. If the arm cannot get over X from there, it stops at the photo
+    pose (X is in that picture). The TCP never goes below min(current height, photo height)."""
+    start_q = np.asarray(start_q, float)
+    photo = obj.get("photo") or {}
+    if not photo.get("joints"):
+        raise ValueError("this object has no photo pose: scan the table again")
+    photo_q = near_j1(photo["joints"], start_q)      # same physical pose, the short way round
+    floor = min(tcp_z(start_q), tcp_z(photo_q))
+    problems = []
+    steps = []
+    if float(np.max(np.abs(photo_q - start_q))) > 0.5:
+        try:
+            steps = _level_steps(start_q, photo_q, floor, f"back to the photo pose ({photo.get('view', '?')})")
+        except ValueError as e:
+            steps = [{"label": f"back to the photo pose ({photo.get('view', '?')})", "q": photo_q, "fast": True}]
+            problems.append(str(e))
+    if steps:
+        steps[-1]["capture"] = "photo_pose"         # picture from the photo pose: is X still where it was seen?
+    over, over_error = None, None
+    try:
+        over = plan_level_over(cal, s, photo_q, obj["centre_mm"], limits, z_floor=floor)
+        if over["problems"]:
+            over_error, over = "; ".join(over["problems"]), None
+    except ValueError as e:
+        over_error = str(e)
+    if over:
+        steps += over["steps"]
+    problems += path_problems(cal, s, [dict(st) for st in steps], start_q, limits) if steps else []
+    low = path_low_z(steps, start_q) if steps else tcp_z(start_q)
+    if low < floor - Z_TOL_MM:
+        problems.append(f"the move would go {floor - low:.0f} mm below Z {floor:.0f} mm (never lower Z)")
+    final_q = steps[-1]["q"] if steps else start_q
+    cam = cal.camera_pose(final_q)
+    down = math.degrees(math.asin(min(1.0, max(-1.0, -float(cam[2, 2])))))
+    return {"kind": "photo_over", "target_mm": [round(float(v), 1) for v in obj["centre_mm"]],
+            "z_mm": round(tcp_z(photo_q), 1), "floor_mm": round(floor, 1), "min_z_mm": round(low, 1),
+            "photo": {"view": photo.get("view"), "joints": [round(float(v), 2) for v in photo_q],
+                      "tcp_mm": photo.get("tcp_mm")},
+            "over": over is not None, "over_error": over_error, "above": bool(over and over["above"]),
+            "steps": steps, "problems": problems, "start_q": start_q.tolist(),
+            "camera_mm": [round(float(v), 1) for v in cam[:3, 3]], "look_down_deg": round(down, 1),
+            "tcp_mm": [round(float(v), 1) for v in flange_pose(final_q)[:3, 3]]}
 
 
 # ---------------------------------------------------------------- path checks
@@ -414,11 +639,21 @@ def plan_scan(cal: FlangeCalibration, s: Settings, start_q, limits=None, look_q=
         views.reverse()                          # start from the side nearer to where J1 is now
     lift = q_look.copy()
     lift[0] = start_q[0]                         # rise and tilt in place first; the turn comes after
-    steps = ([{"label": "rise and tilt", "q": lift, "capture": False}]
-             if float(np.max(np.abs(lift - start_q))) > 0.5 else []) + views   # already there: no empty move
+    rise, problems = [], []
+    if float(np.max(np.abs(lift - start_q))) > 0.5:          # already there: no empty move
+        # From P0 (rest, low) this only rises. From anywhere else (e.g. leaning over an object) it goes straight
+        # to P1 and never below the lower of the two heights.
+        try:
+            rise = [{**st, "capture": False, "fast": False}
+                    for st in _level_steps(start_q, lift, min(tcp_z(start_q), tcp_z(lift)), "rise and tilt to P1")]
+        except ValueError as e:
+            rise = [{"label": "rise and tilt to P1", "q": lift, "capture": False}]
+            problems.append(str(e))
+    steps = rise + views
     if look_q is not None and float(np.max(np.abs(np.asarray(steps[-1]["q"]) - q_look))) > 0.5:
-        steps.append({"label": "back to the look pose", "q": q_look.copy(), "capture": False})
-    problems = path_problems(cal, s, steps, start_q, limits)
+        # after the 360: J1 only (same height), at the faster post-scan speed
+        steps.append({"label": "back to P1", "q": q_look.copy(), "capture": False, "fast": True})
+    problems += path_problems(cal, s, steps, start_q, limits)
     return {"kind": "table_scan", "z_mm": round(float(flange_pose(q_look)[2, 3]), 1) if look_q is not None else s.z_mm,
             "aim_mm": look["aim_mm"], "view": look["view"], "center_deg": center,
             "center_from": "taught pose" if look_q is not None else ("setting" if s.center_deg is not None
@@ -473,6 +708,12 @@ def merge(sightings: list[dict], radius_mm: float) -> list[dict]:
     nearest the image centre) gives the name and the close-up."""
     ordered = sorted(sightings, key=lambda o: (o["partial"], o["name"].lower() in UNKNOWN, o["off_centre_px"]))
     objects: list[dict] = []
+
+    def photo(o: dict) -> dict:
+        """The arm coordinates the picture was taken from: going back to these joints shows the object again."""
+        return {"view": o["view"], "joints": o.get("q"), "tcp_mm": o.get("tcp_mm"), "image": o["image"],
+                "box": o["box"], "partial": o["partial"]}
+
     for o in ordered:
         xy = np.asarray(o["centre_mm"][:2])
         hit = next((m for m in objects if np.linalg.norm(np.asarray(m["centre_mm"][:2]) - xy) < radius_mm), None)
@@ -481,11 +722,12 @@ def merge(sightings: list[dict], radius_mm: float) -> list[dict]:
                             "note": o.get("note", ""), "aliases": [], "authoritative": o.get("authoritative", False),
                             "centre_mm": list(o["centre_mm"]), "width_mm": o["width_mm"], "partial": o["partial"],
                             "views": [o["view"]], "best": {k: o[k] for k in ("view", "box", "image", "support_pixel")},
-                            "_sightings": [o]})
+                            "photo": photo(o), "photos": [photo(o)], "_sightings": [o]})
             continue
         hit["_sightings"].append(o)
         if o["view"] not in hit["views"]:
             hit["views"].append(o["view"])
+            hit["photos"].append(photo(o))
         if o["name"].lower() not in UNKNOWN and o["name"] != hit["name"] and o["name"] not in hit["aliases"]:
             hit["aliases"].append(o["name"])
         full = [x for x in hit["_sightings"] if not x["partial"]] or hit["_sightings"]

@@ -12,6 +12,10 @@ const TrovaVoice = (() => {
   let lastStop = 0, userLine = '', botLine = '', buf = [], bufLen = 0;
   let proposal = null, confirmationHeard = false, serialTools = Promise.resolve();
   let tableProposal = null;                 // table scan: camera-above move awaiting an explicit spoken yes
+  function holdTableProposal(d) {
+    tableProposal = d && d.proposal_id && d.approach === 'awaiting_confirmation'
+      ? {id: d.proposal_id, expires_at: d.expires_at || Date.now() / 1000 + 55} : null;
+  }
   let selectionQuestion = false;
   let tourPending = false;
 
@@ -52,6 +56,11 @@ const TrovaVoice = (() => {
   const tools = {
     async find_object({description}) {
       tourPending = false;
+      // After a table scan the arm camera's object map is the source: "trovami X" goes over X or points at it.
+      try {
+        const ts = await (await fetch('/api/table_scan')).json();
+        if (ts && (ts.objects || []).length) return tools.find_on_table({description});
+      } catch (e) {}
       const d = await api('/api/find', {text: description, move: 'false'});
       if (d.error) return {error: d.error};
       h.onFind && h.onFind(d);
@@ -198,17 +207,21 @@ const TrovaVoice = (() => {
       return {status: 'error', spoken_message: 'The table scan took too long.'};
     },
     async find_on_table({description}) {
-      tableProposal = null;
+      tableProposal = null; confirmationHeard = false;
       const d = await api('/api/table_scan/find', {text: description}, true); h.onRefresh && h.onRefresh();
       if (d.error) return {status: 'error', spoken_message: d.error};
+      holdTableProposal(d);       // the move is planned at once: the spoken "sì" must be able to confirm it
       return {status: d.status, spoken_message: d.spoken_message, question: d.question, candidates: d.candidates,
-              object_id: d.object_id};
+              object_id: d.object_id, approach: d.approach, proposal_id: d.proposal_id};
     },
     async choose_table_object({object_id, answer}) {
-      tableProposal = null;
+      tableProposal = null; confirmationHeard = false;
       const body = {}; if (object_id != null && object_id !== '') body.object_id = Number(object_id); if (answer) body.answer = answer;
       const d = await api('/api/table_scan/choose', body, true); h.onRefresh && h.onRefresh();
-      return d.error ? {status: 'error', spoken_message: d.error} : {status: d.status, object_id: d.object_id, spoken_message: d.spoken_message};
+      if (d.error) return {status: 'error', spoken_message: d.error};
+      holdTableProposal(d);
+      return {status: d.status, object_id: d.object_id, spoken_message: d.spoken_message, approach: d.approach,
+              proposal_id: d.proposal_id};
     },
     async move_camera_above({object_id} = {}) {
       confirmationHeard = false;

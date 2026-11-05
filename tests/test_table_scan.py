@@ -219,3 +219,23 @@ def test_live_inventory_of_an_empty_view_reports_its_mode():
     assert not grok.mock
     inv = describe(grok, np.zeros((90, 160, 3), np.uint8), [], "it")
     assert inv.grok_mode == "live" and inv.items == {}
+
+
+def test_find_returns_to_the_photo_pose_then_over_it_never_lower_z(cal):
+    """Operator's P1 (2026-11-05): 'trovami X' goes back to the joints of X's photo (J1 the short way round), then
+    leans over X; the sampled TCP never drops below the scan height, and the stored photo pose is used as is."""
+    p1 = np.array([2.45, -30.22, -49.65, 119.24, 221.76])
+    photo_q = p1.copy()
+    photo_q[0] -= 270.0                                   # the 360 photo at -270 deg: same pose as J1 = +92.4
+    target = cal.pixel_to_table(cal.width * 0.4, cal.height * 0.7, photo_q)
+    obj = {"centre_mm": list(target), "photo": {"view": "view -270 deg", "joints": list(photo_q), "tcp_mm": None}}
+    plan = ts.plan_photo_over(cal, ts.settings({}), p1, obj, Limits.parse(LIMITS))
+    assert not plan["problems"] and plan["over"]
+    assert abs(plan["steps"][0]["q"][0] - 92.45) < 0.01 and plan["steps"][0]["capture"] == "photo_pose"
+    assert np.allclose(plan["steps"][0]["q"][1:], p1[1:])           # only the base turns back to the photo
+    z = ts.tcp_z(p1)
+    assert plan["min_z_mm"] >= z - ts.Z_TOL_MM and ts.path_low_z(plan["steps"], p1) >= z - ts.Z_TOL_MM
+    assert all(abs(b["q"][0] - a["q"][0]) < 30 for a, b in zip(plan["steps"], plan["steps"][1:]))
+    assert all(s.get("fast") for s in plan["steps"])                 # post-scan speed
+    with pytest.raises(ValueError):
+        ts.level_path(p1, np.r_[p1[0], 0, 0, 0, 0], z)               # rest pose is far below: refused
