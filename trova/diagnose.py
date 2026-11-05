@@ -43,6 +43,7 @@ def diagnose(
     check_recorded_fk=False,
     recorded_plan=False,
     safety_file=None,
+    workspace_candidate=None,
     gateway=None,
     vision=None,
     orbits=None,
@@ -67,6 +68,23 @@ def diagnose(
         raise ValueError(
             "Diagnostics require a gateway with no attached motion driver and no hardware mode"
         )
+    candidate_workspace = None
+    if workspace_candidate:
+        # Deliberately separate requested bounds from operator-measured safety evidence.
+        from .arm import Limits
+        from .motion import HARD_SPEED_MM_S, HARD_JOG_MAX_MM
+        candidate_workspace = json.loads(Path(workspace_candidate).read_text())
+        if gateway.arm is not None or gateway.mode != 'dry_run' or candidate_workspace.get('dry_run_only') is not True:
+            raise ValueError('Workspace candidates require a driverless dry-run gateway and dry_run_only: true')
+        if set(candidate_workspace)-{'limits','speed_mm_s','jog_max_mm','dry_run_only','measurement_note'}:
+            raise ValueError('Workspace candidate contains unsupported safety/authorization fields')
+        limits = Limits.parse(candidate_workspace['limits'])
+        if limits is None or not np.isfinite([*limits.x,*limits.y,*limits.z]).all() or any(lo>=hi for lo,hi in [limits.x,limits.y,limits.z]):
+            raise ValueError('Workspace candidate needs finite increasing bounds')
+        speed, jog = float(candidate_workspace['speed_mm_s']),float(candidate_workspace['jog_max_mm'])
+        if limits is None or not np.isfinite([speed,jog]).all() or not 0 < speed <= HARD_SPEED_MM_S or not 3 <= jog <= HARD_JOG_MAX_MM:
+            raise ValueError('Invalid diagnostic workspace limits/speed/jog')
+        gateway.limits, gateway.max_speed_mm_s, gateway.jog_max_mm = limits,speed,jog
     stages = []
 
     def record(
@@ -88,6 +106,11 @@ def diagnose(
             }
         )
 
+    if candidate_workspace is not None:
+        record('workspace_candidate','NOT_VERIFIED','trova.diagnose.diagnose',
+               'independently measured and operator-qualified physical envelope',candidate_workspace,
+               'Requested bounds apply only to this driverless dry-run process; they are not physical safety evidence.',
+               'physical_measurement','Measure/qualify the envelope before changing the operating workspace.')
     if configured_safety is not None:
         record(
             "operator_safety_configuration",
@@ -304,8 +327,36 @@ def diagnose(
         {
             "providers": [p.get("provider") for p in report.get("providers", [])],
             "active": report.get("active_provider"),
+            "candidate": str(vision.historical.path) if vision.historical else None,
+            "sha256": vision.historical.digest if vision.historical else None,
         },
     )
+    if vision.historical:
+        from .localization import station_binding_errors
+        errors = station_binding_errors(vision.historical.station(),vision.historical.digest)
+        record('station_binding','NOT_CONFIGURED' if errors else 'PASS',
+               'trova.localization.station_binding_errors',vision.historical.station_template(),
+               vision.historical.station(),'; '.join(errors),'physical_measurement' if errors else None,
+               'GET /api/vision/provider/station, enter independent measured fields, then POST with named operator confirmation; references and qualification remain separate.')
+    if candidate_workspace is not None and robot.get('joints') and vision.historical:
+        from .scan3d.robot_geometry import RobotGeometry
+        from .scan3d.orbit_math import fk_frames
+        geometry = RobotGeometry.load()
+        cal = vision.historical.cal
+        world = geometry.world(fk_frames(robot['joints']),geometry.head_turn(cal.T_fc[:3,2]))
+        extents = {name:{'min_mm':(centers-radii[:,None]).min(0).tolist(),
+                         'max_mm':(centers+radii[:,None]).max(0).tolist()}
+                   for name,(centers,radii) in world.items()}
+        fits = {name: all(gateway.limits.check(*point) is None for point in [row['min_mm'],row['max_mm']])
+                for name,row in extents.items()}
+        tcp_fits = bool(robot.get('xyz_mm') and gateway.limits.check(*robot['xyz_mm']) is None)
+        record('current_workspace_geometry','NOT_VERIFIED' if all(fits.values()) and tcp_fits else 'BLOCKED',
+               'trova.scan3d.robot_geometry.RobotGeometry.world',
+               'measured body geometry within qualified operating envelope',
+               {'tcp_inside_candidate':tcp_fits,'model_sphere_extents':extents,'model_inside_candidate':fits,
+                'geometry_is_independently_qualified':False,'tool_geometry_configured':bool(orbits.settings.tool_spheres_tcp_mm)},
+               'TCP inclusion does not establish camera/head/tool or complete robot-body clearance. Base/link envelopes are diagnostic; gateway applies workspace bounds to TCP/head/camera/tool, not the fixed robot base.',
+               'physical_measurement','Review body extents and define/measure permitted body regions; do not lower limits just to fit the TCP.')
     compatible = vision.is_compatible(profile, robot)
     record(
         "calibration_compatibility",
@@ -545,6 +596,11 @@ def diagnose(
         ),
     ]
     for name, configured, module, actual, action in safety_inputs:
+        if name == 'workspace_limits' and candidate_workspace is not None:
+            record(name,'NOT_VERIFIED',module,'independently measured physical operating envelope',actual,
+                   'Requested Z=100 candidate is configured for dry-run only; physical qualification is absent.',
+                   'physical_measurement',action)
+            continue
         record(
             name,
             "PASS" if configured else "NOT_CONFIGURED",
@@ -776,6 +832,7 @@ def main():
         type=Path,
         help="Existing operator-measured safety JSON; applied only to the driverless dry-run gateway",
     )
+    parser.add_argument("--workspace-candidate", type=Path, help="Unmeasured limits for driverless dry-run only")
     parser.add_argument("--text", default="mouse rosso")
     parser.add_argument("--pixel", type=float, nargs=2)
     parser.add_argument("--height-mm", type=float)
@@ -822,6 +879,7 @@ def main():
             height_uncertainty_mm=args.height_uncertainty_mm,
             check_recorded_fk=args.check_recorded_fk,
             safety_file=args.safety,
+            workspace_candidate=args.workspace_candidate,
             recorded_plan=args.recorded_plan,
             output=args.output,
         )

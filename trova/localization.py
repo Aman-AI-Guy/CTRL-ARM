@@ -18,6 +18,38 @@ from .scan3d.evidence import flange_to_tool_camera, sha256
 from .scan3d.flange import FlangeCalibration, flange_pose
 
 
+STATION_TEXT_FIELDS = ("camera_identity", "optical_profile", "mount_id", "robot_base_id",
+                       "table_id", "measurement_note", "camera_host")
+
+
+def station_binding_errors(station, digest):
+    errors = []
+    if not isinstance(station, dict):
+        return ["station: expected a JSON object"]
+    if station.get("provider") != "historical_flange":
+        errors.append("provider: select historical_flange (not hardware activation)")
+    if station.get("calibration_sha256") != digest:
+        errors.append("calibration_sha256: must match the selected candidate")
+    for name in STATION_TEXT_FIELDS:
+        if not isinstance(station.get(name), str) or not station[name].strip():
+            errors.append(f"{name}: independently identify/measure this field")
+    if station.get("units") != "mm" or station.get("frame") != "robot_base":
+        errors.append("units/frame: expected mm / robot_base")
+    try:
+        finite(station.get("tcp_offset_mm"), 6)
+    except (ValueError, TypeError):
+        errors.append("tcp_offset_mm: expected [x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg] (six finite numbers); XYZ alone is insufficient, no zero offset is assumed")
+    plane = station.get("table_plane")
+    try:
+        finite([plane[k] for k in ("a", "b", "c")], 3)
+        residual = float(plane["residual_mm"])
+        if not np.isfinite(residual) or not 0 <= residual <= 5:
+            raise ValueError()
+    except (ValueError, TypeError, KeyError):
+        errors.append("table_plane: independently measured a,b,c for z=a*x+b*y+c and residual_mm within 0..5; saved fit is not current measurement")
+    return errors
+
+
 class CalibrationProvider(Protocol):
     def assess(self, image_size=None) -> dict: ...
     def localize(self, robot, pixel, image_size) -> dict: ...
@@ -214,6 +246,26 @@ class HistoricalProvider(ProviderOperations):
             raise ValueError("Physical station binding must be a JSON object")
         return value
 
+    def station_template(self):
+        return dict(provider="historical_flange", calibration_sha256=self.digest,
+                    **{name: None for name in STATION_TEXT_FIELDS},
+                    units="mm", frame="robot_base", tcp_offset_mm=None, table_plane=None)
+
+    def configure_station(self, values, *, operator, confirm):
+        if not confirm or not operator.strip():
+            raise ValueError("Named operator confirmation of independent station measurements is required")
+        allowed = set(self.station_template()) | {"recorded_by"}
+        if set(values) - allowed:
+            raise ValueError("Unknown station fields: " + ", ".join(sorted(set(values)-allowed)))
+        errors = station_binding_errors(values, self.digest)
+        if errors:
+            raise ValueError("; ".join(errors))
+        values = dict(values, recorded_by=operator.strip())
+        self.directory.mkdir(parents=True, exist_ok=True)
+        (self.directory / "calibration_station.json").write_text(json.dumps(values,indent=2)+"\n")
+        return {"station":values,"metric_permitted":False,"hardware_authorized":False,
+                "reason":"Station binding saved; independent image references and separate qualification approval are still required."}
+
     def references(self):
         path = self.directory / "calibration_references.jsonl"
         rows = (
@@ -296,6 +348,9 @@ class HistoricalProvider(ProviderOperations):
                 reasons.append(
                     "Current camera endpoint does not match the operator physical binding."
                 )
+            binding_errors = station_binding_errors(station, self.digest)
+            if binding_errors:
+                raise ValueError("; ".join(binding_errors))
             tcp = finite(station.get("tcp_offset_mm"), 6)
             stationary(self.robot)
             expected = flange_pose(self.robot["joints"]) @ tool_pose_matrix(tcp)
@@ -952,6 +1007,17 @@ def make_router(store, directory, candidate=None):
         import os
 
         candidate = os.getenv("TROVA_CALIBRATION_CANDIDATE") or None
+    if candidate is None:
+        manifest = Path(__file__).resolve().parents[1] / "config/calibration_candidate.json"
+        if manifest.exists():
+            try:
+                selection = json.loads(manifest.read_text())
+                candidate = manifest.parent.parent / selection["candidate"]
+                if sha256(candidate) != selection["sha256"]:
+                    raise ValueError("Primary candidate SHA-256 differs from the explicitly selected artifact")
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                store.candidate_error = f"Explicit calibration candidate unavailable: {exc}"
+                return CalibrationRouter(store)
     if candidate is None:
         from .scan3d.evidence import workspace
 

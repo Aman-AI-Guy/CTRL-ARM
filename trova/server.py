@@ -976,6 +976,13 @@ class ProviderQualification(BaseModel):
     confirm: bool = False
 
 
+class ProviderStation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operator: str
+    confirm: bool = False
+    station: dict
+
+
 class ProviderReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
     snapshot_id: str
@@ -1911,6 +1918,37 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     def api_providers():
         st.vision.set_context(st.source.info(), st.robot_telemetry())
         return st.vision.assess(st.frame_size)
+
+    @app.get('/api/vision/provider/station')
+    def api_provider_station_get():
+        from .localization import station_binding_errors
+        historical = st.vision.historical
+        if historical is None:
+            raise HTTPException(400, 'No imported candidate is available')
+        current = historical.station()
+        return {'candidate':str(historical.path), 'calibration_sha256':historical.digest,
+                'station':current,'template':historical.station_template(),
+                'errors':station_binding_errors(current,historical.digest),
+                'tcp_order':['x_mm','y_mm','z_mm','roll_deg','pitch_deg','yaw_deg'],
+                'metric_permitted':False,'hardware_authorized':False}
+
+    @app.post('/api/vision/provider/station')
+    def api_provider_station_set(body: ProviderStation):
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409,'An agent task is running')
+        try:
+            historical = st.vision.historical
+            if historical is None:
+                raise HTTPException(400,'No imported candidate is available')
+            try:
+                result = historical.configure_station(body.station,operator=body.operator,confirm=body.confirm)
+            except (ValueError,TypeError,OSError) as exc:
+                raise HTTPException(400,str(exc)) from None
+            st.invalidate_pending('Station binding changed; recapture independent references and requalify.')
+            st.audit.event('calibration_station',operator=body.operator,calibration_sha256=historical.digest,motion_allowed=False)
+            return result
+        finally:
+            st.agent_lock.release()
 
     @app.post('/api/vision/provider/qualify')
     def api_provider_qualify(body: ProviderQualification):

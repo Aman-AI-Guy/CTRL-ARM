@@ -1,0 +1,7 @@
+{
+  "limits": "-500,500,-500,500,100,1000",
+  "speed_mm_s": 20,
+  "jog_max_mm": 300,
+  "dry_run_only": true,
+  "measurement_note": "Requested M6.1 candidate only; physical safety qualification has not been established."
+}
