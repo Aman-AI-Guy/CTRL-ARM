@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from .flange import FlangeCalibration, flange_pose
@@ -23,7 +22,13 @@ def workspace(path=None):
             root /= 'calibration'
     else:
         repository = Path(__file__).resolve().parents[2]
-        candidates = sorted(repository.glob('*/calibration/calib/pix2robot.py'))
+        # Preserve the original M5 evidence bundle when both generations exist.
+        # Newer optical fits are explicit candidates, never a silent replacement.
+        known = [repository/'Test_3d_live_video/calibration/calib/pix2robot.py',
+                 repository/'Test_3d_live_video_old/calibration/calib/pix2robot.py',
+                 repository/'Test 3d live video/calib/pix2robot.py']
+        preferred = [path for path in known if path.is_file()]
+        candidates = preferred[:1] if preferred else sorted(repository.glob('*/calibration/calib/pix2robot.py'))
         if len(candidates) != 1:
             raise FileNotFoundError('Retained 3D workspace not found unambiguously; set TROVA_3D_WORKSPACE.')
         root = candidates[0].parents[1]
@@ -133,6 +138,19 @@ def calibration_replay(root=None):
             'evaluation_limit': 'Original half-split procedure initializes from the full fit and uses full-fit marker planes; this is not independent ruler validation.'}
 
 
+def calibration_candidates(root=None):
+    """Discover actual supplied calibration versions without selecting or activating one."""
+    root=workspace(root)
+    result=[]
+    for path in sorted((root/'calib').rglob('camera_robot.json')):
+        data=json.loads(path.read_text())
+        result.append({'path':str(path),'sha256':sha256(path),'image_size':data['image_size'],
+                       'quality':data.get('quality'), 'table_plane':data.get('table_plane'),
+                       'ruler_constraints_used_in_fit':len(data.get('ruler',[])),
+                       'independent_current_qualification':False,'automatically_selected':False})
+    return result
+
+
 def catalog(root=None):
     root = workspace(root)
     datasets = []
@@ -142,4 +160,5 @@ def catalog(root=None):
         datasets.append({'id': folder.name, 'images': len(images), 'provenance': 'recorded',
                          'capture_sha256': sha256(capture)})
     return {'workspace': str(root), 'datasets': datasets, 'calibration': calibration_report(root=root),
+            'calibration_candidates':calibration_candidates(root),
             'originals_read_only': True, 'historical_results_are_not_integration_measurements': True}

@@ -42,6 +42,10 @@ def receipt_error(host, task, proposal_id):
         return "No matching validated motion proposal. Request a new plan."
     if time.time() >= pending["expires_at"]:
         return "The motion proposal expired. Request a new plan."
+    if getattr(host,'requires_fresh_observation',False):
+        taken=task.get('scene_received_at')
+        if taken is None or not 0 <= time.time()-float(taken) <= 30:
+            return 'The source image expired; request a new observation and proposal.'
     if host.cancel.is_set():
         return "STOP or cancellation invalidated this proposal."
     if not host.vision.assess(host.image_size).get("valid"):
@@ -108,6 +112,8 @@ def feedback(result, text=""):
                    "calibrazione che permette di determinarne la posizione fisica." if it else
                    f"I selected {name}, but cannot move above it because the calibration needed to determine "
                    "its physical position is missing.")
+        if reason:
+            message += " " + reason
     elif state == "hardware_authorization_missing":
         message = ("La traiettoria è validata, ma manca l'autorizzazione hardware. Il robot non si è mosso." if it else
                    "The trajectory is validated, but hardware authorization is missing. The robot has not moved.")

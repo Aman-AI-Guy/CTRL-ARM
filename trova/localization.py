@@ -13,7 +13,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .geom import MAX_RMS_PX, VisionStore, pose_changed, tool_pose_matrix
+from .geom import VisionStore, pose_changed, tool_pose_matrix
 from .scan3d.evidence import flange_to_tool_camera, sha256
 from .scan3d.flange import FlangeCalibration, flange_pose
 
@@ -99,7 +99,18 @@ class CurrentProvider(ProviderOperations):
     def pixel_to_base(
         self, robot, pixel, image_size, *, height_mm=0, height_uncertainty_mm=0
     ):
+        height = float(height_mm)
+        height_error = float(height_uncertainty_mm)
+        if (
+            not np.isfinite([height, height_error]).all()
+            or height < 0
+            or height_error < 0
+        ):
+            raise ValueError(
+                "Measured height and uncertainty must be finite and nonnegative"
+            )
         result = self.store.localize(robot.get("pose6"), *pixel, image_size)
+        result["reference_height_mm"] = height
         if not result.get("ok") or not height_mm:
             return result
         from .geom import camera_pose_matrix, pixel_ray, intersect_ray_plane
@@ -745,6 +756,7 @@ class CalibrationRouter(ProviderOperations):
         if not reference or reference.get("kind") not in {
             "support_plane_point",
             "known_height_point",
+            "measured_base_point",
         }:
             return {
                 "ok": False,
@@ -771,6 +783,67 @@ class CalibrationRouter(ProviderOperations):
                 "ok": False,
                 "point_mm": None,
                 "reason": "Geometric reference is outside the selected object region.",
+            }
+        if reference["kind"] == "measured_base_point":
+            point = finite(reference.get("point_mm"), 3)
+            uncertainty = float(reference.get("point_uncertainty_mm", float("nan")))
+            if (
+                not np.isfinite(uncertainty)
+                or not 0 <= uncertainty <= 5
+                or not reference.get("measurement_note")
+            ):
+                raise ValueError(
+                    "A measured base point needs independent measurement provenance and uncertainty"
+                )
+            projected = self.base_to_pixel(point, robot, image_size)
+            if not (
+                box[0] <= projected[0] <= box[2] and box[1] <= projected[1] <= box[3]
+            ):
+                return {
+                    "ok": False,
+                    "point_mm": None,
+                    "reason": "The measured base point does not project into the selected image region.",
+                }
+            if report["active_provider"] == "historical_flange":
+                lo, hi = np.asarray(report["validation"]["qualified_xy_mm"])
+                if (point[:2] < lo).any() or (point[:2] > hi).any():
+                    return {
+                        "ok": False,
+                        "point_mm": None,
+                        "reason": "Measured point leaves the qualified metric domain.",
+                    }
+            plane = self.table
+            normal = np.asarray(plane["normal"], float)
+            origin = np.asarray(plane["point_mm"], float)
+            plane_z = (
+                origin[2]
+                - (
+                    normal[0] * (point[0] - origin[0])
+                    + normal[1] * (point[1] - origin[1])
+                )
+                / normal[2]
+            )
+            return {
+                "ok": True,
+                "point_mm": point.tolist(),
+                "uncertainty_mm": uncertainty,
+                "uncertainty_kind": "independent_operator_measurement",
+                "reference_kind": "measured_base_point",
+                "reference_height_mm": float(point[2] - plane_z),
+                "object_height_measured": False,
+                "object_center_mm": None,
+                "object_id": selected.get("track_id"),
+                "source_image": reference.get("snapshot_id"),
+                "image_region": selected.get("box"),
+                "geometric_reference": dict(reference),
+                "robot_joints_deg": list(robot["joints"]),
+                "frame": "robot_base",
+                "units": "mm",
+                "provider": report["active_provider"],
+                "calibration_valid": True,
+                "verified_tool_position": False,
+                "rejection_reasons": [],
+                "reason": "Independently measured base point corroborated against the selected calibrated image region.",
             }
         if report["active_provider"] == "historical_flange":
             provider = self.historical
@@ -799,6 +872,7 @@ class CalibrationRouter(ProviderOperations):
             "frame": "robot_base",
             "units": "mm",
             "object_height_measured": reference["kind"] == "known_height_point",
+            "reference_height_mm": height,
             "provider": report["active_provider"],
             "calibration_valid": bool(report["valid"]),
             "rejection_reasons": [] if result.get("ok") else [result.get("reason")],
@@ -820,6 +894,23 @@ class CalibrationRouter(ProviderOperations):
         return {"ok": False, "point_mm": None, "reason": "; ".join(report["reasons"])}
 
     localize_region = localize_observation
+
+    def configuration_compatible(self, joints):
+        q = finite(joints, 5)
+        if self.current.assess(self.image_size)["valid"]:
+            return True
+        if not self.historical or not self.historical.approval_matches(
+            self.historical.qualification()
+        ):
+            return False
+        bound = self.historical.binding_hash(self.historical.station())
+        rows = [
+            r for r in self.historical.references() if r.get("binding_sha256") == bound
+        ]
+        if not rows:
+            return False
+        qs = np.asarray([r["robot"]["joints"] for r in rows], float)
+        return bool((q >= qs.min(0) - 0.1).all() and (q <= qs.max(0) + 0.1).all())
 
     def camera_pose(self, robot):
         from .geom import camera_pose_matrix
@@ -857,6 +948,10 @@ class CalibrationRouter(ProviderOperations):
 
 
 def make_router(store, directory, candidate=None):
+    if candidate is None:
+        import os
+
+        candidate = os.getenv("TROVA_CALIBRATION_CANDIDATE") or None
     if candidate is None:
         from .scan3d.evidence import workspace
 

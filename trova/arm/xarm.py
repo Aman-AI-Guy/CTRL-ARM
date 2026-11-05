@@ -68,6 +68,16 @@ class XArmBackend(CartesianBackend):
         if code != 0:
             raise RuntimeError(f"xArm set_servo_angle returned code {code} (error {self.arm.error_code})")
 
+    def read_status(self):
+        """Read controller state/mode without clearing or enabling anything."""
+        with self.lock:
+            state_code, state = self.arm.get_state()
+            error_code, errors = self.arm.get_err_warn_code(show=False)
+            return {'state_code': state if state_code == 0 else None,
+                    'error_code': errors[0] if error_code == 0 and errors else None,
+                    'warn_code': errors[1] if error_code == 0 and len(errors)>1 else None,
+                    'mode': getattr(self.arm, 'mode', None), 'moving': bool(self.arm.get_is_moving())}
+
     def fk_mm(self, q):
         with self.lock:
             code, pose = self.arm.get_forward_kinematics(list(q))

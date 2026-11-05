@@ -170,6 +170,8 @@ def qualification_blockers(host, task) -> list[str]:
             reasons.append("set TROVA_ARM_LIMITS to the measured workspace box xmin,xmax,ymin,ymax,zmin,zmax")
         if gateway.camera is None:
             reasons.append("set TROVA_CAMERA_BODY_MM to the measured camera offset and radius; autonomous approach stays blocked")
+    if task.get('scene_occluded'):
+        reasons.append('The fresh scene is occluded by a hand/arm or a large border object; recapture after clearance.')
     if not task.get("authoritative"):
         mode = task.get("grok_mode") or "not live"
         reasons.append(f"recognition is {mode}, so it cannot authorize motion")
@@ -191,6 +193,12 @@ def qualification_blockers(host, task) -> list[str]:
         reasons.append("the robot is still moving")
     if robot.get("error_code"):
         reasons.append(f"controller error code {robot.get('error_code')}")
+    if robot.get('state_code') in (3,4,5):
+        reasons.append(f"controller state {robot['state_code']} is paused/stopped/MODE_CHANGED; the operator must establish readiness")
+    if robot.get('warn_code'):
+        reasons.append(f"controller warning code {robot['warn_code']} requires operator review")
+    if robot.get('mode') is not None and robot.get('mode') != 0:
+        reasons.append('controller is not in position mode; the operator must configure it')
     if gateway is not None and gateway.mode == "hardware" and not task.get("planned_joints") and not task.get("ik_verified"):
         reasons.append("controller inverse kinematics has not confirmed the observation pose")
     if gateway is not None and gateway.mode == 'hardware' and not task.get('planned_joints'):
@@ -403,8 +411,10 @@ def skill_inspect(host, task, argument: str) -> dict:
     task["grok_mode"] = snap.get("grok_mode")
     task["authoritative"] = snap.get("grok_mode") == "live"
     task["snapshot_id"] = snap.get("id")
+    task['scene_received_at'] = snap.get('image_received_at')
     task["snapshot_pose"] = snap.get("pose")
     task["summary"] = snap.get("summary")
+    task['scene_occluded'] = bool(snap.get('occluded'))
     host.image_size = [snap.get("width") or host.image_size[0], snap.get("height") or host.image_size[1]]
     _calibration_flag(host, task)
     task["phase"] = "inspected"
@@ -428,6 +438,13 @@ def skill_inspect(host, task, argument: str) -> dict:
                     chosen['geometric_reference'] = {**reference, 'snapshot_id': snap.get('id'),
                         'pixel': [new_box[0]+(pixel[0]-old_box[0])*nw/ow, new_box[1]+(pixel[1]-old_box[1])*nh/oh],
                         'provenance': 'visual_same_view_association_of_operator_support_point'}
+        elif (reference and chosen.get('association') == 'geometric' and chosen.get('anchor_pixel')
+              and (getattr(getattr(host,'gateway',None),'simulated',False)
+                   or (getattr(getattr(host,'orbits',None),'settings',None) and
+                       (host.orbits.settings.motion_qualification or {}).get('static_object_assessed')))):
+            chosen['geometric_reference'] = {**reference, 'snapshot_id':snap.get('id'),
+                    'pixel':chosen['anchor_pixel'], 'provenance':'qualified_static_anchor_reprojection',
+                    'independently_remeasured':False}
         task["selected"] = chosen
         task["location"] = None
         task["phase"] = "selected"
@@ -504,6 +521,10 @@ def skill_locate(host, task, argument: str) -> dict:
         task["phase"] = "blocked"
         task["motion_lock"] = "the robot pose changed after the picture; take another picture before localizing"
         return _result("locate_object", False, task["motion_lock"], task, rejection=task["motion_lock"])
+    received = task.get('scene_received_at')
+    if getattr(host,'requires_fresh_observation',False) and (received is None or not 0 <= time.time()-float(received) <= 30):
+        task.update(phase='blocked',motion_lock='The image is missing a trustworthy capture time or is older than 30 seconds; recapture and reselect.')
+        return _result('locate_object',False,task['motion_lock'],task,terminal=True,executed=False)
     box = chosen.get("box")
     began = time.perf_counter()
     if hasattr(host.vision, "localize_observation"):
@@ -599,6 +620,26 @@ def skill_plan(host, task, argument: str) -> dict:
         return _result("plan_approach", False, reason, task, rejection=reason, executed=False, blockers=blockers)
     robot = _robot(host)
     task["_robot"] = robot
+    mount = getattr(host.vision, 'hand_eye', None)
+    matrix = (mount or {}).get('matrix')
+    sideways = bool(matrix and (float(matrix[0][2])**2+float(matrix[1][2])**2)**.5 > .5)
+    if getattr(host,'joint_approach_required',False) or (hasattr(host,'orbits') and sideways):
+        if not getattr(host,'orbits',None):
+            task.update(phase='blocked',motion_lock='The on-arm camera requires the imported five-axis joint approach planner.')
+            return _result('plan_approach',False,task['motion_lock'],task,terminal=True,executed=False)
+        report = host.orbits.approach(host,task)
+        task['approach_plan'] = report
+        next_ = report.get('next')
+        if not next_:
+            task.update(phase='blocked',motion_lock=report['reason'])
+            return _result('plan_approach',False,report['reason'],task,terminal=True,executed=False,approach_plan=report)
+        task.update(joint_operation='approach', planned_target=next_['target_mm'],planned_joints=next_['joints_deg'],
+                    orbit_geometry=report['geometry'],orbit_speed=next_['joint_speed_deg_s'],
+                    proposal=next_['gateway'],phase='planned',ik_verified=True,path_ik_verified=True)
+        task['proposal'].update(ik_verified=True, ik_source='imported_five_axis_camera_ik',
+                                collision_avoidance=False,desired_camera_mm=next_['camera_mm'])
+        return _result('plan_approach',True,report['reason'],task,executed=False,
+                       approach_plan=report,motion=task['proposal'],target=next_)
     began = time.perf_counter()
     goal, err = _target_from_location(host, task)
     _note(host, "motion_planning", time.perf_counter() - began)
@@ -679,6 +720,9 @@ def _move(host, task, skill: str) -> dict:
         planned = skill_plan(host, task, "")
         if not planned.get("ok"):
             return planned
+        if task.get('planned_joints'):
+            from .scan3d.skills import observe
+            return observe(host,task,'')
     locked = _refuse_locked(task, skill)
     if locked:
         return locked
@@ -1034,7 +1078,8 @@ def _resume_task(task: dict) -> dict:
             "calibration", "last_reason", "steps", "replans", "grok_mode", "snapshot_pose",
             "snapshot_id", "ik_verified", "timings", "summary", "confirmation", "workflow_state", "workflow_events",
             "scan_session", "scan_viewpoint", "scan_plan", "path_ik_verified", "planned_joints",
-            "orbit_geometry", "orbit_speed", "orbit_reached", "reconstruction_job", "coverage", "orbit_anchor_joints")
+            "orbit_geometry", "orbit_speed", "orbit_reached", "reconstruction_job", "coverage", "orbit_anchor_joints",
+            "joint_operation", "approach_plan", "scene_occluded", "scene_received_at")
     return {key: task.get(key) for key in keys}
 
 
@@ -1068,7 +1113,9 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
     if confirm_id:
         task["_confirmed"] = confirm_id
         task["phase"] = "planned"
-        if task.get('planned_joints') and skill_sequence is None:
+        if task.get('planned_joints') and task.get('joint_operation') == 'approach' and skill_sequence is None:
+            skill_sequence = ['move_above_object','capture_image','evaluate_goal','report_status']
+        elif task.get('planned_joints') and skill_sequence is None:
             # One accepted motion is followed by observation and another proposal,
             # never by an unconfirmed actuator command. Re-localize from a new scene.
             task['_scan_continuation'] = True
@@ -1096,7 +1143,7 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
         elif task.get("requested_track_id") is not None and task["phase"] == "start":
             choice = {"skill": "inspect_scene", "argument": "", "ok": True}
         elif task.get("_confirmed"):
-            choice = {"skill": "observe_from_viewpoint" if task.get("planned_joints") else "move_above_object", "argument": "", "ok": True}
+            choice = {"skill": "observe_from_viewpoint" if task.get("planned_joints") and task.get('joint_operation') != 'approach' else "move_above_object", "argument": "", "ok": True}
         elif getattr(host, "confirmation_required", False) and task["phase"] in {"moved", "observed"}:
             choice = {"skill": "capture_image" if task["phase"] == "moved" else "evaluate_goal", "argument": ""}
         else:
@@ -1210,6 +1257,7 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
             status != "step" or bool(task["steps"] and task["steps"][-1].get("ok"))),
         "status": status, "goal": task["goal"], "phase": task["phase"],
         "selected": task.get("selected"), "question": task.get("question"),
+        "approach_plan": task.get('approach_plan'), "joint_operation": task.get('joint_operation'),
         "calibration_valid": task.get("calibration_valid"), "calibration": task.get("calibration"),
         "location": task.get("location"), "proposal": task.get("proposal"),
         "evaluation": evaluation, "goal_achieved": bool(evaluation.get("goal_achieved")),

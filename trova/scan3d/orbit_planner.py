@@ -4,7 +4,7 @@ Pure proposals only. No SDK imports, controller connection, enable or actuator c
 The imported sphere model is sampled along joint-linear paths; continuous collision
 avoidance, a complete self-pair set and controller trajectory equivalence are not claimed.
 """
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import hashlib
 import json
 import math
@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from . import orbit_math as orbit
-from .robot_geometry import RobotGeometry, MOVING
+from .robot_geometry import RobotGeometry
 from .flange import flange_pose
 from ..geom import tool_pose_matrix
 from ..motion import sample_joints
@@ -40,6 +40,8 @@ class OrbitSettings:
     object_margin_mm: float = 20.0
     self_margin_mm: float = 5.0
     geometry_confirmed: bool = False
+    tool_spheres_tcp_mm: list = field(default_factory=list)
+    motion_qualification: dict | None = None
 
     def validate(self):
         for key, lo, hi in [('distance_mm', 100, 700), ('elevation_deg', 15, 85),
@@ -55,6 +57,11 @@ class OrbitSettings:
                 raise ValueError(f'Measure {key} before planning an object orbit.')
         if self.tcp_offset_mm is None or np.asarray(self.tcp_offset_mm).shape != (6,) or not np.isfinite(self.tcp_offset_mm).all():
             raise ValueError('The current measured six-value flange-to-TCP offset is required.')
+        for sphere in self.tool_spheres_tcp_mm:
+            if np.asarray(sphere).shape != (4,) or not np.isfinite(sphere).all() or float(sphere[3]) <= 0:
+                raise ValueError('Tool spheres require finite TCP x,y,z,radius in millimetres.')
+        if self.motion_qualification is not None and not isinstance(self.motion_qualification, dict):
+            raise ValueError('Motion qualification must be an operator record.')
         if self.direction not in (-1, 1):
             raise ValueError('Orbit direction must be -1 or 1.')
         if not math.isfinite(self.start_azimuth_deg):
@@ -101,10 +108,73 @@ class JointGeometry:
         self.model_sha256 = hashlib.sha256(MODEL.read_bytes()).hexdigest()
 
     def signature(self):
-        return {'model': self.model_sha256, 'settings': asdict(self.settings),
+        return {'model': self.model_sha256, 'mount_sha256': self.mount_signature(), 'settings': asdict(self.settings),
                 'target_mm': self.target.tolist(), 'table_z_mm': self.scene.table_z,
                 'object_clearance_radius_mm': self.scene.obj_radius, 'cable_reference_deg': self.cable_reference_deg,
                 'T_flange_camera': self.flange_camera.tolist(), 'qualified': self.qualified}
+
+    def mount_signature(self):
+        payload = {'T_flange_camera': self.flange_camera.tolist(), 'tcp_offset_mm': self.settings.tcp_offset_mm,
+                   'tool_spheres_tcp_mm': self.settings.tool_spheres_tcp_mm}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def hardware_blockers(self, start, target):
+        record = self.settings.motion_qualification or {}
+        reasons = []
+        if not self.qualified:
+            reasons.append('Current robot/head geometry is not operator qualified.')
+        if not record.get('operator') or not record.get('measurement_note'):
+            reasons.append('An operator-qualified motion envelope and evidence are required.')
+        if record.get('model_sha256') != self.model_sha256 or record.get('mount_sha256') != self.mount_signature():
+            reasons.append('Motion envelope does not bind the current robot, camera mount and tool geometry.')
+        if not record.get('head_link4_contact_reviewed') or not record.get('tool_body_assessed') or not record.get('static_object_assessed'):
+            reasons.append('Review wrist/head contact exclusion and measure/assess the tool body.')
+        if record.get('controller_segment_box_verified') is not True:
+            reasons.append('Controller joint-segment interpolation/overshoot bounds are not physically qualified.')
+        error = record.get('tracking_error_mm')
+        if error is None or not math.isfinite(float(error)) or not 0 <= float(error) <= 2:
+            reasons.append('Measure controller/model trajectory deviation (0..2 mm).')
+        try:
+            lo,hi = np.asarray(record['joint_min_deg'],float),np.asarray(record['joint_max_deg'],float)
+            if lo.shape != (5,) or hi.shape != (5,) or not np.isfinite([lo,hi]).all() or (lo>hi).any():
+                raise ValueError('invalid joint bounds')
+            if (np.minimum(start,target)<lo).any() or (np.maximum(start,target)>hi).any():
+                reasons.append('Trajectory leaves the operator-qualified joint envelope.')
+            low,high = np.asarray(record['object_foot_min_mm'],float),np.asarray(record['object_foot_max_mm'],float)
+            if low.shape != (3,) or high.shape != (3,) or not np.isfinite([low,high]).all() or (low>high).any():
+                raise ValueError('invalid object bounds')
+            if (self.foot<low).any() or (self.foot>high).any():
+                reasons.append('Object leaves the operator-qualified support-point envelope.')
+            maxima = [float(record['max_object_height_mm']),float(record['max_object_radius_mm'])]
+            if not np.isfinite(maxima).all() or min(maxima) <= 0:
+                raise ValueError('Object envelope maxima must be finite positive measurements')
+            if self.settings.object_height_mm > maxima[0] or self.scene.obj_radius > maxima[1]:
+                reasons.append('Object size/uncertainty exceeds the qualified motion envelope.')
+        except (KeyError,ValueError,TypeError):
+            reasons.append('Measured joint, object-position and size envelope bounds are incomplete.')
+        if not self.gateway.keepout_assessed:
+            reasons.append('Surrounding obstacles/keep-outs have not been assessed.')
+        if self.gateway.limits is None or self.gateway.camera is None:
+            reasons.append('Workspace and measured camera-body geometry are required.')
+        return reasons
+
+    def rates(self, requested):
+        from .trajectory import IntervalValidator
+        validator = IntervalValidator(self)
+        length = max(float(validator.weights('tcp').sum()),1)
+        speed = min(float(requested), self.gateway.max_joint_speed_deg_s,
+                    self.gateway.max_speed_mm_s / (length*math.pi/180)*.95)
+        radius = sum(validator.lengths) + validator.local['tcp']
+        centripetal = radius*(5*speed*math.pi/180)**2
+        remaining = self.gateway.max_accel_mm_s2-centripetal
+        accel = min(self.settings.joint_accel_deg_s2, remaining/(length*math.pi/180)*.95)
+        if accel <= 0:
+            raise ValueError('No positive joint acceleration satisfies the Cartesian acceleration bound.')
+        return speed, accel
+
+    def swept_check(self, start, target):
+        from .trajectory import IntervalValidator
+        return IntervalValidator(self).validate(start,target)
 
     def check(self, joints):
         q = np.asarray(joints, float)
@@ -136,6 +206,17 @@ class JointGeometry:
             if any(box.expanded(radius).contains(center) for box in self.gateway.keepouts):
                 hits.append('configured camera sphere / keep-out')
         shapes = self.geometry.world(orbit.fk_frames(q), self.turn)
+        if self.settings.tool_spheres_tcp_mm:
+            tool = np.asarray(self.settings.tool_spheres_tcp_mm,float)
+            transform = flange_pose(q) @ self.tcp
+            centers = tool[:,:3] @ transform[:3,:3].T + transform[:3,3]
+            radii = tool[:,3]
+            if (centers[:,2]-radii < self.scene.table_z+self.settings.table_margin_mm).any():
+                hits.append('tool / table')
+            near = np.linalg.norm(centers[:,:2]-self.foot[:2],axis=1)<self.scene.obj_radius+radii+self.settings.object_margin_mm
+            if (near & (centers[:,2]-radii<self.scene.obj_top+self.settings.object_margin_mm)).any():
+                hits.append('tool / object')
+            shapes['tool'] = (centers,radii)
         # Keep-outs cover every supplied link, including static/base shapes.
         for name, (centers, radii) in shapes.items():
             for box in self.gateway.keepouts:
@@ -186,6 +267,8 @@ def plan_orbit(joints, context, *, start_azimuth=None, sequential=False, cancel=
                                   settings.distance_mm,previous if sequential else q0,q0)
         chosen=None; reasons=[]
         for q in solutions:
+            if hasattr(context,'calibration_domain') and not context.calibration_domain(q):
+                reasons.append('Viewpoint leaves the currently qualified calibration pose domain.'); continue
             begin=previous if sequential else q0
             jump=float(np.max(np.abs(q-begin)))
             if jump > settings.max_joint_step_deg:
@@ -211,7 +294,7 @@ def plan_orbit(joints, context, *, start_azimuth=None, sequential=False, cancel=
             expected=[(flange_pose(q) @ context.tcp)[:3,3] for q in item['joint_path']]
             ratios=[math.dist(a,b)/max(1e-9,max(abs(x-y) for x,y in zip(qa,qb)))
                     for a,b,qa,qb in zip(expected,expected[1:],item['joint_path'],item['joint_path'][1:])]
-            speed=min(settings.joint_speed_deg_s,context.gateway.max_joint_speed_deg_s)
+            speed,_=context.rates(min(settings.joint_speed_deg_s,context.gateway.max_joint_speed_deg_s))
             if ratios and max(ratios)>0:
                 speed=min(speed,context.gateway.max_speed_mm_s/max(ratios)*.99)
             item['joint_speed_deg_s']=speed

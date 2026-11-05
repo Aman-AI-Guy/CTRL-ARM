@@ -29,6 +29,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 
 | Feature | Status | Where | Notes |
 |---|---|---|---|
+| M6 B–E: five-axis approaches and qualified orbit execution | Offline integration tested; physical qualification remains operator work | `scan3d/approach.py`, `trajectory.py`, `authorization.py`, `motion.py`, `agent.py` | Imported camera-axis IK drives object approaches through the existing gateway and joint driver. Hardware requires evidence-bound geometry/envelope and conservative interval bounds; certified checkpoints are commanded and revalidated. Tool/link/head/table/object/keep-out checks include explicit wrist-contact exclusions; collision_avoidance stays false. Scan continuation captures and verifies each view; optional operator-only bounded scope follows a separately supervised orbit qualification. Image timestamps, metric anchors and selected identity persist without inventing depth or silently switching targets. |
 | M6 A: operational flange calibration provider | Offline tested; current physical qualification still required | `localization.py`, `server.py` | Original distorted-ray/FK mapping supports support and known-height points, explicit frames/provenance, independently measured table correction, round-trip projection and operator-approved evidence-bound qualification. Checkerboard 1.5 px acceptance stays with the current provider; imported bundle RMS is diagnostic and independent metric p95/max errors govern that provider. |
 | Calibration providers and region fallback | Offline regression and browser tested; live camera/telemetry read only; historical model inactive | `localization.py`, `calibration_audit.py`, `scene.py`, `finder.py`, `agent.py`, `server.py` | Reuses flange FK/distorted rays without fabricating checkerboard observations. Requires exact optical profile, measured mount/TCP/base/table binding, independent reference evidence and unchanged quality gates. Selection tracks validated image regions; cups do not inherit a metric point from a box center. See `docs/LIVE_LOCALIZATION_AUDIT.md`. |
 | M5 E: Grok skills, bound orbit confirmations and integrated UI | Offline simulation + real recorded-data browser workflow tested | `agent.py`, `scan3d/skills.py`, `workflow.py`, `server.py`, `static/index.html` | Speech/typed scan goals share the existing agent, retain selection and use imported joint IK. Each next view needs its own proposal confirmation; post-move capture, coverage and fresh localization precede the next proposal. Receipts bind measured settings, geometry, target/joints and current pose. Cable origin persists per orientation group. UI exposes evidence, operator orbit settings, real orbit preview, recorded import, job history, generated mesh previews/downloads. Missing calibration/measurements block movement honestly. |
@@ -133,6 +134,8 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 | `tests/` | all | Offline tests (`fake_robot.py` = fake UR/Elite controller) |
 
 ## HTTP API
+
+M6 joint tasks: `/api/agent/task` returns joint_operation and approach_plan; `/api/select/reference` additionally supports measured_base_point with independently measured point_mm, point_uncertainty_mm and measurement_note. `POST /api/scan/orbit/authorize` accepts operator, confirm, max_views (1..12), ttl_s (30..600); it sends no motion and cannot unlock hardware. First view still requires its own confirmation; subsequent scoped views revalidate receipts and the gateway.
 
 M6 calibration: `POST /api/vision/provider/qualify` (operator, confirm; validates current independent references, binds evidence/model/station hashes, never authorizes motors). Provider reference capture now requires measurement_uncertainty_mm; object reference supports known_height_point with measured height and uncertainty.
 
@@ -291,6 +294,8 @@ Operator-supervised first movement. This was not run. `trova/geom.py` `FIRST_MOV
 - Change verification sends at most 12 candidates to Grok; more means "the camera probably moved" (not clear).
 
 ## Changelog (newest first)
+
+- 2026-11-05 M6 B–E: integrated imported five-axis object approaches, conservative sphere-model interval validation and checkpoint execution through MotionGateway; added independently qualified motion envelopes, actual controller readiness checks, selected-reference continuity, source-image freshness and operator-scoped orbit continuation. Offline/fake-arm tests cover execution separation, interval bounds, approach feasibility, proposal binding and bounded acquisition. No physical actuation, error clear, motor enable or TCP change.
 
 - 2026-11-05 M6 A: replaced the imported provider's inappropriate checkerboard pixel gate with independent metric-reference limits (5 mm p95 / 8 mm maximum including measurement uncertainty) and explicit operator approval bound to model, station and image evidence. Added known-height points and source/frame/joint provenance; measured table-plane correction reuses the original rays. Native checkerboard gates unchanged. Complete suite: 241 passed, 1 camera-mDNS skip; no actuator calls.
 

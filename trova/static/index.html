@@ -686,7 +686,7 @@ async function loadM5Evidence() {
   try {
     const d = await call('/api/integration/evidence');
     const c = d.current_compatibility || d.calibration || {};
-    $('m5evidence').textContent = 'Historical calibration · inactive for motion. ' +
+    $('m5evidence').textContent = 'Calibration provider: ' + (c.active_provider || 'image_space') + '. Motion still requires geometry qualification and operator authorization. ' +
       (c.reasons || []).join(' ') + ' ' + (d.reason || '') + '\n' + JSON.stringify(d);
     $('m5evidence').style.overflowWrap = 'anywhere';
   } catch(e) { $('m5evidence').textContent = String(e); }
@@ -784,11 +784,13 @@ function showAgent(d) {
     `<div class="muted">${esc(camState)} · Grok ${esc(d.grok_mode || (d.authoritative ? 'live' : 'not live'))} · calibration ${d.calibration_valid ? 'valid' : 'not valid'} · motion ${prop ? 'proposed' : 'not proposed'} · movement ${d.hardware_moved ? 'executed' : 'not executed'}</div>` +
     (d.motion_lock ? `<div style="color:var(--warn)">${esc(d.motion_lock)}</div>` : '') +
     (blocks ? `<ul class="changes">${blocks}</ul>` : '') +
-    (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm · geometry ${esc((d.proposal && d.proposal.geometry_source) || 'unknown')} · IK ${d.proposal && d.proposal.ik_verified ? 'confirmed by the controller' : 'not confirmed'} · authorized ${d.proposal && d.proposal.execution_authorized ? 'yes' : 'no'} · collision avoidance: no</div>` : '') +
+    (prop ? `<div class="muted">proposed observation target ${esc(prop.join(', '))} mm · geometry ${esc((d.proposal && d.proposal.geometry_source) || 'unknown')} · IK ${d.proposal && d.proposal.ik_verified ? (d.proposal.ik_source === 'imported_five_axis_camera_ik' ? 'five-axis numerical solution' : 'confirmed by the controller') : 'not confirmed'} · authorized ${d.proposal && d.proposal.execution_authorized ? 'yes' : 'no'} · collision avoidance: no</div>` : '') +
     (d.proposal && d.proposal.duration_s != null ? `<div class="muted">straight-line estimate ${esc(d.proposal.duration_s)} s${d.proposal.duration_is_straight_line_estimate ? '' : ''}</div>` : '') +
     (d.timings ? `<div class="muted">stage times ${esc(Object.keys(d.timings).filter(k => d.timings[k] && d.timings[k].last_s != null).map(k => k + ' ' + d.timings[k].last_s + 's').join(' · '))} · realtime not claimed</div>` : '') +
     (traj.length ? `<div class="muted">straight-line samples ${esc(traj.map(p => p.join(', ')).join(' → '))} mm</div>` : '') +
     (safety ? `<div class="muted">gateway ${esc(d.proposal.status || '')}: workspace ${esc(safety.workspace || '')} · clearance ${esc(safety.clearance || '')} · keep-out ${esc(safety.keep_out || 'not_assessed')} · motion ${d.proposal.allow_motion ? 'allowed' : 'not sent'} · collision avoidance: no</div>` : '') +
+    (d.approach_plan ? `<div><b>Five-axis approach</b>: ${esc(d.approach_plan.reason)} · camera axis targets the measured object reference · collision avoidance not claimed</div>` : '') +
+    (safety && safety.trajectory_certificate ? `<div>Bounded model intervals: ${esc(safety.trajectory_certificate.intervals || 0)} · minimum modeled clearance ${esc(safety.trajectory_certificate.minimum_model_clearance_mm ?? 'unknown')} mm · controller tracking requires qualification</div>` : '') +
     (d.scan_plan ? `<div><b>Scan viewpoints</b>: ${esc(d.scan_plan.reason)} · surface coverage unknown</div><ul>` + (d.scan_plan.candidates || []).map(v =>
       `<li>${esc(v.id)} · ${v.validated ? 'validated' : 'blocked'} · IK ${v.ik_verified ? 'checked' : 'unverified'} · plane overlap ${v.plane_overlap_fraction == null ? 'unknown' : Math.round(v.plane_overlap_fraction * 100) + '%'} · ${esc(v.reason || '')}</li>`).join('') + '</ul>' : '') +
     (steps ? `<ul class="changes">${steps}</ul>` : '');

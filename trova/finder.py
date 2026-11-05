@@ -84,6 +84,7 @@ class FindResult:
     candidate_ids: list[int] = field(default_factory=list)
     mode: str = "som"                 # som | direct | offline (Grok unreachable: local colour match)
     recognition_live: bool = False
+    recognized: bool = False
     grok_latency_s: float = 0.0
     total_s: float = 0.0
     grok_calls: int = 0
@@ -95,7 +96,9 @@ class FindResult:
                 "clarifying_question": self.clarifying_question, "candidate_ids": self.candidate_ids,
                 "mode": self.mode, "grok_latency_s": round(self.grok_latency_s, 2),
                 "total_s": round(self.total_s, 2), "grok_calls": self.grok_calls,
-                "n_candidates": len(self.boxes)}
+                "n_candidates": len(self.boxes), 'recognition_state': 'recognized' if self.recognized else 'not_found',
+                'image_localization_state': 'region_identified' if self.box is not None else 'not_localized',
+                'metric_localization_state': 'not_localized'}
 
 
 def _history_text(history: list[tuple[str, str]] | None) -> str:
@@ -132,6 +135,7 @@ def find(grok: GrokClient, frame: np.ndarray, boxes: list[Box], request: str = "
             direct_fallback = False      # the local stand-in cannot draw boxes
         res.confidence = float(d.get("confidence") or 0)
         ids = {b.id: b for b in boxes}
+        res.recognized = bool(d.get('box_id') in ids or d.get('visible_but_unboxed') or len(d.get('candidate_ids',[])) >= 2)
         res.candidate_ids = [i for i in d.get("candidate_ids", []) if i in ids]
         if d.get("clarifying_question") and len(res.candidate_ids) >= 2:
             res.status, res.clarifying_question = "clarify", d["clarifying_question"]
@@ -152,6 +156,7 @@ def _direct(grok, frame, request, query_image, photo_line, res: FindResult) -> N
     r = grok.json(name="trova_direct", prompt=prompt, schema=DIRECT_SCHEMA, images=images,
                   mock_context={"request": request})
     d = r.data
+    res.recognized = bool(d.get('found'))
     res.mode = "offline" if r.offline else "direct"
     res.recognition_live = not r.mock and not r.offline
     res.grok_calls += 1

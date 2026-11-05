@@ -82,6 +82,21 @@ def solve_view(cam, pos, direction, seed, scale=250.0, iters=60, tol_mm=1.0, tol
     ok = np.linalg.norm(r[:3]) < tol_mm and np.linalg.norm(r[3:]) / scale < tol_dir
     return q if ok else None
 
+def view_condition(cam, q, scale=250.0):
+    """Numerical conditioning of the five camera-position/axis task variables."""
+    q=np.asarray(q,float)
+    position,direction=cam.ray(q)
+    jac=np.zeros((6,5))
+    for j in range(5):
+        shifted=q.copy();shifted[j]+=.001
+        p,d=cam.ray(shifted)
+        jac[:,j]=np.r_[p-position,(d-direction)*scale]/.001
+    singular=np.linalg.svd(jac,compute_uv=False)
+    rank=int((singular>max(singular[0]*1e-6,1e-8)).sum())
+    return {'rank':rank,'condition_number':float(singular[0]/singular[-1]) if rank==5 else None,
+            'task':'camera_position_and_optical_axis_free_image_roll'}
+
+
 class Scene:
     def __init__(self, obj_xy, obj_radius, obj_top, table_z, table_margin=40.0, obj_margin=30.0,
                  link_radius=45.0, camera_radius=45.0, base_radius=80.0, base_height=330.0,

@@ -324,6 +324,8 @@ class State:
         self.agent_lock = threading.Lock()
         self.selected_context: dict | None = None
         self.pending_motion: dict | None = None
+        self.orbit_permit = None
+        self.orbit_worker = None
 
     def note_stage(self, stage: str, seconds: float) -> None:
         self.stage_samples.append({"stage": stage, "seconds": round(float(seconds), 3), "at": time.time()})
@@ -339,18 +341,30 @@ class State:
 
     # ---------- frames, proposals, calibration
     def frame(self) -> np.ndarray:
+        return self.capture_frame()[0]
+
+    def capture_frame(self):
+        """Return the image and its own metadata atomically; UI polling cannot relabel its time."""
+        requested = time.time()
         try:
-            f = self.override.copy() if self.override is not None else self.source.read()
+            if self.override is None and hasattr(self.source,'read_capture'):
+                packed = self.source.read_capture()
+                f, meta = packed['frame'], dict(packed['meta'])
+            else:
+                f = self.override.copy() if self.override is not None else self.source.read()
+                meta = {'requested_at':requested,'received_at':time.time(),
+                        'kind':'upload' if self.override is not None else self.source.info().get('kind')}
             self.camera_error = None
-        except Exception as e:  # noqa: BLE001 - any source failure: report it, never run on a stale picture
-            self.camera_error = str(e)
-            raise CameraError(str(e)) from e
-        h, w = f.shape[:2]
+        except Exception as exc:  # noqa: BLE001 - never reuse a camera buffer on failure
+            self.camera_error = str(exc)
+            raise CameraError(str(exc)) from exc
+        h,w=f.shape[:2]
         if self.override is None:
-            self.frame_size = [w, h]
-        if self.calib is None or (self.calib.source == "default" and self.calib.points[2][:2] != [float(w), float(h)]):
-            self.calib = Calibration.default(w, h, self.s.table_w_mm, self.s.table_h_mm)
-        return f
+            self.frame_size = [w,h]
+        if self.calib is None or (self.calib.source == 'default' and self.calib.points[2][:2] != [float(w),float(h)]):
+            self.calib=Calibration.default(w,h,self.s.table_w_mm,self.s.table_h_mm)
+        meta.update(width=w,height=h)
+        return f,meta
 
     def proposals(self, frame: np.ndarray) -> tuple[list[Box], bool]:
         raw = find_blobs(frame, self.background, self.thresh, self.min_area)
@@ -616,6 +630,25 @@ class State:
                          motion_allowed=False)
         return objects
 
+    def associate_metric_anchors(self, boxes, robot, image_size):
+        """Projection narrows ID association; it is not a new metric observation."""
+        if not hasattr(self.vision, 'base_to_pixel') or not self.vision.assess(image_size)['valid']:
+            return boxes
+        for old, _hist in self.tracks.previous:
+            point = old.extra.get('world_mm')
+            if not point or not old.extra.get('semantic_authoritative'):
+                continue
+            try:
+                pixel = self.vision.base_to_pixel(point,robot,image_size)
+            except (ValueError,KeyError,TypeError):
+                continue
+            hits = [b for b in boxes if b.contains(*pixel)]
+            if len(hits) == 1:
+                hits[0].extra.update(world_mm=list(point),anchor_pixel=pixel,
+                    association_basis='prior_metric_anchor_projection_plus_fresh_appearance',
+                    anchor_is_new_metric_measurement=False)
+        return boxes
+
     def snapshot_scene(self, *, home: bool = False) -> dict:
         """One fresh picture, proposals, names, and stable ids. home=True parks a real arm first (existing inventory).
         An agent snapshot leaves the arm where it is."""
@@ -629,7 +662,7 @@ class State:
             frame, boxes, occl = None, [], True
             for _attempt in range(3):
                 t_capture = time.perf_counter()
-                frame = self.frame()
+                frame, capture_metadata = self.capture_frame()
                 capture_s += time.perf_counter() - t_capture
                 t_prop = time.perf_counter()
                 boxes, occl = self.proposals(frame)
@@ -659,6 +692,7 @@ class State:
             pose_mm = pose.get("pose6") or pose.get("xyz_mm")
             if self.camera_on_arm and not self.at_survey() and not pose.get("pose6"):
                 reset = "arm camera is not at the survey pose"
+            boxes = self.associate_metric_anchors(boxes,pose,size)
             boxes, reset = assign_tracks(self.tracks, boxes, frame, reset, pose_mm=pose_mm)
             t_grok = time.perf_counter()
             inv = describe_table(self.grok, frame, boxes, self.s.lang)
@@ -668,6 +702,8 @@ class State:
             drawn = self.audit.save_image("inventory_map", draw_map(frame, boxes, inv))
             info = self.source.info() if self.override is None else {'kind': 'upload', 'provenance': 'uploaded_image'}
             snapshot = {
+                "image_requested_at": capture_metadata.get('requested_at'),
+                "image_received_at": capture_metadata.get('received_at'),
                 "id": image, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "image": image, "map": drawn, "width": size[0], "height": size[1],
                 "at_survey": self.at_survey(), "camera_on_arm": self.camera_on_arm,
@@ -714,6 +750,8 @@ class AgentHost:
         self.timeout_s = float(os.getenv("TROVA_TASK_TIMEOUT_S", "90"))
         info = st.source.info()
         self.camera_kind = 'upload' if st.override is not None else (info.get("kind") or "")
+        self.joint_approach_required = bool(st.camera_on_arm)
+        self.requires_fresh_observation = getattr(st.source,'kind',None) == 'pi'
         self.image_size = list(st.frame_size or info.get("size") or [0, 0])
         self.observe_clearance_mm = getattr(st, "observe_clearance_mm", None)
         if self.observe_clearance_mm is None:
@@ -797,11 +835,16 @@ class AgentHost:
     def redetect(self, frame):
         boxes, _occl = self.st.proposals(frame)
         pose = self.robot()
-        vision_ok = self.vision.assess([frame.shape[1], frame.shape[0]])["valid"]
+        previous_names = {int(b.extra.get('track_id',-1)):{'name':b.extra.get('semantic_name','unknown'),
+                          'label_authoritative':b.extra.get('semantic_authoritative',False),
+                          'name_from_model':b.extra.get('semantic_authoritative',False)} for b,_ in self.st.tracks.previous}
+        boxes = self.st.associate_metric_anchors(boxes,pose,[frame.shape[1],frame.shape[0]])
         boxes, _reset = assign_tracks(self.st.tracks, boxes, frame, None,
-                                      pose_mm=pose.get("xyz_mm") if vision_ok else None)
+                                      pose_mm=pose.get('pose6') or pose.get('xyz_mm'))
         self.frame, self.boxes = frame, boxes
-        return build_objects(boxes, frame, {})
+        names = {b.id:previous_names.get(b.extra.get('track_id'),{}) for b in boxes
+                 if b.extra.get('association') in {'same_view','geometric'}}
+        return build_objects(boxes, frame, names, self.st.tracks)
 
     def remember(self, track_id, point) -> None:
         remember_world(self.st.tracks, track_id, point)
@@ -850,7 +893,12 @@ class AgentHost:
         if current is None or self.cancel.is_set():
             return {'ok':False,'reason':'Stationary joints unavailable or task cancelled.'}
         holder={}
-        deadline=time.monotonic()+30+max(abs(a-b) for a,b in zip(current,task['planned_joints']))/max(.1,task['orbit_speed'])
+        preview = gateway.authorize_joints(task['planned_joints'],task['orbit_speed'],source='scan_orbit',geometry=geometry,start_q=current)
+        if not preview.allow_motion:
+            return {'ok':False,'reason':preview.reason}
+        waypoints = preview.proposal.get('joint_waypoints') or [current,task['planned_joints']]
+        travel = sum(max(abs(a-b) for a,b in zip(left,right)) for left,right in zip(waypoints,waypoints[1:]))
+        deadline=time.monotonic()+30+travel/max(.01,task['orbit_speed'])+len(waypoints)*1.0
         def go():
             try:
                 # Revalidate after start_arm owns the driver, immediately before execution.
@@ -865,9 +913,11 @@ class AgentHost:
         if not self.st.start_arm(go,job='approach',since=self.started_at):
             return {'ok':False,'reason':'STOP, busy controller or cancelled command.'}
         while self.st.arm_thread and self.st.arm_thread.is_alive():
-            if self.cancel.is_set() or time.monotonic()>deadline:
+            scope = self.st.orbit_permit
+            expired_scope = bool(scope and scope.started and task.get('joint_operation') == 'scan' and time.time() >= scope.expires_at)
+            if self.cancel.is_set() or time.monotonic()>deadline or expired_scope:
                 self.st.stop_arm()
-                holder.update(ok=False,reason='STOP/cancellation or orbit movement deadline exceeded.')
+                holder.update(ok=False,reason='Bounded orbit scope expired during motion.' if expired_scope else 'STOP/cancellation or orbit movement deadline exceeded.')
                 break
             self.st.arm_thread.join(timeout=.1)
         actual=self.robot()
@@ -912,6 +962,14 @@ class AgentHost:
         return {k: record.get(k) for k in ("viewpoint_id", "accepted", "reject_reason", "session_id")}
 
 
+class OrbitAuthorization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operator: str
+    max_views: int = 1
+    ttl_s: int = 120
+    confirm: bool = False
+
+
 class ProviderQualification(BaseModel):
     model_config = ConfigDict(extra="forbid")
     operator: str
@@ -935,6 +993,9 @@ class ObjectReference(BaseModel):
     kind: str
     height_mm: float | None = None
     height_uncertainty_mm: float | None = None
+    point_mm: list[float] | None = None
+    point_uncertainty_mm: float | None = None
+    measurement_note: str = ''
     confirm: bool = False
 
 
@@ -1082,6 +1143,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "latency": agent_mod._timing_summary(st.stage_samples) | {
                 "realtime_claimed": False, "n": len(st.stage_samples)},
             "agent": st.last_agent,
+            "orbit_scope": None if st.orbit_permit is None else st.orbit_permit.public(),
             "scan": None if not st.scans.active else st.scans.public(st.scans.sessions[st.scans.active]),
             "labels": None if not st.labels else {k: v for k, v in st.labels.items() if k != "codes"},
             "dog": None if st.dog is None else {"name": st.dog.name, "route": [x.name for x in st.dog_route],
@@ -1942,7 +2004,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 selected = context.get('selected') or {}
                 if snap.get('id') != body.snapshot_id or selected.get('track_id') != body.track_id:
                     raise HTTPException(409, "Snapshot or selected track changed")
-                if not body.confirm or body.kind not in {'support_plane_point', 'known_height_point'}:
+                if not body.confirm or body.kind not in {'support_plane_point', 'known_height_point', 'measured_base_point'}:
                     raise HTTPException(400, "Confirm a visible point on the support plane; unknown object height is not a top-plane measurement")
                 try:
                     pixel = finite(body.pixel, 2)
@@ -1955,11 +2017,21 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                             or not np.isfinite([body.height_mm, body.height_uncertainty_mm]).all()
                             or body.height_mm < 0 or body.height_uncertainty_mm < 0):
                         raise HTTPException(400, 'Provide measured height_mm and height_uncertainty_mm; RGB does not measure height')
+                if body.kind == 'measured_base_point':
+                    try:
+                        finite(body.point_mm,3)
+                        if (body.point_uncertainty_mm is None or not np.isfinite(body.point_uncertainty_mm)
+                                or not 0 <= body.point_uncertainty_mm <= 5 or not body.measurement_note.strip()):
+                            raise ValueError('An independently measured base point requires a note and uncertainty between 0 and 5 mm')
+                    except (ValueError,TypeError) as exc:
+                        raise HTTPException(400,str(exc)) from None
                 selected['geometric_reference'] = {'kind': body.kind, 'pixel': pixel.tolist(),
                                                     'snapshot_id': body.snapshot_id,
                                                     'provenance': 'operator_measured_geometric_reference',
                                                     'height_mm': body.height_mm or 0,
-                                                    'height_uncertainty_mm': body.height_uncertainty_mm or 0}
+                                                    'height_uncertainty_mm': body.height_uncertainty_mm or 0,
+                                                    'point_mm': body.point_mm, 'point_uncertainty_mm': body.point_uncertainty_mm,
+                                                    'measurement_note': body.measurement_note}
                 st.invalidate_pending('Object geometric reference changed.')
                 st.audit.event('object_reference', snapshot_id=body.snapshot_id, track_id=body.track_id,
                                reference=selected['geometric_reference'], motion_allowed=False)
@@ -2405,7 +2477,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if stale:
             located_reason = stale
         elif report["valid"]:
-            located = st.vision.localize(robot.get("pose6"), float(u), float(v), size)
+            located = (st.vision.pixel_to_base(robot,[float(u),float(v)],size) if hasattr(st.vision,'pixel_to_base')
+                       else st.vision.localize(robot.get("pose6"),float(u),float(v),size))
             predicted = located.get("point_mm")
             uncertainty = located.get("uncertainty_mm")
             located_reason = located.get("reason")
@@ -2452,6 +2525,69 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         summary["n"] = len(st.stage_samples)
         return summary
 
+    def _bounded_orbit_worker():
+        permit = st.orbit_permit
+        while permit and st.orbit_permit is permit and permit.started:
+            if st.task_cancel.is_set():
+                permit.reason = 'STOP or cancellation ended the orbit scope.'
+                return
+            if not st.agent_lock.acquire(timeout=2):
+                permit.reason = 'Another operator task took ownership; bounded orbit stopped.'
+                return
+            try:
+                task = st.pending_motion
+                if not task:
+                    permit.reason = 'No next validated view; acquisition stopped or reconstruction is ready.'
+                    return
+                host = AgentHost(st)
+                invalid = permit.invalid_reason(host,task,st.scans.active)
+                if invalid:
+                    permit.reason = invalid
+                    return
+                proposal_id = task['confirmation']['id']
+                invalid = receipt_error(host,task,proposal_id)
+                if invalid:
+                    permit.reason = invalid
+                    return
+                permit.consume()
+                result = agent_mod.run(host,task['goal'],continued=task,confirm_id=proposal_id)
+                _agent_result(result,task['goal'])
+                if result.get('status') in {'blocked','held','stopped','timeout','refused'}:
+                    permit.reason = result.get('reason') or 'The next view was blocked.'
+                    return
+            except Exception as exc:  # noqa: BLE001 - fail closed on unexpected worker errors
+                permit.reason = f'Bounded orbit interrupted: {exc}'
+                st.pending_motion = None
+                st.task_cancel.set()
+                return
+            finally:
+                st.agent_lock.release()
+
+    def _schedule_bounded_orbit(result):
+        permit = st.orbit_permit
+        if (permit and permit.started and result.get('confirmation') and
+                (st.pending_motion or {}).get('joint_operation') == 'scan' and
+                not (st.orbit_worker and st.orbit_worker.is_alive())):
+            st.orbit_worker = threading.Thread(target=_bounded_orbit_worker,daemon=True,name='trova-qualified-orbit')
+            st.orbit_worker.start()
+
+    @app.post('/api/scan/orbit/authorize')
+    def api_orbit_authorize(body: OrbitAuthorization):
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409,'An agent task is running')
+        try:
+            from .scan3d.authorization import OrbitPermit
+            try:
+                st.orbit_permit = OrbitPermit.approve(AgentHost(st),st.pending_motion or {},st.scans.active,
+                    operator=body.operator,max_views=body.max_views,ttl_s=body.ttl_s,confirm=body.confirm)
+            except ValueError as exc:
+                raise HTTPException(400,str(exc)) from None
+            st.audit.event('scan',action='operator_bounded_scope',scope=st.orbit_permit.public())
+            return {'scope':st.orbit_permit.public(),'motion_sent':False,
+                    'reason':'Confirm the first reviewed proposal explicitly; subsequent bounded views still revalidate every receipt and trajectory.'}
+        finally:
+            st.agent_lock.release()
+
     def _agent_result(result, text):
         resumed = result.pop("resume", None)
         st.task_resume = resumed
@@ -2469,6 +2605,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                        goal_achieved=result.get("goal_achieved"), motion_lock=result.get("motion_lock"),
                        calibration_valid=result.get("calibration_valid"),
                        verified_tool_position=False, reason=result.get("reason"))
+        _schedule_bounded_orbit(result)
         return result
 
     def _refused(reason, text=""):
@@ -2489,6 +2626,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if not st.agent_lock.acquire(blocking=False):
             raise HTTPException(409, "Another agent task is running")
         try:
+            st.orbit_permit = None
             st.pending_motion = None
             st.task_cancel = threading.Event()
             host = AgentHost(st)
@@ -2557,6 +2695,15 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 return _refused(error, pending["goal"])
             if host.cancel.is_set():
                 return _refused("STOP or cancellation requested", pending["goal"])
+            permit = st.orbit_permit
+            if permit:
+                invalid_scope = permit.invalid_reason(host,pending,st.scans.active)
+                if invalid_scope:
+                    permit.reason = invalid_scope
+                    st.orbit_permit = None
+                else:
+                    permit.started = True
+                    permit.consume()
             result = agent_mod.run(host, pending["goal"], continued=pending, confirm_id=body.proposal_id)
             return _agent_result(result, pending["goal"])
         finally:
@@ -2564,6 +2711,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/agent/cancel")
     def api_agent_cancel():
+        st.orbit_permit = None
         st.task_cancel.set()
         st.pending_motion = None
         st.task_resume = None
@@ -2599,7 +2747,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         from .scan3d.evidence import catalog
         try:
             result = catalog()
-            result['current_compatibility'] = st.vision.historical_compatibility(st.frame_size)
+            result['current_compatibility'] = st.vision.assess(st.frame_size)
             return result
         except FileNotFoundError as exc:
             return {'available':False,'reason':str(exc)}

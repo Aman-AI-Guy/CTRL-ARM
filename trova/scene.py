@@ -278,6 +278,9 @@ def build_objects(boxes: list[Box], frame: np.ndarray, names: dict[int, dict], t
             "ambiguous": False,
             "source": box.source,
             "association": box.extra.get("association", "same_view"),
+            "association_basis": box.extra.get('association_basis'),
+            "anchor_pixel": box.extra.get('anchor_pixel'),
+            "anchor_is_new_metric_measurement": box.extra.get('anchor_is_new_metric_measurement'),
             "identity_uncertain": box.extra.get("association") in {"uncertain", "semantic_conflict"},
         })
     mark_ambiguous(objects)

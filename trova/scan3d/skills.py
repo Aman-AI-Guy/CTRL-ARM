@@ -44,7 +44,7 @@ def plan(host,task,argument):
     if not next_:
         task.update(phase='blocked',motion_lock=report['reason'])
         return result('plan_orbit',False,report['reason'],task,terminal=True,executed=False,scan_plan=report)
-    task.update(planned_target=next_['target_mm'],planned_joints=next_['joints_deg'],
+    task.update(joint_operation='scan',planned_target=next_['target_mm'],planned_joints=next_['joints_deg'],
                 orbit_geometry=report['geometry'],orbit_speed=next_['joint_speed_deg_s'],
                 proposal=next_['gateway'],scan_viewpoint=next_['id'],phase='planned')
     return result('plan_orbit',True,'Joint trajectory proposed and checked; not executed.',task,scan_plan=report,executed=False)

@@ -481,7 +481,7 @@ class MotionGateway:
             max_speed_mm_s=_capped(env, "TROVA_ARM_MAX_SPEED_MM_S", HARD_SPEED_MM_S, 100),
             max_accel_mm_s2=_capped(env, "TROVA_ARM_MAX_ACCEL_MM_S2", HARD_ACCEL_MM_S2, 50),
             max_joint_speed_deg_s=_capped(env, "TROVA_ARM_MAX_JOINT_SPEED_DEG_S", HARD_JOINT_SPEED_DEG_S, 20),
-            joint_limits=XARM5_JOINT_LIMITS_DEG, keepouts=_parse_keepouts(keep_raw),
+            joint_limits=_shrink_joints(env.get('TROVA_ARM_JOINT_LIMITS','')), keepouts=_parse_keepouts(keep_raw),
             keepout_assessed=bool(keep_raw.strip()),
             camera=_parse_camera(env.get("TROVA_CAMERA_BODY_MM", "")), note=note,
         )
@@ -682,11 +682,11 @@ class MotionGateway:
                                 reason=(f"requested joint speed {speed_deg_s:g} deg/s exceeds the limit "
                                         f"{self.max_joint_speed_deg_s:g} deg/s"))
         geometry = geometry if geometry is not None else self.joint_geometry
-        if source == 'scan_orbit' and geometry is None:
+        if source in {'scan_orbit', 'vision_joint_approach'} and geometry is None:
             return self._finish(ok=False, status='rejected', reason='Scan orbit has no qualified robot geometry.',
                                 requested=requested, proposal={}, safety=safety, allow=False, speed=0)
         current = self.current_joints() if start_q is None else start_q
-        if source == 'scan_orbit' and current is None:
+        if source in {'scan_orbit', 'vision_joint_approach'} and current is None:
             return self._finish(ok=False, status='rejected', reason='Current joints are unavailable.',
                                 requested=requested, proposal={}, safety=safety, allow=False, speed=0)
         samples_q = sample_joints(current, target_q) if current is not None and len(current) == len(target_q) else [target_q]
@@ -713,6 +713,35 @@ class MotionGateway:
                                         requested=requested, proposal={}, safety=safety, allow=False, speed=0)
             safety['robot_link_geometry'] = 'CAD-derived spheres, sampled 2 deg; limited self-pair set'
             safety['continuous_collision_checked'] = False
+        certificate = None
+        if geometry is not None and (self.mode == 'hardware' or geometry.settings.motion_qualification):
+            blockers = geometry.hardware_blockers(current,target_q)
+            if blockers:
+                return self._finish(ok=False,status='rejected',allow=False,speed=0,requested=requested,
+                                    proposal={},safety=safety,reason='; '.join(blockers))
+            certificate = geometry.swept_check(current,target_q)
+            safety['trajectory_certificate'] = certificate
+            safety['robot_link_geometry'] = 'bounded sphere-model intervals; reviewed wrist-contact exclusion; unknown obstacles unverified'
+            if not certificate.get('ok'):
+                return self._finish(ok=False,status='rejected',allow=False,speed=0,requested=requested,
+                                    proposal={},safety=safety,reason=certificate['reason'])
+            bounded_speed, bounded_accel = geometry.rates(speed_deg_s)
+            if speed_deg_s > bounded_speed+1e-6:
+                return self._finish(ok=False,status='rejected',allow=False,speed=0,requested=requested,
+                                    proposal={},safety=safety,reason='Analytic TCP speed bound exceeds the configured speed limit.')
+            safety['analytic_joint_accel_deg_s2'] = bounded_accel
+        if self.mode == 'hardware' and geometry is not None:
+            backend = getattr(self.arm,'backend',None)
+            read_status = getattr(backend,'read_status',None)
+            if read_status is None:
+                return self._finish(ok=False,status='rejected',allow=False,speed=0,requested=requested,
+                                    proposal={},safety=safety,reason='Current controller mode/state telemetry is unavailable.')
+            state = read_status()
+            if (state.get('state_code') not in (0,2) or state.get('mode') != 0 or state.get('error_code')
+                    or state.get('warn_code') or state.get('moving')
+                    or state.get('error_code') is None or state.get('warn_code') is None):
+                return self._finish(ok=False,status='rejected',allow=False,speed=0,requested=requested,
+                                    proposal={},safety=safety,reason='Controller is not stationary and ready in position mode: '+str(state))
         if self.joint_limits is not None:
             if len(target_q) != len(self.joint_limits):
                 return self._finish(ok=False, status="rejected", allow=False, speed=0, joint_speed=speed_deg_s,
@@ -743,6 +772,9 @@ class MotionGateway:
             return self._finish(ok=False, status="rejected", allow=False, speed=0, joint_speed=speed_deg_s,
                                 requested=requested, proposal={}, safety=safety,
                                 reason="forward kinematics is not available, so the joint path cannot be checked")
+        if geometry is not None and not cartesian_samples:
+            from .scan3d.flange import flange_pose
+            cartesian_samples = [tuple((flange_pose(q) @ geometry.tcp)[:3,3]) for q in samples_q]
         if cartesian_samples:
             if geometry is not None:
                 from .scan3d.flange import flange_pose
@@ -765,6 +797,8 @@ class MotionGateway:
         if geometry is not None:
             proposal['joint_path'] = samples_q
             proposal['geometry'] = geometry.signature()
+            if certificate is not None:
+                proposal['joint_waypoints'] = certificate.get('joint_waypoints')
             if not geometry.qualified:
                 return self._finish(ok=True,status='dry_run',allow=False,speed=0,joint_speed=speed_deg_s,
                                     requested=requested,proposal=proposal,safety=safety,
@@ -776,7 +810,8 @@ class MotionGateway:
         result = self._finish(ok=True, status="accepted", allow=True, speed=0, joint_speed=speed_deg_s,
                               requested=requested, proposal=proposal, safety=safety, reason="accepted")
         if geometry is not None and result.ticket:
-            result.ticket.max_joint_accel_deg_s2 = min(result.ticket.max_joint_accel_deg_s2, geometry.settings.joint_accel_deg_s2)
+            result.ticket.max_joint_accel_deg_s2 = min(result.ticket.max_joint_accel_deg_s2,
+                                                     safety.get('analytic_joint_accel_deg_s2',geometry.settings.joint_accel_deg_s2))
         return result
 
     def execute_joints(self, target_q, speed_deg_s, *, geometry):
@@ -789,7 +824,14 @@ class MotionGateway:
         previous_speed=arm.joint_speed
         arm.joint_speed=min(float(speed_deg_s),self.max_joint_speed_deg_s)
         try:
-            ok=bool(arm.go_joints(list(target_q)))
+            waypoints = decision.proposal.get('joint_waypoints') or [self.current_joints(), list(target_q)]
+            ok = True
+            for waypoint in waypoints[1:]:
+                # A bounded segment is actually commanded; never assume a final-target PTP
+                # command follows an arbitrary externally interpolated five-joint curve.
+                if not arm.go_joints(list(waypoint), tol_deg=.1 if self.mode == 'hardware' else 1.0):
+                    ok = False
+                    break
             return {'ok':ok,'reason':('joint viewpoint reached' if ok else arm.last_error or 'Joint movement failed'),
                     'motion':decision.as_dict(),'final_mm':self.current_pose(),'final_joints':self.current_joints()}
         finally:
