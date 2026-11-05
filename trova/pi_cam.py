@@ -88,6 +88,63 @@ class PiCam:
                 raise last from None
         raise last or CameraError(f"can't reach {self.base}")
 
+    def _open(self, method, path, body=None, timeout=None):
+        payload = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(self.base + path, data=payload, method=method,
+                                         headers={'Content-Type':'application/json','Cache-Control':'no-cache'})
+        try:
+            return urllib.request.urlopen(request, timeout=timeout or self.timeout)
+        except (urllib.error.URLError, OSError) as exc:
+            raise CameraError(str(exc)) from None
+
+    def _json(self, method, path, body=None, timeout=None):
+        with self._open(method,path,body,timeout) as response:
+            return json.loads(response.read())
+
+    def scan_start(self, **params):
+        return self._json('POST','/scan/start',params,timeout=max(self.timeout,40))
+
+    def scan_stop(self):
+        return self._json('POST','/scan/stop',{},timeout=max(self.timeout,90))
+
+    def scan_live(self, since=-1, scan_id=None, timeout=20):
+        from .scan3d.streaming import LiveStream
+        from urllib.parse import urlencode
+        query = {'since':int(since)}
+        if scan_id is not None: query['id'] = scan_id
+        return LiveStream(self._open('GET','/scan/live?'+urlencode(query),timeout=timeout))
+
+    def scan_frame(self, scan_id, index):
+        self._scan_identifier(scan_id)
+        return self._get(f'/scan/{scan_id}/frame/{int(index)}',self.timeout,self.retries)
+
+    @staticmethod
+    def _scan_identifier(value):
+        import re
+        if not re.fullmatch(r'[A-Za-z0-9_-]+',str(value)):
+            raise CameraError('Invalid scan identifier')
+
+    def scan_file(self, scan_id, name):
+        self._scan_identifier(scan_id)
+        if name not in {'meta.json','frames.csv','bins.csv','camera_metadata.json','metering_metadata.json'}:
+            raise CameraError('Unsupported scan metadata file')
+        return self._get(f'/scan/{scan_id}/{name}',self.timeout,self.retries)
+
+    def scan_bins(self, scan_id):
+        import csv, io
+        return [{key:int(value) for key,value in row.items()} for row in
+                csv.DictReader(io.StringIO(self.scan_file(scan_id,'bins.csv').decode()))]
+
+    def scan_clock(self):
+        return self._json('GET','/scan/clock')
+
+    def clock_offset(self, n=5):
+        samples=[]
+        for _ in range(max(1,min(int(n),10))):
+            before=time.time(); wall=self.scan_clock()['wall']; after=time.time()
+            samples.append((wall-(before+after)/2,after-before))
+        return min(samples,key=lambda value:value[1])
+
     def status(self) -> dict:
         """Camera state, resolution, temperature, protection level and warnings."""
         raw = self._get("/status.json", self.status_timeout, self.retries)

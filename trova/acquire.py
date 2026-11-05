@@ -130,6 +130,39 @@ class ScanBook:
         self._write_index(session)
         return self.public(session)
 
+    def import_recording(self, root=None):
+        """Copy the registered mouse subset, retaining SfM poses as SfM, never telemetry."""
+        import shutil
+        from .scan3d.evidence import workspace, sha256
+        from .scan3d.sparse_model import read_model
+        archive = workspace(root)
+        retained = archive / 'data/recon/20261105-011356-orbit-v2/full'
+        model = read_model(retained / 'colmap/sparse_txt/0')
+        source = archive / 'data/scans/20261105-011356-orbit/images'
+        public = self.start('recorded-mouse')
+        session = self._session(public['id'])
+        session.update(provenance='recorded', reconstruction_only=True, motion_allowed=False,
+                       recorded_benchmark='mouse-60', source_report_sha256=sha256(retained/'report.json'))
+        folder = Path(session['folder']) / 'images'
+        folder.mkdir()
+        for index,(name,pose) in enumerate(sorted(model['images'].items())):
+            file = source / name
+            data = file.read_bytes()
+            frame = cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
+            if frame is None: raise ValueError('Invalid recorded JPEG: '+name)
+            destination = folder / name
+            shutil.copyfile(file,destination)
+            session['views'].append({'viewpoint_id':f'recorded-{index:03d}', 'source_name':name,
+                'image':str(destination), 'sha256':sha256(destination), 'orientation':session['orientation'],
+                'accepted':False, 'reconstruction_accepted':True,
+                'reject_reason':'Recorded SfM camera pose has no synchronized robot telemetry; metric motion use is forbidden.',
+                'pose_source':'recorded_sfm', 'provenance':'recorded', 'camera_pose':None,
+                'sfm_pose':{'R':pose['R'].tolist(),'t':pose['t'].tolist(),'frame':'historical_sfm','units':'arbitrary'},
+                'quality':{'laplacian_variance':float(cv2.Laplacian(cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY),cv2.CV_64F).var())},
+                'resolution':[frame.shape[1],frame.shape[0]],'calibration_valid':False})
+        self._write_index(session)
+        return self.public(session)
+
     def _session(self, session_id: str | None) -> dict:
         key = session_id or self.active or self.last
         if not key or key not in self.sessions:
@@ -327,8 +360,11 @@ class ScanBook:
             "id": session["id"], "object_id": session["object_id"], "status": session["status"],
             "orientation": session["orientation"], "registration": "not run", "reconstructed": False,
             "n_views": len(session["views"]), "n_accepted": len(accepted),
+            "provenance": session.get('provenance','live_or_simulated'),
+            "reconstruction_only": session.get('reconstruction_only',False),
+            "n_reconstruction_accepted": sum(bool(v.get('reconstruction_accepted') or v.get('accepted')) for v in session['views']),
             "views": [{k: view.get(k) for k in ("viewpoint_id", "accepted", "reject_reason", "image",
-                                                "robot_tcp_mm", "calibration_version", "sync")}
+                                                "robot_tcp_mm", "calibration_version", "sync", "quality", "provenance", "orientation", "reconstruction_accepted")}
                       for view in session["views"]],
         }
 

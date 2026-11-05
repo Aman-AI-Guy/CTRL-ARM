@@ -49,3 +49,18 @@ The checks sample joint-linear paths every 2 degrees. They are not continuous sw
 The original 220-degree orbit was replayed from its saved starting joints/target: **12/12** generated views passed the integrated sampled geometry/gateway checks, with no robot opened. This uses the recorded scene assumptions and a deliberately broad offline workspace; it does not qualify the station's current workspace or a physical route. Reproduce with `python -m trova.integration_m5 orbit-replay --output data/m5/orbit_replay.json`.
 
 The original imported suite now runs **50 tests**, rather than the old report's 47. All 50 passed in the preserved temporary copy after installing matplotlib/Open3D. A transient fake-camera server-startup failure occurred in an earlier concurrent run and passed in the serial rerun. Source data and reports were not changed.
+
+## C — acquisition and orbit adapter
+
+The original multipart parser and reconnect/backfill receiver use Trova's existing PiCam.
+No second camera client or controller is added. Pi scan profile changes are explicit;
+stationary fresh captures remain the default and streamed moving frames are not silently
+accepted as telemetry-synchronized observations. Clock offsets are wall-clock estimates.
+
+`POST /api/scan/replay/mouse` copies exactly the 60 registered names from the retained
+COLMAP text model, verifies JPEG decoding and hashes, and records arbitrary SfM poses.
+These images are reconstruction inputs, **not** accepted metric robot captures.
+Reorientation keeps separate groups. The orbit adapter requires valid active calibration,
+measured object size/TCP, telemetry/model agreement and operator model qualification.
+View ranking uses camera-angle novelty, measured-plane overlap and joint travel;
+newly visible mesh surface area is unknown.

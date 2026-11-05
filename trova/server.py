@@ -215,6 +215,12 @@ class ScanStartReq(BaseModel):
     object_id: str = ""
 
 
+class OrbitReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: bool = False
+    settings: dict
+
+
 class OrientReq(BaseModel):
     model_config = ConfigDict(extra="forbid")
     orientation: str
@@ -302,6 +308,8 @@ class State:
         self.room: dict | None = None          # feature 14: last room scan (status, views, result)
         self.vision = VisionStore.load(s.data_dir / "vision_calib.json")
         self.scans = ScanBook(s.data_dir / "scans")
+        from .scan3d.service import OrbitStore
+        self.orbits = OrbitStore(s.data_dir / 'orbit_settings.json')
         self.reconstruction = ReconstructionJobs(s.data_dir / "reconstructions", on_done=lambda job:
             self.audit.event('scan', action='reconstruction_finished', job=job['id'], status=job['status'],
                              reconstructed=job['reconstructed'], textured_mesh=job['textured_mesh'], reason=job['reason']))
@@ -686,6 +694,8 @@ class AgentHost:
         self.confirmation_required = True
         self.started_at = time.time()
         self.scan_book = st.scans
+        self.orbits = st.orbits
+        self.reconstruction = st.reconstruction
 
     def publish(self, task):
         self.st.last_agent = feedback({"status": "executing", "workflow_state": "movement_executing",
@@ -2299,6 +2309,54 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if settled_at is not None:
             packed["stopped_at"] = settled_at
         return packed
+
+    @app.get('/api/integration/evidence')
+    def api_m5_evidence():
+        from .scan3d.evidence import catalog
+        try:
+            result = catalog()
+            result['current_compatibility'] = st.vision.historical_compatibility(st.frame_size)
+            return result
+        except FileNotFoundError as exc:
+            return {'available':False,'reason':str(exc)}
+
+    @app.get('/api/orbit/settings')
+    def api_orbit_settings():
+        return st.orbits.public()
+
+    @app.post('/api/orbit/settings')
+    def api_orbit_settings_set(body: OrbitReq):
+        try:
+            result = st.orbits.configure(body.settings,body.confirm)
+            st.pending_motion = None
+            st.audit.event('setup',action='orbit_settings',settings=result)
+            return result
+        except (ValueError,TypeError) as exc:
+            raise HTTPException(400,str(exc)) from None
+
+    @app.post('/api/orbit/plan')
+    def api_orbit_plan():
+        context = st.selected_context
+        if not context or not context.get('selected'):
+            return {'next':None,'candidates':[],'reason':'Select an object first.'}
+        host = AgentHost(st)
+        task = dict(context)
+        located = agent_mod.skill_locate(host,task,'')
+        if not located.get('ok'):
+            return {'next':None,'candidates':[],'reason':located.get('reason')}
+        views = st.scans.list_views() if st.scans.active else []
+        return st.orbits.plan(host,task,views)
+
+    @app.post('/api/scan/replay/mouse')
+    def api_scan_replay():
+        if st.scans.active:
+            raise HTTPException(409,'Finish the current scan before importing a recording.')
+        try:
+            result = st.scans.import_recording()
+            st.audit.event('scan',action='recorded_mouse_import',session=result['id'])
+            return result
+        except (FileNotFoundError,ValueError) as exc:
+            raise HTTPException(400,str(exc)) from None
 
     @app.post("/api/scan/start")
     def api_scan_start(body: ScanStartReq):
