@@ -37,7 +37,7 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-PROMPT = """Image 1 is a work table seen from above. Every object has a magenta box with a number (1 to {n}).
+PROMPT = """Image 1 is a work table seen from above. Candidate regions have a magenta box with a number (1 to {n}).
 Image 2 is a sheet of close-ups, one per number.
 
 For EVERY number, return: box_id; name: 2 to 4 specific words ("blue ballpoint pen", not "object"); category;
@@ -85,7 +85,8 @@ class Inventory:
 def describe(grok: GrokClient, frame: np.ndarray, boxes: list[Box], lang: str = "en") -> Inventory:
     inv = Inventory(time=time.strftime("%H:%M:%S"))
     if not boxes:
-        inv.summary = "The table is empty." if lang != "it" else "Il tavolo è vuoto."
+        inv.summary = ("No image regions detected; an empty proposal list does not verify an empty table."
+                       if lang != "it" else "Nessuna regione rilevata: un elenco vuoto non verifica un tavolo vuoto.")
         inv.grok_mode = _grok_mode(grok)
         return inv
     ctx = {"boxes": boxes, "colors": {b.id: color_name(crop(frame, b, pad=0)) for b in boxes}}

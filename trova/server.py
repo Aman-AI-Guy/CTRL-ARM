@@ -623,6 +623,7 @@ class State:
             self.invalidate_pending('A new scene snapshot invalidated the previous proposal.')
             if home:
                 self.clear_view()
+            pose_before = self.robot_telemetry()
             capture_s = 0.0
             proposals_s = 0.0
             frame, boxes, occl = None, [], True
@@ -637,11 +638,22 @@ class State:
                     break
                 time.sleep(0.4)
             pose = self.robot_telemetry()
+            capture_stationary = bool(
+                pose_before.get('source') == 'telemetry' and pose.get('source') == 'telemetry'
+                and not pose_before.get('moving') and not pose.get('moving')
+                and not pose_before.get('error') and not pose.get('error')
+                and pose_before.get('error_code') == 0 and pose.get('error_code') == 0
+                and pose_before.get('joints') and pose.get('joints')
+                and not pose_changed(pose_before.get('pose6'), pose.get('pose6'), mm=1, deg=.1)
+                and np.max(np.abs(np.subtract(pose_before['joints'], pose['joints']))) <= .1)
+            if pose.get('source') == 'telemetry' and not capture_stationary:
+                pose = dict(pose, moving=True)
             size = [int(frame.shape[1]), int(frame.shape[0])]
             if self.override is None:
                 self.frame_size = size
             if hasattr(self.vision, "set_context"):
-                self.vision.set_context(self.source.info(), pose)
+                provider_camera = self.source.info() if self.override is None else {'kind': 'upload'}
+                self.vision.set_context(provider_camera, pose)
             vision_ok = self.vision.assess(size)["valid"]
             reset = None
             pose_mm = pose.get("pose6") or pose.get("xyz_mm")
@@ -651,10 +663,10 @@ class State:
             t_grok = time.perf_counter()
             inv = describe_table(self.grok, frame, boxes, self.s.lang)
             grok_s = inv.latency_s or (time.perf_counter() - t_grok)
-            objects = build_objects(boxes, frame, inv.items)
+            objects = build_objects(boxes, frame, inv.items, self.tracks)
             image = self.audit.save_image("scene", frame)
             drawn = self.audit.save_image("inventory_map", draw_map(frame, boxes, inv))
-            info = self.source.info()
+            info = self.source.info() if self.override is None else {'kind': 'upload', 'provenance': 'uploaded_image'}
             snapshot = {
                 "id": image, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "image": image, "map": drawn, "width": size[0], "height": size[1],
@@ -669,7 +681,8 @@ class State:
                 "camera_profile": info,
                 "provenance": info.get("provenance") or info.get("kind"),
                 "camera_kind": info.get("kind"),
-                "vision_valid": vision_ok,
+                "vision_valid": vision_ok, "capture_stationary": capture_stationary,
+                "sync_precision_claimed": False,
             }
             out = inv.as_dict() | {"map": drawn, "n_objects": len(boxes), "occluded": occl, "snapshot": snapshot}
             self.scene_frame, self.scene_boxes = frame, boxes
@@ -700,7 +713,7 @@ class AgentHost:
         self.cancel = st.task_cancel
         self.timeout_s = float(os.getenv("TROVA_TASK_TIMEOUT_S", "90"))
         info = st.source.info()
-        self.camera_kind = info.get("kind") or ""
+        self.camera_kind = 'upload' if st.override is not None else (info.get("kind") or "")
         self.image_size = list(st.frame_size or info.get("size") or [0, 0])
         self.observe_clearance_mm = getattr(st, "observe_clearance_mm", None)
         if self.observe_clearance_mm is None:
@@ -736,7 +749,8 @@ class AgentHost:
     def robot(self) -> dict:
         robot = self.st.robot_telemetry()
         if hasattr(self.vision, "set_context"):
-            self.vision.set_context(self.st.source.info(), robot)
+            camera = self.st.source.info() if self.st.override is None else {'kind': 'upload'}
+            self.vision.set_context(camera, robot)
         return robot
 
     def note_stage(self, stage: str, seconds: float) -> None:
@@ -1104,7 +1118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 live = not st.grok.mock and res.mode != 'offline'
                 labels = {res.box.id: {'name': res.label, 'category': 'other', 'note': res.reason,
                                        'name_from_model': bool(res.label), 'label_authoritative': live}}
-                objects = build_objects(tracked, frame, labels)
+                objects = build_objects(tracked, frame, labels, st.tracks)
                 chosen = next((obj for obj in objects if obj['box_id'] == res.box.id), None)
                 snapshot = {'id': paths['frame'], 'image': paths['frame'], 'map': paths['marked'],
                             'width': frame.shape[1], 'height': frame.shape[0], 'pose': captured_pose,
@@ -1849,6 +1863,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                         raise ValueError('Pixel is outside this snapshot')
                     robot = st.robot_telemetry()
                     stationary(robot)
+                    if st.override is not None or not snap.get('capture_stationary'):
+                        raise ValueError('Reference requires a fresh live snapshot with stationary telemetry before and after capture')
                     old = snap.get('pose') or {}
                     if old.get('source') != 'telemetry' or old.get('moving') or pose_changed(old.get('pose6'), robot.get('pose6'), mm=1, deg=.1):
                         raise ValueError('Reference image and stationary robot pose no longer match')

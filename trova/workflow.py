@@ -82,6 +82,8 @@ def receipt_error(host, task, proposal_id):
 
 
 def refers_to_selection(text):
+    if re.search(r"(?i)\b(trova|find|seleziona|select)\b", text):
+        return False
     return bool(re.search(r"(?i)(\b(scansionalo|scan it|selected object|oggetto selezionato|continua|continue)\b|"
                           r"\b(posizionati|mettiti|vai|move|hover|position yourself)\s+(sopra|above|over)"
                           r"\s*(it|di esso|di lui|quello)?[.!?\s]*$|\b(above|over) it[.!?\s]*$)", text))

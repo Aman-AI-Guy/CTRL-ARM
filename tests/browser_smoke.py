@@ -33,7 +33,7 @@ def main() -> int:
     port, data = free_port(), tempfile.mkdtemp(prefix="trova_smoke_")
     env = {**os.environ, "XAI_API_KEY": "", "TROVA_MOCK": "1", "TROVA_DATA": data, "TROVA_PORT": str(port),
            "TROVA_HOST": "127.0.0.1", "TROVA_CAMERA": "demo", "TROVA_ARM": "sim", "TROVA_DOG": "sim",
-           "TROVA_ALLOW_LIFT": "1", "TROVA_TOKEN": ""}
+           "TROVA_ALLOW_LIFT": "1", "TROVA_TOKEN": "", "TROVA_ARM_READ": "off", "TROVA_HARDWARE_UNLOCK": ""}
     server = subprocess.Popen([sys.executable, "-m", "trova"], cwd=ROOT, env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     base = f"http://127.0.0.1:{port}"
@@ -133,6 +133,7 @@ def main() -> int:
             step("tray lift + STOP", lambda: (find(f"the {_unique(pg)} one"), press("Lift its tray", exact=False),
                                               pg.mouse.click(*_corners(pg)[2]), pg.wait_for_timeout(800), press("STOP"),
                                               pg.wait_for_timeout(500), text("#armst"))[6])
+            step("manual image region", lambda: _manual_region(pg, press))
             step("arm home", lambda: (press("Arm home"), pg.wait_for_timeout(500), text("#armst"))[2])
             step("dog search", lambda: (press("Send the dog to look"), pg.wait_for_timeout(6000),
                                         text("#dogres")[:60])[2])
@@ -168,6 +169,25 @@ def main() -> int:
     print("\n".join(log))
     print("\n" + ("PASS: no problems" if not problems else "PROBLEMS:\n  " + "\n  ".join(problems)))
     return 1 if problems else 0
+
+
+def _manual_region(pg, press):
+    press('Select image region')
+    pg.wait_for_selector('#regionDialog[open]')
+    pg.fill('#regionLabel', 'operator test region')
+    box = pg.locator('#regionCanvas').bounding_box()
+    x, y = box['x'] + box['width']*.15, box['y'] + box['height']*.15
+    pg.mouse.move(x, y)
+    pg.mouse.down()
+    pg.mouse.move(x + box['width']*.1, y + box['height']*.1, steps=6)
+    pg.mouse.up()
+    pg.wait_for_function("!document.getElementById('regionDialog').open")
+    assert 'operator test region' in pg.inner_text('#findres')
+    press('Mark support-plane point')
+    pg.wait_for_selector('#regionDialog[open]')
+    pg.mouse.click(x + box['width']*.05, y + box['height']*.05)
+    pg.wait_for_function("!document.getElementById('regionDialog').open")
+    return 'draw selected a region; click bound a support-plane reference without movement'
 
 
 def _corners(pg):

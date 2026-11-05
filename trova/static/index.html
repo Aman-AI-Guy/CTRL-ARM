@@ -469,17 +469,29 @@ function showFindAll(d) {
 }
 
 // Frozen image coordinates are bound to a snapshot id, never the moving live stream.
-let regionSnapshot = null, regionPicture = null, regionStart = null;
+let regionSnapshot = null, regionPicture = null, regionStart = null, regionReferenceObject = null;
+let lastSelectedRegion = null;
 async function openRegionSelection() {
   const d = await call('/api/scene', {method: 'POST'});
-  regionSnapshot = d.snapshot;
+  regionReferenceObject = null;
+  displayRegionSnapshot(d.snapshot);
+}
+function displayRegionSnapshot(snapshot) {
+  regionSnapshot = snapshot;
   regionPicture = new Image();
   regionPicture.onload = () => {
     const canvas = $('regionCanvas');
     canvas.width = regionSnapshot.width; canvas.height = regionSnapshot.height;
-    paintRegions(); $('regionStatus').textContent = ''; $('regionDialog').showModal();
+    paintRegions(); $('regionStatus').textContent = regionReferenceObject ? 'Click a visible point on the support plane within this object region. Do not click the cup rim or object top.' : ''; $('regionDialog').showModal();
   };
   regionPicture.src = '/files/' + regionSnapshot.image;
+}
+async function markSupportPoint() {
+  const state = await call('/api/state');
+  const snapshot = state.inventory && state.inventory.snapshot;
+  if (!lastSelectedRegion || !snapshot) return toast('Select an object first.');
+  regionReferenceObject = lastSelectedRegion;
+  displayRegionSnapshot(snapshot);
 }
 function paintRegions(end) {
   const ctx = $('regionCanvas').getContext('2d');
@@ -505,6 +517,14 @@ $('regionCanvas').onpointercancel = () => { regionStart = null; paintRegions(); 
 $('regionCanvas').onpointerup = async ev => {
   if (!regionStart) return;
   const end = regionPoint(ev), start = regionStart; regionStart = null;
+  if (regionReferenceObject) {
+    try {
+      await json('/api/select/reference', {snapshot_id: regionSnapshot.id, track_id: regionReferenceObject.track_id,
+        pixel: end, kind: 'support_plane_point', confirm: true});
+      $('regionDialog').close();
+    } catch (e) { $('regionStatus').textContent = e.detail || e.error || 'Reference failed'; }
+    return;
+  }
   const data = {snapshot_id: regionSnapshot.id, label: $('regionLabel').value};
   if (Math.hypot(end[0]-start[0],end[1]-start[1]) < 6) data.point = end;
   else data.box = [Math.min(start[0],end[0]), Math.min(start[1],end[1]), Math.max(start[0],end[0]), Math.max(start[1],end[1])];
@@ -556,6 +576,7 @@ function showSelection(d) {
   el.className = 'result show st-' + (d.status === 'selected' ? 'found' : d.status === 'clarify' ? 'clarify' : 'not_found');
   let h = '';
   if (d.status === 'selected' && d.object) {
+    lastSelectedRegion = d.object;
     const o = d.object;
     h = `<div class="big">Selected: ${esc(o.name || ('object ' + o.track_id))}</div>` +
         `<div>track ${o.track_id} · box ${o.box_id} · confidence ${o.confidence}` +
@@ -565,6 +586,7 @@ function showSelection(d) {
       (d.candidates || []).map(o => `<button onclick="pickObject(${Number(o.track_id)})">${o.track_id} ${esc(o.name || '')}</button>`).join('') +
       `</div>`;
   } else h = `<div class="big">Not in this photo</div>`;
+  if (d.object) h += '<button onclick="markSupportPoint()">Mark support-plane point</button>';
   if (d.authoritative === false) h += `<div style="color:var(--warn)">Recognition is not live. This selection cannot authorize motion.</div>`;
   h += `<div class="muted">${esc(d.reason || '')}</div>`;
   el.innerHTML = h;

@@ -1,12 +1,10 @@
-import json
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from trova.geom import VisionStore, tool_pose_matrix
 from trova.scan3d.flange import FlangeCalibration, flange_pose
-from trova.scan3d.evidence import workspace, calibration_report, localize_recorded, flange_to_tool_camera
+from trova.scan3d.evidence import workspace, localize_recorded, flange_to_tool_camera
 from trova.scan3d.marker_fit import fit_plane
 
 
@@ -63,3 +61,14 @@ def test_tilted_plane_math_is_reused():
 def test_invalid_offset_is_not_treated_as_zero():
     with pytest.raises(ValueError, match='six-value'):
         flange_to_tool_camera(np.eye(4), [0,0,0])
+
+
+def test_original_half_split_replay_counts_and_limits():
+    from trova.scan3d.evidence import calibration_replay
+    result = calibration_replay(archive())
+    assert result['images'] == 19 and result['observations'] == 48
+    assert result['heldout_corner_samples'] == 192
+    assert result['holdout_median_mm'] == pytest.approx(1.8504, abs=.03)
+    assert result['holdout_p95_mm'] == pytest.approx(4.6725, abs=.05)
+    assert not result['valid_for_motion']
+    assert 'full-fit marker planes' in result['evaluation_limit']

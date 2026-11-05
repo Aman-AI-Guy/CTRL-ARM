@@ -175,6 +175,8 @@ def qualification_blockers(host, task) -> list[str]:
         reasons.append(f"recognition is {mode}, so it cannot authorize motion")
     if getattr(host, "camera_kind", "") in ("demo", "armsim"):
         reasons.append("the picture is synthetic, so it cannot authorize motion")
+    if getattr(host, "camera_kind", "") == "upload":
+        reasons.append("an uploaded image is not a live robot-camera observation")
     robot = {}
     try:
         robot = host.robot() or {}
@@ -381,6 +383,8 @@ def _snapshot_is_reusable(host, task) -> dict | None:
 
 
 def skill_inspect(host, task, argument: str) -> dict:
+    previous_selected = task.get('selected') or {}
+    previous_pose = task.get('snapshot_pose') or {}
     cached = _snapshot_is_reusable(host, task)
     if cached is not None:
         snap = cached
@@ -410,10 +414,20 @@ def skill_inspect(host, task, argument: str) -> dict:
             task["motion_lock"] = "The selected object's identity is no longer reliable in the fresh image. Select it again."
             task["phase"] = "blocked"
             return _result("inspect_scene", False, task["motion_lock"], task, terminal=True, executed=False)
-        previous = task.get("selected") or {}
-        reference = previous.get("geometric_reference")
+        reference = previous_selected.get("geometric_reference")
         if reference and reference.get("snapshot_id") == snap.get("id"):
             chosen["geometric_reference"] = reference
+        elif (reference and chosen.get('association') == 'same_view'
+              and not pose_changed(previous_pose.get('pose6'), (snap.get('pose') or {}).get('pose6'), mm=1, deg=.1)):
+            old_box, new_box = previous_selected.get('box'), chosen.get('box')
+            if old_box and new_box:
+                ow, oh = old_box[2]-old_box[0], old_box[3]-old_box[1]
+                nw, nh = new_box[2]-new_box[0], new_box[3]-new_box[1]
+                if ow > 0 and oh > 0 and abs(nw/ow-1) <= .05 and abs(nh/oh-1) <= .05:
+                    pixel = reference['pixel']
+                    chosen['geometric_reference'] = {**reference, 'snapshot_id': snap.get('id'),
+                        'pixel': [new_box[0]+(pixel[0]-old_box[0])*nw/ow, new_box[1]+(pixel[1]-old_box[1])*nh/oh],
+                        'provenance': 'visual_same_view_association_of_operator_support_point'}
         task["selected"] = chosen
         task["location"] = None
         task["phase"] = "selected"
@@ -476,6 +490,10 @@ def skill_locate(host, task, argument: str) -> dict:
         task["phase"] = "blocked"
         return _result("locate_object", False, "no object is selected", task, terminal=True)
     _calibration_flag(host, task)
+    if getattr(host, 'camera_kind', '') == 'upload':
+        task['phase'] = 'blocked'
+        task['motion_lock'] = 'An uploaded image cannot produce a live metric robot target.'
+        return _result('locate_object', False, task['motion_lock'], task, terminal=True)
     robot = _robot(host)
     snap = task.get("snapshot_pose") or {}
     if snap.get("moving") or robot.get("moving"):

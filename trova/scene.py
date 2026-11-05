@@ -150,6 +150,17 @@ def assign_tracks(state: TrackState, boxes: list[Box], frame: np.ndarray,
                 overlap = box.iou(prev)
                 if overlap < IOU_MIN or _similar(current_h[i], prev_h) < APPEAR_MIN:
                     continue
+                if state.previous_frame is not None:
+                    ox0, oy0, ox1, oy1 = prev.to_list()
+                    nx0, ny0, nx1, ny1 = box.to_list()
+                    old_patch = state.previous_frame[max(0, oy0):oy1, max(0, ox0):ox1]
+                    new_patch = frame[max(0, ny0):ny1, max(0, nx0):nx1]
+                    if old_patch.size and new_patch.size and float(old_patch.std(axis=(0, 1)).max()) >= 3:
+                        small_old = cv2.resize(old_patch, (48, 48))
+                        small_new = cv2.resize(new_patch, (48, 48))
+                        visual = float(cv2.matchTemplate(small_new, small_old, cv2.TM_CCOEFF_NORMED)[0, 0])
+                        if not np.isfinite(visual) or visual < .6:
+                            continue
                 pairs_iou.append((overlap + 0.05 * _similar(current_h[i], prev_h), i, j))
         pairs_iou.sort(reverse=True)
         used = set()
@@ -167,6 +178,9 @@ def assign_tracks(state: TrackState, boxes: list[Box], frame: np.ndarray,
             previous = state.previous[match[i]][0]
             copied.extra["track_id"] = int(previous.extra["track_id"])
             copied.extra["association"] = kind.get(i, "same_view")
+            for semantic_key in ("semantic_name", "semantic_authoritative"):
+                if semantic_key in previous.extra:
+                    copied.extra[semantic_key] = previous.extra[semantic_key]
             if previous.extra.get("world_mm") and "world_mm" not in copied.extra:
                 copied.extra["world_mm"] = list(previous.extra["world_mm"])
         else:
@@ -212,7 +226,16 @@ def mark_ambiguous(objects: list[dict]) -> None:
         obj["ambiguous"] = bool(key) and counts[key] > 1
 
 
-def build_objects(boxes: list[Box], frame: np.ndarray, names: dict[int, dict]) -> list[dict]:
+def _semantic_family(name):
+    tokens = set(_TOKEN.findall(normal_name(name)))
+    for family, words in {"mouse": {"mouse"}, "cup": {"cup", "mug", "bicchiere", "tazza"},
+                          "pen": {"pen", "penna"}, "pliers": {"pliers", "pinza", "pinze"}}.items():
+        if tokens & words:
+            return family
+    return None
+
+
+def build_objects(boxes: list[Box], frame: np.ndarray, names: dict[int, dict], track_state=None) -> list[dict]:
     objects = []
     for box in boxes:
         named = names.get(box.id, {})
@@ -222,6 +245,16 @@ def build_objects(boxes: list[Box], frame: np.ndarray, names: dict[int, dict]) -
             label_ok = False
         else:
             label_ok = bool(named.get("label_authoritative"))
+        previous_family = _semantic_family(box.extra.get("semantic_name", ""))
+        current_family = _semantic_family(raw_name)
+        if (track_state is not None and label_ok and box.extra.get("semantic_authoritative")
+                and previous_family and current_family and previous_family != current_family):
+            box.extra["track_id"] = track_state.next_id
+            track_state.next_id += 1
+            box.extra["association"] = "semantic_conflict"
+            box.extra.pop("world_mm", None)
+        box.extra["semantic_name"] = raw_name
+        box.extra["semantic_authoritative"] = label_ok
         objects.append({
             "track_id": int(box.extra["track_id"]),
             "box_id": int(box.id),
@@ -245,7 +278,7 @@ def build_objects(boxes: list[Box], frame: np.ndarray, names: dict[int, dict]) -
             "ambiguous": False,
             "source": box.source,
             "association": box.extra.get("association", "same_view"),
-            "identity_uncertain": box.extra.get("association") == "uncertain",
+            "identity_uncertain": box.extra.get("association") in {"uncertain", "semantic_conflict"},
         })
     mark_ambiguous(objects)
     return objects
@@ -380,7 +413,7 @@ def adopt_found(state, frame, boxes, objects, found):
                      "name_from_model": bool(found.label) and box.source != "manual", "label_authoritative": found.recognition_live}
     boxes, _ = assign_tracks(state, boxes, frame)
     found.box = next(b for b in boxes if b.id == box.id)
-    return boxes, build_objects(boxes, frame, names)
+    return boxes, build_objects(boxes, frame, names, state)
 
 
 def recover_regions(previous, old_frame, frame, boxes):
