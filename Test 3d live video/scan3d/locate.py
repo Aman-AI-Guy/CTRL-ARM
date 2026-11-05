@@ -74,10 +74,36 @@ def white_disk(img: np.ndarray, r_px: tuple[float, float]) -> dict | None:
             "circularity": round(float(circ), 3), "area_px": int(mo["m00"]), "box_px": [x, y, w, h], "cut": cut}
 
 
-def find_object(img, q, cal: Calibration, find: str, height_mm: float, diameter_mm: float | None) -> dict | None:
-    """find = "red" (largest red blob) or "disk" (a white disk of diameter_mm on top of the object)."""
+def grok_blob(img: np.ndarray, prompt: str, say=print) -> dict | None:
+    """The box Grok gives for prompt (e.g. "red bull can"), in the same form as red_blob; None (and why) if none."""
+    from .grok_find import GrokFindError, find_box
+
+    ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        return None
+    try:
+        r = find_box(enc.tobytes(), prompt, (img.shape[1], img.shape[0]))
+    except GrokFindError as e:
+        say(f"  {e}")
+        return None
+    x0, y0, x1, y1 = r["box_px"]
+    x, y, w, h = int(round(x0)), int(round(y0)), int(round(x1 - x0)), int(round(y1 - y0))
+    H, W = img.shape[:2]
+    cut = [s for s, c in (("left", x0 <= 1), ("top", y0 <= 1), ("right", x1 >= W - 1), ("bottom", y1 >= H - 1)) if c]
+    return {"pixel": r["pixel"], "area_px": w * h, "box_px": [x, y, w, h], "cut": cut, "label": r["label"],
+            "confidence": r["confidence"], "latency_s": r["latency_s"]}
+
+
+def find_object(img, q, cal: Calibration, find: str, height_mm: float, diameter_mm: float | None,
+                prompt: str | None = None) -> dict | None:
+    """find = "red" (largest red blob), "disk" (a white disk of diameter_mm on top of the object) or "grok" (Grok's
+    box for prompt). "none": no detector (the object was picked by hand)."""
+    if find == "none":
+        return None
     if find == "red":
         return red_blob(img)
+    if find == "grok":
+        return grok_blob(img, prompt or "the object")
     cam_z = float(cal.camera_pose(q)[2, 3])
     c = cal.pixel_to_object_top(cal.width / 2, cal.height / 2, q, height_mm)
     r = (diameter_mm / 2) * cal.K[0, 0] / max(cam_z - c[2], 30.0)
