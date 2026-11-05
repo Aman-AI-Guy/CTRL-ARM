@@ -18,7 +18,7 @@ from .finder import find as grok_find
 from .geom import VisionStore, pose_changed
 from .grok import GrokError, register_mock
 from .motion import sample_segment
-from .scene import decide_text, from_finder, question_for
+from .scene import TrackState, adopt_found, decide_text, from_finder, question_for
 from .workflow import receipt, receipt_error
 
 MAX_STEPS = 8
@@ -155,8 +155,11 @@ def qualification_blockers(host, task) -> list[str]:
     task["calibration_valid"] = bool(report.get("valid"))
     if not report.get("valid"):
         reasons.extend(report.get("reasons") or ["camera calibration is not valid"])
-        reasons.append("capture checkerboard images, solve intrinsics, capture at least 6 hand-eye "
-                       "views from robot telemetry, and solve the table plane")
+        if report.get("providers"):
+            reasons.append("Review /api/vision/providers: verify the imported mount/TCP/base/table binding and independent references, or use the existing current calibration procedure")
+        else:
+            reasons.append("capture checkerboard images, solve intrinsics, capture at least 6 hand-eye "
+                           "views from robot telemetry, and solve the table plane")
     if getattr(host, "observe_clearance_mm", None) is None:
         reasons.append("set TROVA_OBSERVE_CLEARANCE_MM to the measured gap in millimetres from the table plane to the tool")
     gateway = getattr(host, "gateway", None)
@@ -407,7 +410,12 @@ def skill_inspect(host, task, argument: str) -> dict:
             task["motion_lock"] = "The selected object's identity is no longer reliable in the fresh image. Select it again."
             task["phase"] = "blocked"
             return _result("inspect_scene", False, task["motion_lock"], task, terminal=True, executed=False)
+        previous = task.get("selected") or {}
+        reference = previous.get("geometric_reference")
+        if reference and reference.get("snapshot_id") == snap.get("id"):
+            chosen["geometric_reference"] = reference
         task["selected"] = chosen
+        task["location"] = None
         task["phase"] = "selected"
     return _result("inspect_scene", True, snap.get("summary") or f"{len(task['objects'])} objects", task,
                    grok_mode=snap.get("grok_mode"), n_objects=len(task["objects"]),
@@ -423,16 +431,25 @@ def skill_list(host, task, argument: str) -> dict:
 
 def skill_select(host, task, argument: str) -> dict:
     objects = task.get("objects") or []
-    if not objects:
+    if host.frame is None:
         task["phase"] = "blocked"
         return _result("select_object", False, "Take a snapshot before selecting", task, terminal=True)
     text = (argument or task.get("goal") or "").strip()
     decision = decide_text(text, objects)
     if decision.status == "defer":
-        if host.frame is None or not host.boxes:
+        if host.frame is None:
             task["phase"] = "blocked"
             return _result("select_object", False, "the snapshot frame is gone", task, terminal=True)
-        found = grok_find(host.grok, host.frame, host.boxes, text, direct_fallback=False)
+        found = grok_find(host.grok, host.frame, host.boxes, text)
+        if found.status == "found":
+            if hasattr(host, "adopt_found"):
+                objects = host.adopt_found(found)
+            else:
+                tracks = getattr(host, "tracks", None) or TrackState()
+                host.tracks = tracks
+                host.boxes, objects = adopt_found(tracks, host.frame, host.boxes, objects, found)
+            task["objects"] = objects
+            task["authoritative"] = found.recognition_live
         decision = from_finder(found.status, found.box.id if found.box else None, found.candidate_ids,
                                found.confidence, found.reason, objects, text)
     by_id = {obj["track_id"]: obj for obj in objects}
@@ -471,10 +488,14 @@ def skill_locate(host, task, argument: str) -> dict:
         return _result("locate_object", False, task["motion_lock"], task, rejection=task["motion_lock"])
     box = chosen.get("box")
     began = time.perf_counter()
-    location = host.vision.localize(robot.get("pose6"), chosen["center"][0], chosen["center"][1],
-                                    host.image_size, box=box)
+    if hasattr(host.vision, "localize_observation"):
+        location = host.vision.localize_observation(robot, chosen, host.image_size)
+    else:
+        location = host.vision.localize(robot.get("pose6"), chosen["center"][0], chosen["center"][1],
+                                        host.image_size, box=box)
     _note(host, "geometric_localization", time.perf_counter() - began)
     task["location"] = location
+    chosen["metric_localization_state"] = "localized" if location.get("ok") else "blocked"
     if location.get("ok") and location.get("point_mm") is not None:
         remember = getattr(host, "remember", None)
         if remember:
@@ -1064,6 +1085,9 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
             task["phase"] = "blocked"
             status = "blocked"
             break
+        # A semantic choice must pass metric localization before any approach planning.
+        if task["phase"] == "selected" and not task.get("location"):
+            choice = {"skill": "locate_object", "argument": "", "ok": True}
         name = choice["skill"]
         if host.cancel.is_set():
             status = "stopped"

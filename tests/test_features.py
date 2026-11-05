@@ -366,6 +366,9 @@ def test_preflight(tmp_path, monkeypatch):
     names = {i["name"]: i for i in d["items"]}
     assert {"Camera", "Light", "Focus", "Empty table", "Objects", "Calibration", "Arm", "Grok", "Disk"} <= set(names)
     assert names["Grok"]["status"] == "warn" and "MOCK" in names["Grok"]["detail"]
+    assert names["Calibration"]["status"] == "warn"
+    assert names["Camera-to-robot geometry"]["status"] == "warn"
+    assert "hand-eye is not solved" in names["Camera-to-robot geometry"]["detail"]
     assert names["Empty table"]["status"] == "warn" and d["ok"]           # warnings only: still OK to go
     c.post("/api/background", data={"mode": "capture"})
     assert {i["name"]: i for i in c.get("/api/preflight").json()["items"]}["Empty table"]["status"] == "ok"

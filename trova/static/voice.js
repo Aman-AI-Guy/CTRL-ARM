@@ -236,6 +236,9 @@ const TrovaVoice = (() => {
 
   async function start(handlers, confirm = true) {
     h = handlers || {};
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Open http://localhost:8000 on this laptop, or use HTTPS, to enable the microphone.');
+    }
     status('connecting…');
     const c = await (await fetch('/api/voice/config?confirm=' + (confirm ? 1 : 0))).json();
     cfg = {...c, confirm};

@@ -94,8 +94,15 @@ def _arm(st) -> list[dict]:
             out.append(_item("Calibration", "warn", cal, "Error above 8 mm: redo with points spread over the whole table"))
         else:
             out.append(_item("Calibration", "ok", cal))
+    elif isinstance(st.arm, SimArm):
+        out.append(_item("Calibration", "warn", cal + ": simulated arm; physical pointing is not qualified",
+                         "Calibrate with the real arm before physical pointing"))
     else:
         out.append(_item("Calibration", "ok" if c and c.ok else "warn", cal))
+    geometry = st.vision.assess(st.frame_size)
+    out.append(_item("Camera-to-robot geometry", "ok" if geometry["valid"] else "warn",
+                     "valid" if geometry["valid"] else "; ".join(geometry["reasons"]),
+                     "" if geometry["valid"] else "Use the checkerboard calibration panel before a vision approach"))
     s = st.arm.status()
     if s.get("state") == "error" or s.get("error"):
         out.append(_item("Arm", "fail", f"{s['name']}: {s.get('error') or s['state']}",

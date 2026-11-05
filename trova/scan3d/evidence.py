@@ -125,6 +125,10 @@ def calibration_replay(root=None):
     return {'provenance': 'recorded_recomputed', 'images': len(images), 'observations': len(prob.obs),
             'reprojection_rms_px': float(np.sqrt(np.mean(residuals))),
             'holdout_median_mm': float(np.median(heldout)), 'holdout_p95_mm': float(np.percentile(heldout, 95)),
+            'heldout_corner_samples': len(heldout),
+            'joint_min_deg': np.asarray([row['q'] for row in images]).min(0).tolist(),
+            'joint_max_deg': np.asarray([row['q'] for row in images]).max(0).tolist(),
+            'outlier_policy': '49 detected marker views, one recorded outlier (015.jpg marker 4) excluded; 48 retained',
             'reported': stored['quality'], 'valid_for_motion': False,
             'evaluation_limit': 'Original half-split procedure initializes from the full fit and uses full-fit marker planes; this is not independent ruler validation.'}
 

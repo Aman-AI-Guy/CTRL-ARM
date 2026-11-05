@@ -19,6 +19,94 @@ from trova.motion import (
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def test_slow_cartesian_move_gets_travel_time_but_stalled_move_still_times_out(monkeypatch):
+    import trova.arm.cartesian as cartesian
+    from types import SimpleNamespace
+    clock = [0.0]
+    monkeypatch.setattr(cartesian, "time", SimpleNamespace(
+        time=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
+    backend = FakeCartesian(start=(0, 0, 300))
+    arm = CartesianArm(backend, 300, None, Limits.parse("-500,500,-500,500,200,1000"), speed_mm_s=5)
+    arm.gateway = MotionGateway.for_arm(arm, mode="simulation", environ={})
+    assert arm._go(0, 200, 300)
+    assert clock[0] >= 40 and arm.state == "idle"
+    assert arm.motion_timeout_s(200) == 62
+
+    class Stalled(FakeCartesian):
+        stop_called = False
+        def is_moving(self):
+            return True
+        def stop(self):
+            self.stop_called = True
+    stalled = Stalled(start=(0, 0, 300))
+    guarded = CartesianArm(stalled, 300, None, Limits.parse("-500,500,-500,500,200,1000"), speed_mm_s=5)
+    guarded.gateway = MotionGateway.for_arm(guarded, mode="simulation", environ={})
+    start = clock[0]
+    assert not guarded._go(0, 100, 300)
+    assert clock[0] - start >= 32 and stalled.stop_called
+    assert guarded.last_error == "move timed out"
+
+
+def test_operator_cylinder_checks_radius_floor_and_unbounded_top():
+    limits = Limits.parse("cylinder:500,200,inf")
+    assert limits.describe() == "cylinder:500,200,inf"
+    assert limits.check(0, 500, 200) is None
+    assert limits.check(300, 400, 900) is None
+    assert limits.check(400, 400, 250)  # Inside the bounding square, outside the circle.
+    assert limits.check(0, 0, 199.9)
+    assert limits.check(float("nan"), 0, 250)
+    assert limits.check(0, 0, float("inf"))
+    bounded = Limits.parse("cylinder:500,200,1000")
+    assert bounded.check(0, 0, 1000) is None
+    assert bounded.check(0, 0, 1000.1)
+    for invalid in ("cylinder:0,200,inf", "cylinder:nan,200,inf", "cylinder:500,inf,inf",
+                    "cylinder:500,200,100", "cylinder:500,200,nan"):
+        with pytest.raises(ValueError):
+            Limits.parse(invalid)
+
+
+def test_cylinder_applies_to_path_start_and_camera_sphere():
+    gateway = MotionGateway.standalone(environ={})
+    gateway.limits = Limits.parse("cylinder:500,200,inf")
+    assert gateway.authorize_cartesian((400, 400, 250), 5, start=(0, 0, 250)).status == "rejected"
+    assert gateway.authorize_cartesian((0, 0, 250), 5, start=(0, 0, 199)).status == "rejected"
+    assert gateway.authorize_cartesian((300, 400, 250), 5, start=(0, 0, 250)).status == "dry_run"
+    gateway.camera = CameraBody((0, 0, 0), 10)
+    assert gateway.authorize_cartesian((300, 400, 250), 5, start=(0, 0, 250)).status == "rejected"
+    assert gateway.authorize_cartesian((0, 0, 205), 5, start=(0, 0, 250)).status == "rejected"
+
+
+def test_cylinder_safety_api_reports_unbounded_top_as_string(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    _, client = _client(tmp_path, monkeypatch, TROVA_ARM="sim", TROVA_ARM_READ="off")
+    result = client.post("/api/safety", json={"confirm": True, "limits": "cylinder:500,200,inf"}).json()
+    assert result["ok"] and result["moved"] is False
+    report = client.get("/api/safety").json()
+    assert report["workspace_limits"] == "cylinder:500,200,inf"
+    assert report["workspace_frame"] == "robot_base"
+    failed = client.post("/api/safety", json={"confirm": True, "limits": "cylinder:500,nan,inf"}).json()
+    assert failed["ok"] is False
+    assert client.get("/api/safety").json()["workspace_limits"] == "cylinder:500,200,inf"
+
+
+@pytest.mark.parametrize("orientation", [(-86, -41.5, -7.8), (180, 0, 34.347)])
+def test_hardware_voice_jog_refuses_automatic_flange_reorientation(orientation):
+    from types import SimpleNamespace
+    class XArmBackend:
+        yaw = 36.02
+
+        def tcp_pose(self):
+            return (-43.9, -480.6, 229.4, *orientation)
+
+    gateway = MotionGateway.standalone(environ={})
+    gateway.mode = "hardware"  # Only exercise rejection; no controller or executor exists.
+    gateway.arm = SimpleNamespace(backend=XArmBackend())
+    gateway.limits = Limits.parse("cylinder:500,200,inf")
+    result = gateway.plan_relative("left", 3, pose=(-43.9, -480.6, 229.4), execute=True)
+    assert result.status == "rejected" and not result.allow_motion
+    assert "reorient" in result.reason
+
+
 def test_pytest_cannot_select_hardware_mode():
     env = {"TROVA_MOTION_MODE": "hardware", "TROVA_HARDWARE_UNLOCK": "MOVE"}
     mode, note = resolve_mode(False, environ=env)

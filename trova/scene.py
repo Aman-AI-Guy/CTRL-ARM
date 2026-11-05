@@ -51,6 +51,7 @@ class TrackState:
 
     next_id: int = 1
     previous: list[tuple[Box, np.ndarray]] = field(default_factory=list)
+    previous_frame: np.ndarray | None = field(default=None, repr=False)
     frame_size: tuple[int, int] | None = None
     pose_mm: tuple[float, float, float] | None = None
 
@@ -110,8 +111,12 @@ def assign_tracks(state: TrackState, boxes: list[Box], frame: np.ndarray,
     camera_moved = False
     if pose_mm is not None and state.pose_mm is not None and _pose_dist(pose_mm, state.pose_mm) > POSE_MOVE_MM:
         camera_moved = True
+    if pose_mm is not None and state.pose_mm is not None and len(pose_mm) >= 6 and len(state.pose_mm) >= 6:
+        camera_moved = camera_moved or any(abs((float(pose_mm[i])-state.pose_mm[i]+180) % 360-180) > 2 for i in range(3, 6))
     if reason:
         state.previous = []
+    elif not camera_moved and state.previous_frame is not None:
+        boxes = recover_regions(state.previous, state.previous_frame, frame, boxes)
     state.frame_size = (width, height)
 
     current_h = [_hist(frame, box) for box in boxes]
@@ -143,7 +148,7 @@ def assign_tracks(state: TrackState, boxes: list[Box], frame: np.ndarray,
         for i, box in enumerate(boxes):
             for j, (prev, prev_h) in enumerate(state.previous):
                 overlap = box.iou(prev)
-                if overlap < IOU_MIN:
+                if overlap < IOU_MIN or _similar(current_h[i], prev_h) < APPEAR_MIN:
                     continue
                 pairs_iou.append((overlap + 0.05 * _similar(current_h[i], prev_h), i, j))
         pairs_iou.sort(reverse=True)
@@ -172,8 +177,9 @@ def assign_tracks(state: TrackState, boxes: list[Box], frame: np.ndarray,
         out.append(copied)
         stored.append((copied, current_h[i]))
     state.previous = stored
+    state.previous_frame = frame.copy()
     if pose_mm is not None:
-        state.pose_mm = (float(pose_mm[0]), float(pose_mm[1]), float(pose_mm[2]))
+        state.pose_mm = tuple(float(v) for v in pose_mm)
     return out, reason
 
 
@@ -224,6 +230,11 @@ def build_objects(boxes: list[Box], frame: np.ndarray, names: dict[int, dict]) -
             "note": named.get("note", ""),
             "semantic": named.get("note", ""),
             "geometric_detection": True,
+            "recognition_state": "recognized" if raw_name != "unknown" else "unknown",
+            "image_localization_state": "region_identified",
+            "metric_localization_state": "not_localized",
+            "localization_provenance": box.extra.get("localization_provenance", "opencv_blob"),
+            "region_confidence": box.extra.get("region_confidence"),
             "label_authoritative": label_ok,
             "name_from_model": bool(named.get("name_from_model")),
             "box": box.to_list(),
@@ -347,3 +358,64 @@ def pack(decision: Decision, objects: list[dict], authoritative: bool, snapshot_
         "reason": reason,
         "snapshot_id": snapshot_id,
     }
+
+
+def adopt_found(state, frame, boxes, objects, found):
+    """Put a grounded finder result into the same snapshot and track namespace as blobs."""
+    from .regions import validated_region
+    box = found.box
+    if found.status != "found" or box is None:
+        return boxes, objects
+    validated_region([box.x0, box.y0, box.x1, box.y1], frame, source=box.source)
+    names = {obj["box_id"]: dict(obj) for obj in objects}
+    if found.mode == "direct":
+        overlap = next((b for b in boxes if b.iou(box) >= 0.65), None)
+        if overlap is not None:
+            box.id = overlap.id
+            boxes = [box if b.id == overlap.id else b for b in boxes]
+        else:
+            box.id = max((b.id for b in boxes), default=0) + 1
+            boxes = [*boxes, box]
+    names[box.id] = {"name": found.label or "unknown", "note": found.reason,
+                     "name_from_model": bool(found.label) and box.source != "manual", "label_authoritative": found.recognition_live}
+    boxes, _ = assign_tracks(state, boxes, frame)
+    found.box = next(b for b in boxes if b.id == box.id)
+    return boxes, build_objects(boxes, frame, names)
+
+
+def recover_regions(previous, old_frame, frame, boxes):
+    """Recover non-blob regions only with a unique, strong local pixel match in the same view.
+
+    No box survives merely because its name or old pixel position is still remembered.
+    Rotation/pose changes and reset are handled by assign_tracks before this function.
+    """
+    if old_frame.shape != frame.shape:
+        return boxes
+    out = list(boxes)
+    h, w = frame.shape[:2]
+    for prev, _ in previous:
+        if prev.source not in {"grok", "manual"} or any(b.iou(prev) >= IOU_MIN for b in out):
+            continue
+        x0, y0, x1, y1 = prev.to_list()
+        template = old_frame[y0:y1, x0:x1]
+        if template.size == 0 or float(template.std()) < 3:
+            continue
+        sx, sy = max(0, x0-30), max(0, y0-30)
+        search = frame[sy:min(h, y1+30), sx:min(w, x1+30)]
+        scores = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+        _, score, _, (dx, dy) = cv2.minMaxLoc(scores)
+        if not np.isfinite(score) or score < 0.94:
+            continue
+        other = scores.copy()
+        other[max(0, dy-5):dy+6, max(0, dx-5):dx+6] = -1
+        if float(other.max()) > score - 0.01:
+            continue
+        box = _copy(prev)
+        box.x0, box.y0 = sx+dx, sy+dy
+        box.x1, box.y1 = box.x0+template.shape[1], box.y0+template.shape[0]
+        box.id = max((b.id for b in out), default=0)+1
+        box.extra.pop("world_mm", None)
+        box.extra["localization_provenance"] = "visual_template_reobservation"
+        box.extra["region_confidence"] = float(score)
+        out.append(box)
+    return out

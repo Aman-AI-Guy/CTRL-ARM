@@ -31,14 +31,15 @@ from .camera import DemoSource, ImageSource, open_source
 from .config import Settings, load_settings
 from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
-from .finder import find as grok_find, find_all as grok_find_all
+from .finder import FindResult, find as grok_find, find_all as grok_find_all
 from .inventory import describe as describe_table, draw_map
 from .scene import (
     Decision, TrackState, assign_tracks, build_objects, decide_text, from_finder, pack, question_for,
-    remember_world,
+    remember_world, adopt_found,
 )
 from .geom import VisionStore, annotate_checkerboard, pose_changed, reference_error
 from .motion import apply_operator_safety, safety_report
+from .localization import make_router, finite, stationary
 from .arm.telemetry import observation_record, open_reader, XArmTelemetry
 from .acquire import ScanBook
 from .reconstruction import ReconstructionJobs
@@ -306,7 +307,8 @@ class State:
         self.batch = json.loads(self.batch_path.read_text()) if self.batch_path.exists() else {"lot": os.getenv("TROVA_BATCH", "")}
         self.labels: dict | None = None
         self.room: dict | None = None          # feature 14: last room scan (status, views, result)
-        self.vision = VisionStore.load(s.data_dir / "vision_calib.json")
+        self.vision = make_router(VisionStore.load(s.data_dir / "vision_calib.json"), s.data_dir,
+                                  os.getenv("TROVA_CALIBRATION_CANDIDATE") or None)
         self.scans = ScanBook(s.data_dir / "scans")
         from .scan3d.service import OrbitStore
         self.orbits = OrbitStore(s.data_dir / 'orbit_settings.json')
@@ -601,6 +603,19 @@ class State:
             return False
         return gateway.mode == "hardware" and not bool(getattr(gateway, "simulated", True))
 
+    def adopt_found(self, found):
+        """Extend the current frozen scene; invalidate any motion receipt before selection changes."""
+        snap = self.inventory["snapshot"]
+        self.invalidate_pending("Image region selection changed.")
+        self.scene_boxes, objects = adopt_found(self.tracks, self.scene_frame, self.scene_boxes,
+                                                snap["objects"], found)
+        snap["objects"] = objects
+        self.inventory["n_objects"] = len(objects)
+        self.audit.event("image_region", snapshot_id=snap["id"], box=found.box.as_dict(),
+                         localization_provenance=found.box.extra.get("localization_provenance", "opencv_blob"),
+                         motion_allowed=False)
+        return objects
+
     def snapshot_scene(self, *, home: bool = False) -> dict:
         """One fresh picture, proposals, names, and stable ids. home=True parks a real arm first (existing inventory).
         An agent snapshot leaves the arm where it is."""
@@ -625,10 +640,12 @@ class State:
             size = [int(frame.shape[1]), int(frame.shape[0])]
             if self.override is None:
                 self.frame_size = size
+            if hasattr(self.vision, "set_context"):
+                self.vision.set_context(self.source.info(), pose)
             vision_ok = self.vision.assess(size)["valid"]
             reset = None
-            pose_mm = pose.get("xyz_mm") if vision_ok else None
-            if self.camera_on_arm and not self.at_survey() and not vision_ok:
+            pose_mm = pose.get("pose6") or pose.get("xyz_mm")
+            if self.camera_on_arm and not self.at_survey() and not pose.get("pose6"):
                 reset = "arm camera is not at the survey pose"
             boxes, reset = assign_tracks(self.tracks, boxes, frame, reset, pose_mm=pose_mm)
             t_grok = time.perf_counter()
@@ -649,6 +666,7 @@ class State:
                 "grok_mode": inv.grok_mode, "tracks_reset": reset,
                 "occluded": occl, "objects": objects,
                 "authoritative": inv.grok_mode == "live", "motion_allowed": False,
+                "camera_profile": info,
                 "provenance": info.get("provenance") or info.get("kind"),
                 "camera_kind": info.get("kind"),
                 "vision_valid": vision_ok,
@@ -710,8 +728,16 @@ class AgentHost:
         self.image_size = [snap["width"], snap["height"]]
         return snap
 
+    def adopt_found(self, found):
+        objects = self.st.adopt_found(found)
+        self.boxes = self.st.scene_boxes
+        return objects
+
     def robot(self) -> dict:
-        return self.st.robot_telemetry()
+        robot = self.st.robot_telemetry()
+        if hasattr(self.vision, "set_context"):
+            self.vision.set_context(self.st.source.info(), robot)
+        return robot
 
     def note_stage(self, stage: str, seconds: float) -> None:
         self.st.note_stage(stage, seconds)
@@ -870,6 +896,31 @@ class AgentHost:
         self.st.audit.event('scan', action='capture', session=record['session_id'], viewpoint=record['viewpoint_id'],
                             accepted=record['accepted'], reason=record['reject_reason'])
         return {k: record.get(k) for k in ("viewpoint_id", "accepted", "reject_reason", "session_id")}
+
+
+class ProviderReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    snapshot_id: str
+    pixel: list[float]
+    measured_mm: list[float]
+    measurement_note: str
+
+
+class ObjectReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    snapshot_id: str
+    track_id: int
+    pixel: list[float]
+    kind: str
+    confirm: bool = False
+
+
+class RegionSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    snapshot_id: str
+    box: list[float] | None = None
+    point: list[float] | None = None
+    label: str = ""
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -1540,7 +1591,9 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                            status=planned.status, ok=False, mode=planned.mode, reason=planned.reason)
             return planned.as_dict()
         if st.arm_thread is not None:
-            st.arm_thread.join(timeout=30)
+            deadline = (st.arm.motion_timeout_s(abs(body.distance_mm)) + 1
+                        if isinstance(st.arm, CartesianArm) else 30)
+            st.arm_thread.join(timeout=max(30, deadline))
         decision = holder.get("decision", planned)
         if "decision" not in holder:
             decision.ok, decision.status, decision.allow_motion = False, "error", False
@@ -1729,9 +1782,12 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                         history[-1] = (history[-1][0], text.strip())
                     try:
                         found = grok_find(st.grok, st.scene_frame, st.scene_boxes, text.strip(),
-                                          history=history or None, direct_fallback=False)
+                                          history=history or None)
                     except GrokError as e:
                         return fail(e, "select")
+                    if found.status == "found":
+                        objects = st.adopt_found(found)
+                        authoritative = found.recognition_live
                     decision = from_finder(found.status, found.box.id if found.box else None, found.candidate_ids,
                                            found.confidence, found.reason, objects, text)
             if decision.status == "clarify" and decision.question:
@@ -1763,6 +1819,139 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             raise HTTPException(409, "A task is running; cancel it before changing selection")
         try:
             return _select_object(text, track_id, box_id)
+        finally:
+            st.agent_lock.release()
+
+    @app.get("/api/vision/providers")
+    def api_providers():
+        st.vision.set_context(st.source.info(), st.robot_telemetry())
+        return st.vision.assess(st.frame_size)
+
+    @app.post("/api/vision/provider/reference")
+    def api_provider_reference(body: ProviderReference):
+        """Store a current independent ruler/reference comparison; never select/activate a provider."""
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409, "A task is running")
+        try:
+            with st.lock:
+                snap = (st.inventory or {}).get('snapshot') or {}
+                historical = st.vision.historical
+                if historical is None:
+                    raise HTTPException(400, "No imported candidate is available")
+                if snap.get('id') != body.snapshot_id:
+                    raise HTTPException(409, "Snapshot changed; capture a fresh stationary scene")
+                try:
+                    measured = finite(body.measured_mm, 3)
+                    pixel = finite(body.pixel, 2)
+                    if not body.measurement_note.strip():
+                        raise ValueError('Describe the independent physical measurement')
+                    if not (0 <= pixel[0] < snap['width'] and 0 <= pixel[1] < snap['height']):
+                        raise ValueError('Pixel is outside this snapshot')
+                    robot = st.robot_telemetry()
+                    stationary(robot)
+                    old = snap.get('pose') or {}
+                    if old.get('source') != 'telemetry' or old.get('moving') or pose_changed(old.get('pose6'), robot.get('pose6'), mm=1, deg=.1):
+                        raise ValueError('Reference image and stationary robot pose no longer match')
+                    if not old.get('joints') or np.max(np.abs(np.subtract(old['joints'], robot['joints']))) > .1:
+                        raise ValueError('Reference image and robot joints no longer match')
+                    if [snap['width'], snap['height']] != [historical.cal.width, historical.cal.height]:
+                        raise ValueError('Current image resolution differs from the imported optical profile')
+                    profile = snap.get('camera_profile') or {}
+                    if profile.get('kind') != 'pi' or profile.get('rotate_reported') != 180 or profile.get('extra_rotate') != 0:
+                        raise ValueError('Verify the Pi 180-degree server rotation and zero extra rotation first')
+                    from .scan3d.evidence import sha256
+                    row = {'calibration_sha256': historical.digest,
+                           'binding_sha256': historical.binding_hash(historical.station()),
+                           'image': snap['image'], 'image_sha256': sha256(st.s.data_dir / snap['image']),
+                           'image_size': [snap['width'], snap['height']], 'robot': robot,
+                           'pixel': pixel.tolist(), 'measured_mm': measured.tolist(),
+                           'measurement_note': body.measurement_note, 'recorded_at': time.time(),
+                           'camera_profile': profile, 'provenance': 'operator_independent_reference'}
+                    predicted = historical.cal.pixel_to_plane(*pixel, robot['joints'], float(measured[2]))
+                    projection = historical.cal.robot_to_pixel(measured, robot['joints'])
+                except (ValueError, TypeError, KeyError) as exc:
+                    raise HTTPException(400, str(exc)) from None
+                path = st.s.data_dir / 'calibration_references.jsonl'
+                with path.open('a') as stream:
+                    stream.write(json.dumps(row) + '\n')
+                st.invalidate_pending('New independent reference evidence recorded; request a fresh proposal.')
+                result = {'diagnostic_point_mm': predicted.tolist(), 'measured_mm': measured.tolist(),
+                          'error_mm': float(np.linalg.norm(predicted-measured)),
+                          'reprojection_error_px': float(np.linalg.norm(np.asarray(projection)-pixel)),
+                          'metric_permitted': False, 'motion_allowed': False, 'provider_activated': False}
+                st.audit.event('calibration_reference', **row, comparison=result)
+                return result
+        finally:
+            st.agent_lock.release()
+
+    @app.post("/api/select/reference")
+    def api_object_reference(body: ObjectReference):
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409, "A task is running")
+        try:
+            with st.lock:
+                snap = (st.inventory or {}).get('snapshot') or {}
+                context = st.selected_context or {}
+                selected = context.get('selected') or {}
+                if snap.get('id') != body.snapshot_id or selected.get('track_id') != body.track_id:
+                    raise HTTPException(409, "Snapshot or selected track changed")
+                if not body.confirm or body.kind != 'support_plane_point':
+                    raise HTTPException(400, "Confirm a visible point on the support plane; unknown object height is not a top-plane measurement")
+                try:
+                    pixel = finite(body.pixel, 2)
+                    if not Box.from_list(selected['box']).contains(*pixel):
+                        raise ValueError('Reference must lie inside the selected region')
+                except (ValueError, TypeError) as exc:
+                    raise HTTPException(400, str(exc)) from None
+                selected['geometric_reference'] = {'kind': body.kind, 'pixel': pixel.tolist(),
+                                                    'snapshot_id': body.snapshot_id,
+                                                    'provenance': 'operator_marked_support_point'}
+                st.invalidate_pending('Object geometric reference changed.')
+                st.audit.event('object_reference', snapshot_id=body.snapshot_id, track_id=body.track_id,
+                               reference=selected['geometric_reference'], motion_allowed=False)
+                return {'selected': selected, 'motion_allowed': False, 'metric_localization_state': 'not_localized'}
+        finally:
+            st.agent_lock.release()
+
+    @app.post("/api/scene")
+    def api_scene():
+        # Unlike the historical inventory endpoint, never parks the arm.
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409, "A task is running; wait before taking a snapshot")
+        try:
+            return st.snapshot_scene(home=False)
+        finally:
+            st.agent_lock.release()
+
+    @app.post("/api/select/region")
+    def api_select_region(body: RegionSelection):
+        from .regions import validated_region
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409, "A task is running; wait before changing selection")
+        try:
+            with st.lock:
+                snap = (st.inventory or {}).get("snapshot")
+                if not snap or snap["id"] != body.snapshot_id or st.scene_frame is None:
+                    raise HTTPException(409, "Snapshot changed; open a fresh snapshot")
+                if (body.box is None) == (body.point is None):
+                    raise HTTPException(400, "Provide either a box or a point")
+                if body.point is not None:
+                    if len(body.point) != 2 or not np.isfinite(body.point).all():
+                        raise HTTPException(400, "Point requires two finite pixel coordinates")
+                    hits = [b for b in st.scene_boxes if b.contains(*body.point)]
+                    if not hits:
+                        raise HTTPException(400, "No region at this point. Draw a box around the object.")
+                    return _select_object("", "", str(min(hits, key=lambda b: b.area).id))
+                try:
+                    box = validated_region(body.box, st.scene_frame, label=body.label)
+                except (ValueError, TypeError) as exc:
+                    raise HTTPException(400, str(exc)) from None
+                box.extra["localization_provenance"] = "operator_drawn_region"
+                found = FindResult(status="found", box=box, label=body.label, mode="direct",
+                                   reason="Operator drew this image region; semantic label is operator supplied.")
+                objects = st.adopt_found(found)
+                obj = next(o for o in objects if o["box_id"] == found.box.id)
+                return _select_object("", str(obj["track_id"]), "")
         finally:
             st.agent_lock.release()
 
@@ -2283,8 +2472,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                                        skill_sequence=["inspect_scene", "locate_object", "start_scan", "plan_orbit", "observe_from_viewpoint"])
                 return _agent_result(result, text)
             context = st.selected_context if refers_to_selection(text) else None
-            if context and context.get("snapshot_id") != ((st.inventory or {}).get("snapshot") or {}).get("id"):
-                return _refused("The scene changed. Select the object in the current snapshot.", text)
+            if refers_to_selection(text) and not context:
+                return _refused("No retained target is identifiable. Select the object explicitly before continuing.", text)
             result = agent_mod.run(host, text, step=body.step,
                                    continued=st.task_resume if body.step else None, selected_context=context)
             return _agent_result(result, text)

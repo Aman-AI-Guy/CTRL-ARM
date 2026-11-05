@@ -15,6 +15,7 @@ Each robot family only implements CartesianBackend (connect, move, stop, tcp, fr
 from __future__ import annotations
 
 import threading
+import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -67,21 +68,36 @@ class Limits:
     x: tuple[float, float]
     y: tuple[float, float]
     z: tuple[float, float]
+    radius_mm: float | None = None
 
     @classmethod
     def parse(cls, s: str | None) -> "Limits | None":
         if not s:
             return None
+        if s.startswith("cylinder:"):
+            radius, floor, ceiling = (float(p) for p in s.removeprefix("cylinder:").split(","))
+            if not math.isfinite(radius) or radius <= 0 or not math.isfinite(floor) or not ceiling > floor:
+                raise ValueError("cylinder limits need a positive finite radius, finite minimum Z, and higher maximum Z")
+            return cls((-radius, radius), (-radius, radius), (floor, ceiling), radius)
         v = [float(p) for p in s.split(",")]
         if len(v) != 6:
             raise ValueError("TROVA_ARM_LIMITS must be xmin,xmax,ymin,ymax,zmin,zmax (mm, robot base frame)")
         return cls((v[0], v[1]), (v[2], v[3]), (v[4], v[5]))
 
     def check(self, x: float, y: float, z: float) -> str | None:
+        if not all(math.isfinite(v) for v in (x, y, z)):
+            return "workspace position must contain finite coordinates"
+        if self.radius_mm is not None and math.hypot(x, y) > self.radius_mm:
+            return f"XY radius={math.hypot(x, y):.1f} mm exceeds the {self.radius_mm:g} mm workspace radius"
         for name, val, (lo, hi) in (("x", x, self.x), ("y", y, self.y), ("z", z, self.z)):
             if not lo <= val <= hi:
                 return f"{name}={val:.0f} mm is outside the safe box [{lo:.0f}, {hi:.0f}]"
         return None
+
+    def describe(self) -> str:
+        if self.radius_mm is not None:
+            return f"cylinder:{self.radius_mm:g},{self.z[0]:g},{self.z[1]:g}"
+        return ",".join(f"{v:g}" for bounds in (self.x, self.y, self.z) for v in bounds)
 
 
 class CartesianArm(ArmDriver):
@@ -143,6 +159,7 @@ class CartesianArm(ArmDriver):
                 self.state, self.last_error = "refused", err
                 return False
         self.state, self.last_error = "moving", None
+        timeout = self.motion_timeout_s(decision.proposal.get("distance_mm"))
         try:
             with motion_ticket(decision.ticket):
                 self.backend.move_linear(x, y, z, self.speed)
@@ -157,7 +174,7 @@ class CartesianArm(ArmDriver):
                 seen = seen or moving
                 if not moving and (seen or time.time() - t0 > START_GRACE_S):   # some arms start late
                     break
-                if time.time() - t0 > self.timeout:
+                if time.time() - t0 > timeout:
                     self.backend.stop()
                     self.state, self.last_error = "error", "move timed out"
                     return False
@@ -178,6 +195,15 @@ class CartesianArm(ArmDriver):
             return False
         self.state = "idle"
         return True
+
+    def motion_timeout_s(self, distance_mm: float | None) -> float:
+        """Allow commanded travel time plus margin; retain a deadline for stalled moves."""
+        if distance_mm is None or not math.isfinite(distance_mm) or distance_mm < 0:
+            return self.timeout
+        speed = min(self.speed, self.gateway.max_speed_mm_s)
+        if not math.isfinite(speed) or speed <= 0:
+            return self.timeout
+        return max(self.timeout, distance_mm / speed * 1.5 + 2)
 
     def point_at(self, x_mm: float, y_mm: float) -> bool:
         return self._go(x_mm, y_mm, self.z)

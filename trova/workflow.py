@@ -22,6 +22,7 @@ def fingerprint(host):
                "camera_body": repr(getattr(host.gateway, "camera", None)),
                "keepouts": repr(getattr(host.gateway, "keepouts", None)),
                "orbit_settings": getattr(getattr(host,'orbits',None),'public',lambda:None)(),
+               "calibration_provider_binding": getattr(host.vision, 'binding_fingerprint', lambda: None)(),
                "accel": getattr(host.gateway, "max_accel_mm_s2", None)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -81,9 +82,9 @@ def receipt_error(host, task, proposal_id):
 
 
 def refers_to_selection(text):
-    return bool(re.search(r"(?i)(\b(scansionalo|scan it|selected object|oggetto selezionato)\b|"
-                          r"\b(posizionati|mettiti|move|hover|position yourself)\s+(sopra|above|over)"
-                          r"\s*(it|di esso)?[.!?\s]*$)", text))
+    return bool(re.search(r"(?i)(\b(scansionalo|scan it|selected object|oggetto selezionato|continua|continue)\b|"
+                          r"\b(posizionati|mettiti|vai|move|hover|position yourself)\s+(sopra|above|over)"
+                          r"\s*(it|di esso|di lui|quello)?[.!?\s]*$|\b(above|over) it[.!?\s]*$)", text))
 
 
 def feedback(result, text=""):

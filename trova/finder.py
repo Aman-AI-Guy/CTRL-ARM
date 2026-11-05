@@ -83,6 +83,7 @@ class FindResult:
     clarifying_question: str | None = None
     candidate_ids: list[int] = field(default_factory=list)
     mode: str = "som"                 # som | direct | offline (Grok unreachable: local colour match)
+    recognition_live: bool = False
     grok_latency_s: float = 0.0
     total_s: float = 0.0
     grok_calls: int = 0
@@ -123,6 +124,7 @@ def find(grok: GrokClient, frame: np.ndarray, boxes: list[Box], request: str = "
                "query_color": color_name(query_image) if query_image is not None else None}
         r = grok.json(name="trova_select", prompt=prompt, schema=SELECT_SCHEMA, images=images, mock_context=ctx)
         d = r.data
+        res.recognition_live = not r.mock and not r.offline
         res.marked, res.grok_calls, res.grok_latency_s = marked, 1, r.latency_s
         res.label, res.reason = d.get("label", ""), d.get("reason", "")
         if r.offline:
@@ -150,16 +152,29 @@ def _direct(grok, frame, request, query_image, photo_line, res: FindResult) -> N
     r = grok.json(name="trova_direct", prompt=prompt, schema=DIRECT_SCHEMA, images=images,
                   mock_context={"request": request})
     d = r.data
-    res.mode = "direct"
+    res.mode = "offline" if r.offline else "direct"
+    res.recognition_live = not r.mock and not r.offline
     res.grok_calls += 1
     res.grok_latency_s += r.latency_s
     res.label, res.reason = d.get("label", res.label), d.get("reason", res.reason)
     res.confidence = float(d.get("confidence") or 0)
     if d.get("found") and d.get("box_2d"):
-        H, W = frame.shape[:2]
-        box = Box.from_norm1000(d["box_2d"], W, H, id=0, source="grok", label=res.label)
-        if box.area > 16:
-            res.status, res.box = "found", box
+        from .regions import validated_region
+        try:
+            values = np.asarray(d["box_2d"], dtype=float)
+            if values.shape != (4,) or not np.isfinite(values).all() or (values < 0).any() or (values > 1000).any():
+                raise ValueError("invalid normalized coordinates")
+            H, W = frame.shape[:2]
+            box = validated_region(values * [W / 1000, H / 1000, W / 1000, H / 1000], frame,
+                                   source="grok", label=res.label)
+            if not np.isfinite(res.confidence) or res.confidence < 0.65 or res.confidence > 1:
+                raise ValueError("uncertain model region")
+        except (ValueError, TypeError, OverflowError):
+            res.reason += ". Image region is uncertain; click an existing box or draw a box on the snapshot."
+            return
+        box.extra["localization_provenance"] = "grok_direct_region"
+        box.extra["region_confidence"] = res.confidence
+        res.status, res.box = "found", box
 
 
 # ---------------------------------------------------------------- mock Grok (offline mode)

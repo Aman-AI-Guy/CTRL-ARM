@@ -115,7 +115,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <h2>Vision task</h2>
     <div class="muted">Grok picks a skill. A move is a proposal until the motion gateway accepts it and calibration, clearance, and the operator unlock are all in place. A synthetic picture cannot authorize motion.</div>
     <div class="row" style="margin-top:8px"><input type="text" id="agentq" placeholder="trova l'evidenziatore rosa e posizionati sopra" onkeydown="if(event.key==='Enter')runAgent()">
-      <button onclick="runAgent(true)">Step</button><button onclick="runAgent()">Run task</button><button onclick="cancelAgent()">Cancel task</button></div>
+      <button onclick="openRegionSelection()">Select image region</button><button onclick="runAgent(true)">Step</button><button onclick="runAgent()">Run task</button><button onclick="cancelAgent()">Cancel task</button></div>
     <div id="agentres" class="result"></div>
     <div class="muted" id="motioninfo"></div>
     <div class="muted" id="visioninfo"></div>
@@ -147,7 +147,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
   <div class="panel" id="safetypanel">
     <h2>Safety measurements</h2>
     <div class="muted">Type values you measured. Empty fields are left unchanged. This form cannot set hardware mode or the unlock. Collision avoidance stays off. The physical e-stop is independent of this page.</div>
-    <div class="row"><input type="text" id="safelimits" placeholder="workspace xmin,xmax,ymin,ymax,zmin,zmax" style="flex:1"></div>
+    <div class="row"><input type="text" id="safelimits" placeholder="xmin,xmax,ymin,ymax,zmin,zmax or cylinder:radius,zmin,zmax (mm)" style="flex:1"></div>
     <div class="row"><input type="text" id="safekeep" placeholder="keep-out boxes, or none" style="flex:1"></div>
     <div class="row"><input type="text" id="safecamera" placeholder="camera body x,y,z,radius" style="flex:1"></div>
     <div class="row"><input type="number" id="safespeed" placeholder="speed mm/s" style="max-width:120px">
@@ -197,6 +197,13 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
 </section>
 </main>
 
+<dialog id="regionDialog" style="max-width:90vw;max-height:90vh;overflow:auto">
+  <p>Click an existing box, or drag a box around the object. This frozen snapshot selection never moves the arm.</p>
+  <label>Object name (operator supplied) <input id="regionLabel" placeholder="mouse rosso"></label>
+  <canvas id="regionCanvas" style="display:block;max-width:100%;max-height:65vh;touch-action:none"></canvas>
+  <div id="regionStatus" role="status"></div>
+  <button onclick="$('regionDialog').close()">Close</button>
+</dialog>
 <script src="/static/voice.js"></script>
 <script src="/static/speech.js"></script>
 <script>
@@ -460,6 +467,52 @@ function showFindAll(d) {
     (d.arm_blocked ? `<div style="color:var(--warn)">Arm not moved: ${esc(d.arm_blocked)}</div>` : '') +
     `<div class="muted">${r.n_candidates} candidates · Grok ${r.grok_latency_s}s · total ${d.total_s}s</div><div class="thumbs">${d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}"></a>` : ""}</div>`;
 }
+
+// Frozen image coordinates are bound to a snapshot id, never the moving live stream.
+let regionSnapshot = null, regionPicture = null, regionStart = null;
+async function openRegionSelection() {
+  const d = await call('/api/scene', {method: 'POST'});
+  regionSnapshot = d.snapshot;
+  regionPicture = new Image();
+  regionPicture.onload = () => {
+    const canvas = $('regionCanvas');
+    canvas.width = regionSnapshot.width; canvas.height = regionSnapshot.height;
+    paintRegions(); $('regionStatus').textContent = ''; $('regionDialog').showModal();
+  };
+  regionPicture.src = '/files/' + regionSnapshot.image;
+}
+function paintRegions(end) {
+  const ctx = $('regionCanvas').getContext('2d');
+  ctx.drawImage(regionPicture, 0, 0);
+  ctx.strokeStyle = '#ff00cc'; ctx.lineWidth = 3;
+  for (const o of regionSnapshot.objects) {
+    const [x0,y0,x1,y1] = o.box; ctx.strokeRect(x0,y0,x1-x0,y1-y0);
+  }
+  if (regionStart && end) {
+    ctx.strokeStyle = '#00ff80'; ctx.strokeRect(regionStart[0],regionStart[1],end[0]-regionStart[0],end[1]-regionStart[1]);
+  }
+}
+function regionPoint(ev) {
+  const c = $('regionCanvas'), r = c.getBoundingClientRect();
+  return [Math.max(0,Math.min(c.width,(ev.clientX-r.left)*c.width/r.width)),
+    Math.max(0,Math.min(c.height,(ev.clientY-r.top)*c.height/r.height))];
+}
+$('regionCanvas').onpointerdown = ev => {
+  regionStart = regionPoint(ev); ev.currentTarget.setPointerCapture(ev.pointerId);
+};
+$('regionCanvas').onpointermove = ev => { if (regionStart) paintRegions(regionPoint(ev)); };
+$('regionCanvas').onpointercancel = () => { regionStart = null; paintRegions(); };
+$('regionCanvas').onpointerup = async ev => {
+  if (!regionStart) return;
+  const end = regionPoint(ev), start = regionStart; regionStart = null;
+  const data = {snapshot_id: regionSnapshot.id, label: $('regionLabel').value};
+  if (Math.hypot(end[0]-start[0],end[1]-start[1]) < 6) data.point = end;
+  else data.box = [Math.min(start[0],end[0]), Math.min(start[1],end[1]), Math.max(start[0],end[0]), Math.max(start[1],end[1])];
+  try {
+    const result = await json('/api/select/region', data);
+    $('regionDialog').close(); showSelection(result);
+  } catch (e) { $('regionStatus').textContent = e.detail || e.error || 'Selection failed'; }
+};
 
 // ---- feature 1: inventory map
 async function doInventory() {
@@ -879,7 +932,8 @@ async function refresh() {
       ? `predicted ${(r.predicted_mm || []).join(', ')} mm · measured ${(r.measured_mm || []).join(', ')} mm · error ${r.error_mm} mm · version ${r.calibration_version} · image ${r.image_time || '–'} · pose ${r.pose_source} · uncertainty ${r.uncertainty_mm} · motion not authorized`
       : (r.reason || 'localization blocked');
   }
-  if (S.safety && $('safetyextra')) $('safetyextra').textContent = (S.safety.unchecked || []).join(' ');
+  if (S.safety && $('safetyextra')) $('safetyextra').textContent =
+    `Workspace: ${S.safety.workspace_limits || 'not configured'} (robot-base mm; TCP, not all links). ` + (S.safety.unchecked || []).join(' ');
   if (S.latency && $('timeread')) {
     const parts = Object.keys(S.latency).filter(k => S.latency[k] && S.latency[k].mean_s != null).map(k => `${k} mean ${S.latency[k].mean_s}s n=${S.latency[k].n}`);
     $('timeread').textContent = (parts.join(' · ') || 'no stage times yet') + ' · realtime not claimed';

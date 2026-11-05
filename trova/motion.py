@@ -266,6 +266,9 @@ def safety_report(gateway, observe_clearance_mm) -> dict:
         "mode_changed_here": False, "software_stop_is_not_safety_rated": True,
         "physical_estop": "independent of this software",
         "workspace": None if gateway is None else ("configured" if gateway.limits is not None else "not_configured"),
+        "workspace_limits": None if gateway is None or gateway.limits is None else gateway.limits.describe(),
+        "workspace_frame": "robot_base",
+        "workspace_applies_to": "TCP and configured camera sphere, not all robot links",
         "keep_out": keep,
         "clearance_mm": observe_clearance_mm,
         "camera": "configured" if gateway is not None and gateway.camera else "not_configured",
@@ -584,6 +587,9 @@ class MotionGateway:
         if self.limits is not None:
             radius = self.camera.radius_mm
             for centre in centres:
+                if self.limits.radius_mm is not None and math.hypot(*centre[:2]) + radius > self.limits.radius_mm:
+                    safety["clearance"] = "failed"
+                    return "the camera sphere exceeds the cylindrical workspace radius"
                 for name, value, (lo, hi) in (("x", centre[0], self.limits.x), ("y", centre[1], self.limits.y),
                                               ("z", centre[2], self.limits.z)):
                     if not lo + radius <= value <= hi - radius:
@@ -840,6 +846,20 @@ class MotionGateway:
                                 reason="the simulated table arm has no vertical axis")
         if pose is None and self.arm is not None:
             pose = self.current_pose()
+        backend = getattr(self.arm, "backend", None)
+        if self.mode == "hardware" and type(backend).__name__ == "XArmBackend":
+            try:
+                actual = backend.tcp_pose()
+                yaw_gap = abs((actual[5] - backend.yaw + 180) % 360 - 180)
+                aligned = abs(abs(actual[3]) - 180) < 1 and abs(actual[4]) < 1 and yaw_gap < 0.1
+            except Exception:
+                aligned = False
+            if not aligned:
+                return self._finish(ok=False, status="rejected", allow=False, speed=0,
+                                    requested=requested, proposal={}, safety=safety,
+                                    reason="Voice jog refused: this driver would reorient the xArm flange. "
+                                    "Use Studio to establish the pointing orientation (roll +/-180, pitch 0, "
+                                    "and the yaw read at app start) before jogging; no automatic reorientation.")
         proposal = {"delta_mm": [round(v, 3) for v in delta], "frame": "base",
                     "direction_note": "robot base frame, not the operator's left and right"}
         if pose is None:
