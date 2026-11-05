@@ -170,3 +170,114 @@ def test_issue_50_bringup_stop_matches_driver():
     api.set_state = lambda state: [7]
     with pytest.raises(Abort, match='STOP failed'):
         Bringup(api).stop()
+
+
+def test_issue_11_pending_targets_die_with_their_view(tmp_path, monkeypatch):
+    from test_motion_safety import cart_client
+    from test_features import _unique_color
+    st, c = cart_client(tmp_path, monkeypatch)
+    query = f'the {_unique_color(c)} one'
+    def find():
+        r = c.post('/api/find', data={'text': query, 'move': 'false'})
+        assert r.status_code == 200 and r.json()['result']['status'] == 'found'
+    find()
+    st.calib.points[0][2] += 1  # a mapping change, even without the endpoint
+    assert c.post('/api/arm/point_last').status_code == 409
+    find()
+    assert c.post('/api/upload_scene/clear').status_code == 200
+    assert c.post('/api/arm/point_last').status_code in (400, 409)
+    find()
+    st.override = st.frame()
+    find()  # blocked uploaded photo must never become a move after Back to live
+    assert st.pending_move is None
+    c.post('/api/upload_scene/clear')
+    assert c.post('/api/arm/point_last').status_code in (400, 409)
+    assert c.post('/api/arm/lift_tray', json={'place_u': 400, 'place_v': 400}).status_code in (400, 409)
+    find()
+    st.pending_move['_issued'] = 0
+    assert c.post('/api/arm/point_last').status_code == 409
+    assert st.arm.backend.history == []
+
+
+def test_issue_12_first_run_find_never_homes(tmp_path, monkeypatch):
+    from test_first_run import first_run_client
+    st, c = first_run_client(tmp_path, monkeypatch)
+    st.arm.backend.pos = [400, 0, 150]
+    st.arm.backend.target = [400, 0, 150]
+    before = list(st.arm.backend.history)
+    r = c.post('/api/find', data={'text': 'red', 'move': 'true'})
+    assert r.status_code == 409 and 'Arm home first' in r.json()['error']
+    assert st.arm.backend.history == before
+
+
+def test_issue_17_arm_calibration_needs_redundancy_and_reports_max():
+    import numpy as np
+    from trova.calibration import Calibration
+    pts = [[0,0,0,0], [1000,0,500,0], [1000,800,500,400], [0,800,0,400]]
+    with pytest.raises(ValueError, match='at least 5'):
+        Calibration(points=pts, source='arm').fit()
+    with pytest.raises(ValueError, match='wrong'):
+        Calibration(points=pts + [[500,400,400,50]], source='arm').fit()
+    c = Calibration(H=np.eye(3), points=[[0,0,0,0], [10,0,30,0]])
+    assert c.error_mm() == 20
+
+
+def test_issue_23_aruco_refuses_uploaded_scene(tmp_path, monkeypatch):
+    from test_motion_safety import cart_client
+    import trova.server as server
+    st, c = cart_client(tmp_path, monkeypatch)
+    st.override = st.frame()
+    monkeypatch.setattr(server, 'calibrate_aruco', lambda *a: pytest.fail('used uploaded photo'))
+    r = c.post('/api/calibration/aruco')
+    assert r.status_code == 409 and 'live camera' in r.json()['detail']
+    assert st.arm.backend.history == []
+
+
+def test_issue_24_source_and_survey_pose_bind_calibration(tmp_path, monkeypatch):
+    from test_first_run import first_run_client
+    from trova.arm import load_poses
+    st, c = first_run_client(tmp_path, monkeypatch, TROVA_FIRST_RUN='0')
+    st.arm.home_joints = [5,0,0,0,0]
+    assert 'survey pose' in st.arm_blocked(interlocks=False)
+    st.arm.home_joints = [0]*5
+    st.source.info = lambda: {'kind': 'video'}
+    assert 'recorded' in st.arm_blocked()
+    assert c.post('/api/source', data={'spec': 'demo'}).status_code == 200
+    assert st.calib is None and st.pending_move is None and not st.calib_path.exists()
+    (tmp_path/'arm_poses.json').write_text('{')
+    with pytest.raises(RuntimeError, match='staff must restore'):
+        load_poses(tmp_path)
+
+
+def test_issue_43_refused_lift_does_not_dirty_store(tmp_path, monkeypatch):
+    from test_motion_safety import cart_client
+    st, c = cart_client(tmp_path, monkeypatch)
+    writes = []
+    st.lift_store = types.SimpleNamespace(write=writes.append)
+    before = list(st.arm.backend.history)
+    r = c.post('/api/arm/lift_tray', json={'pick_u': 300, 'pick_v': 300, 'place_u': 20000, 'place_v': 300})
+    if st.arm_thread:
+        st.arm_thread.join(2)
+    assert r.status_code == 409 and not st.lift_interrupted and writes == []
+    assert st.arm.backend.history == before
+
+
+def test_issue_45_grid_targets_obey_limits_and_calibration(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    from trova.calibration import Calibration
+    from trova.arm import TaughtGridArm, FakeJointBackend
+    app, c = _client(tmp_path, monkeypatch, TROVA_ARM='grid:fake', TROVA_ARM_LIMITS='0,600,0,400,0,300')
+    st = app.state.trova
+    st.arm.record_home()
+    st.arm.record(0, 0)
+    st.frame()
+    assert c.post('/api/arm/point', json={'u': 10, 'v': 10}).status_code == 409
+    st.calib.source = 'arm'
+    assert c.post('/api/arm/point', json={'x_mm': 5000, 'y_mm': 100}).status_code == 409
+    assert not st.arm.point_at(float('nan'), 10) and st.arm.backend.q == [0,0]
+    class Physical(FakeJointBackend):
+        pass
+    grid = TaughtGridArm(Physical(), tmp_path/'other.json', limits=st.arm.limits)
+    grid.home_q = [0,0]
+    grid.home()
+    assert grid.state == 'refused' and 'kinematics' in grid.last_error

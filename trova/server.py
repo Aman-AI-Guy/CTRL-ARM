@@ -167,6 +167,7 @@ class State:
                                on_call=lambda e: self.audit.event("grok_call", **e),
                                timeout=float(os.getenv("TROVA_GROK_TIMEOUT_S", "60")),
                                offline_fallback=os.getenv("TROVA_OFFLINE_FALLBACK", "1").lower() not in ("0", "false", "no"))
+        self.camera_spec, self.view_revision = s.camera, 0
         self.source = open_source(s.camera)
         self.override: np.ndarray | None = None
         self.background: np.ndarray | None = None
@@ -275,6 +276,24 @@ class State:
         raw = find_blobs(frame, self.background, self.thresh, self.min_area)
         return drop_occluders(raw, frame.shape), is_occluded(raw, frame.shape)
 
+    def invalidate_targets(self) -> None:
+        self.view_revision += 1
+        self.pending_move, self.pending = None, None
+
+    def view_stamp(self) -> tuple:
+        c = self.calib
+        return (self.view_revision, self.camera_spec, id(self.source), id(self.override),
+                tuple(self.frame_size or ()), json.dumps(c.as_dict(), sort_keys=True) if c else None,
+                c.H.tobytes() if c and c.ok else None)
+
+    def target_valid(self, target: dict) -> bool:
+        issued = (target.get("approach") or {}).get("issued", target.get("_issued", 0)) if self.first_run else target.get("_issued", 0)
+        return target.get("_view") == self.view_stamp() and 0 <= time.time() - issued <= CONFIRM_TTL_S
+
+    def require_target(self, target: dict) -> None:
+        if not self.target_valid(target):
+            raise ArmBusy("Stale target refused: camera, calibration or source changed, or older than 60 s; find again")
+
     def arm_blocked(self, pixels: bool = True, *, interlocks: bool = True) -> str | None:
         """Why the arm must not move right now (None = it may). pixels=False: the target is given in robot mm,
         so only the safety rules apply, not the camera calibration."""
@@ -290,18 +309,27 @@ class State:
                     "with staff, then confirm /api/arm/recover_lift while STOP remains latched")
         if interlocks and self.persistence_error:
             return "Safety persistence failed: " + self.persistence_error
-        if isinstance(self.arm, CartesianArm):
+        if isinstance(self.arm, (CartesianArm, TaughtGridArm)):
             if not self.arm.limits:
                 return "No safety box: set TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax (robot mm) with staff, restart"
-            if not (self.arm.home_mm or self.arm.home_joints):
+            if not ((self.arm.home_mm or self.arm.home_joints) if isinstance(self.arm, CartesianArm) else self.arm.home_q):
                 return ("No home pose: teach one (Setup: Teach survey pose here) or set TROVA_ARM_HOME_MM=x,y,z, restart"
                         if self.camera_on_arm else "No home pose: set TROVA_ARM_HOME_MM=x,y,z outside the camera view, restart")
             if not pixels:
                 return None
-            if self.camera_on_arm and not self.at_survey():
+            if interlocks and self.camera_on_arm and not self.at_survey():
                 return "The arm camera is not at the survey pose, so the picture does not match the calibration: Arm home"
             if not self.calib or self.calib.source not in ("arm", "aruco_robot"):
                 return "Calibrate with the arm first (Setup: Calibrate with arm, or ArUco with markers recorded by the arm)"
+            if self.camera_on_arm and isinstance(self.arm, CartesianArm):
+                survey = self.arm.home_joints or self.arm.home_mm
+                if not (survey and self.calib.pose and len(survey) == len(self.calib.pose)
+                        and max(abs(a-b) for a, b in zip(survey, self.calib.pose)) <= 0.01):
+                    return "Calibration belongs to a different survey pose: calibrate again"
+            if self.physical and self.calib.camera != self.camera_spec:
+                return "Calibration belongs to a different camera source: calibrate again"
+            if self.source.info().get("kind") in ("images", "video"):
+                return "A recorded image/video is shown: the arm only follows the live camera"
             if self.override is not None:
                 return "An uploaded photo is shown: the arm only follows the live camera (Back to live)"
             if self.calib.size and self.frame_size and list(self.calib.size) != list(self.frame_size):
@@ -607,6 +635,8 @@ class State:
         busy = self.arm_thread and self.arm_thread.is_alive()
         if not busy and was_there and not self.manual_mode:
             return                         # already parked: reading a frame requires no motion/reset
+        if self.first_run:
+            raise ArmBusy("First supervised run: Arm home first; captures never move the arm")
         if not move:
             raise ArmBusy("move=false: no safe parked camera view is available; explicitly home the arm first")
         self.start_arm(self.arm.home, job="home", pixels=False, ticket=ticket, wait=True)
@@ -876,7 +906,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "table_mm": table_mm, "arm_blocked": arm_blocked, "total_s": round(total, 2), "box": res.box,
                             "occluded": occluded, "moved": bool(table_mm and move and not arm_blocked and not st.first_run),
                             "boxes": [b.as_dict() for b in boxes], **paths}
-            st.pending_move = {**st.last_find, "_ticket": ticket} if res.status == "found" else None
+            st.pending_move = {**st.last_find, "_ticket": ticket, "_view": st.view_stamp(), "_issued": time.time()} \
+                if res.status == "found" and table_mm and not arm_blocked else None
             if st.first_run and table_mm and st.pending_move and isinstance(st.arm, CartesianArm):
                 try:
                     st.pending_move["approach"] = st.first_approach(table_mm)
@@ -934,7 +965,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                    "marked": st.audit.save_image("find_all", marked), "request": text.strip(),
                    "total_s": round(time.perf_counter() - t0, 2), "occluded": occluded}
             ev = st.audit.event("find_all", **out)
-            st.pending_move = {"result": {"label": res.label}, "targets": targets, "_ticket": ticket} if targets else None
+            st.pending_move = {"result": {"label": res.label}, "targets": targets, "_ticket": ticket,
+                               "_view": st.view_stamp(), "_issued": time.time()} if targets and not blocked else None
             return out | {"event_id": ev["id"]}
 
     @app.post("/api/clarify")
@@ -1129,36 +1161,49 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/source")
     def api_source(spec: str = Form(...)):
-        try:
-            new = open_source(spec)
-        except Exception as e:  # noqa: BLE001 - report any camera error to the UI
-            return fail(e, "source")
-        old, st.source = st.source, new
-        old.close()
-        if hasattr(new, "attach"):
-            new.attach(st.arm, st.s.data_dir)
-        st.override, st.background, st.background_path = None, None, None
-        st.audit.event("source", spec=spec)
-        return st.source.info()
+        with st.lock:
+            try:
+                new = open_source(spec)
+            except Exception as e:  # noqa: BLE001 - report any camera error to the UI
+                return fail(e, "source")
+            st.invalidate_targets()
+            st.camera_spec = spec
+            st.calib, st.reference = None, None
+            st.click_points, st.arm_points = [], []
+            st.calib_path.unlink(missing_ok=True)
+            st.watch.stop()
+            old, st.source = st.source, new
+            old.close()
+            if hasattr(new, "attach"):
+                new.attach(st.arm, st.s.data_dir)
+            st.override, st.background, st.background_path = None, None, None
+            st.audit.event("source", spec=spec)
+            return st.source.info()
 
     @app.post("/api/source/step")
     def api_step(delta: int = Form(1)):
-        if not isinstance(st.source, ImageSource):
-            raise HTTPException(400, "Only for an image folder source")
-        st.source.step(delta)
-        return st.source.info()
+        with st.lock:
+            if not isinstance(st.source, ImageSource):
+                raise HTTPException(400, "Only for an image folder source")
+            st.invalidate_targets()
+            st.source.step(delta)
+            return st.source.info()
 
     @app.post("/api/upload_scene")
     def api_upload_scene(photo: UploadFile = File(...)):
-        st.override = decode_upload(photo.file.read())
-        st.background, st.background_path = None, None
-        st.audit.event("upload_scene", size=list(st.override.shape[:2]))
-        return {"override": True}
+        with st.lock:
+            st.invalidate_targets()
+            st.override = decode_upload(photo.file.read())
+            st.background, st.background_path = None, None
+            st.audit.event("upload_scene", size=list(st.override.shape[:2]))
+            return {"override": True}
 
     @app.post("/api/upload_scene/clear")
     def api_upload_clear():
-        st.override = None
-        return {"override": False}
+        with st.lock:
+            st.invalidate_targets()
+            st.override = None
+            return {"override": False}
 
     @app.post("/api/tune")
     def api_tune(t: Tune):
@@ -1171,44 +1216,55 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     # ------------------------------------------------------------------ calibration
     @app.post("/api/calibration/aruco")
     def api_cal_aruco():
-        st.clear_view()            # park (camera on the arm: go to the survey pose) before looking for the markers
-        try:
-            mpath = st.s.data_dir / "markers.json"
-            pos = load_marker_positions(mpath, st.s.table_w_mm, st.s.table_h_mm)
-            st.calib = calibrate_aruco(st.frame(), pos)
-            if mpath.exists() and json.loads(mpath.read_text()).get("_frame") == "robot":
-                st.calib.source = "aruco_robot"
-            if st.camera_on_arm and isinstance(st.arm, CartesianArm) and st.at_survey():
-                st.calib.pose = list(st.arm.home_joints or st.arm.home_mm)   # this mapping is only valid here
-        except ValueError as e:
-            return fail(e, "calibration")
-        st.calib.save(st.calib_path)
-        st.audit.event("calibration", **st.calib.as_dict())
-        return st.calib.as_dict()
+        with st.lock:
+            if st.override is not None:
+                raise HTTPException(409, "An uploaded photo is shown: calibrate on the live camera (Back to live)")
+            st.invalidate_targets()
+            st.clear_view()            # park (camera on the arm: go to the survey pose) before looking for the markers
+            try:
+                mpath = st.s.data_dir / "markers.json"
+                pos = load_marker_positions(mpath, st.s.table_w_mm, st.s.table_h_mm)
+                c = calibrate_aruco(st.frame(), pos)
+                if mpath.exists() and json.loads(mpath.read_text()).get("_frame") == "robot":
+                    c.source = "aruco_robot"
+                    c.fit()
+                if st.camera_on_arm and isinstance(st.arm, CartesianArm) and st.at_survey():
+                    c.pose = list(st.arm.home_joints or st.arm.home_mm)   # this mapping is only valid here
+            except ValueError as e:
+                return fail(e, "calibration")
+            c.camera = st.camera_spec
+            st.calib = c
+            st.calib.save(st.calib_path)
+            st.audit.event("calibration", **st.calib.as_dict())
+            return st.calib.as_dict()
 
     @app.post("/api/calibration/click")
     def api_cal_click(p: ClickPoint):
-        st.click_points.append([p.u, p.v, p.x_mm, p.y_mm])
-        out = {"points": len(st.click_points)}
-        if len(st.click_points) >= 4:
-            f = st.frame()
-            c = Calibration(points=[list(x) for x in st.click_points], source="clicks", size=[f.shape[1], f.shape[0]])
-            try:
-                out["error_mm"] = round(c.fit(), 2)
-            except ValueError as e:
-                st.click_points.pop()          # drop the point that broke the fit; the user clicks again
-                return fail(ValueError(f"{e} (that point was not kept)"), "calibration")
-            st.calib = c
-            c.save(st.calib_path)
-            st.audit.event("calibration", **c.as_dict())
-        return out
+        with st.lock:
+            st.invalidate_targets()
+            st.click_points.append([p.u, p.v, p.x_mm, p.y_mm])
+            out = {"points": len(st.click_points)}
+            if len(st.click_points) >= 4:
+                f = st.frame()
+                c = Calibration(points=[list(x) for x in st.click_points], source="clicks", size=[f.shape[1], f.shape[0]])
+                try:
+                    out["error_mm"] = round(c.fit(), 2)
+                except ValueError as e:
+                    st.click_points.pop()          # drop the point that broke the fit; the user clicks again
+                    return fail(ValueError(f"{e} (that point was not kept)"), "calibration")
+                st.calib = c
+                c.save(st.calib_path)
+                st.audit.event("calibration", **c.as_dict())
+            return out
 
     @app.post("/api/calibration/reset")
     def api_cal_reset():
-        st.click_points, st.arm_points, st.calib = [], [], None
-        if st.calib_path.exists():
-            st.calib_path.unlink()
-        return {"ok": True}
+        with st.lock:
+            st.invalidate_targets()
+            st.click_points, st.arm_points, st.calib = [], [], None
+            if st.calib_path.exists():
+                st.calib_path.unlink()
+            return {"ok": True}
 
     @app.post("/api/calibration/markers")
     def api_markers():
@@ -1222,26 +1278,34 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/calibration/arm_click")
     def api_cal_arm_click(p: UV):
-        """Put the arm tip on the table (freedrive or pendant), then click the tip in the live view.
-        Robot-frame points live in their own list: they are never mixed with table-mm clicks."""
-        arm = _need_cartesian()
-        if st.override is not None:
-            raise HTTPException(409, "An uploaded photo is shown: calibrate on the live camera (Back to live)")
-        x, y, _ = arm.tcp_mm()
-        st.arm_points.append([p.u, p.v, x, y])
-        pts = st.arm_points
-        out = {"points": len(pts), "tcp_mm": [round(x, 1), round(y, 1)]}
-        if len(pts) >= 4:
-            c = Calibration(points=[list(q) for q in pts], source="arm", size=st.frame_size)
-            try:
-                out["error_mm"] = round(c.fit(), 2)
-            except ValueError as e:
-                st.arm_points.pop()
-                return fail(ValueError(f"{e} (that point was not kept)"), "calibration")
-            st.calib = c
-            c.save(st.calib_path)
-            st.audit.event("calibration", **c.as_dict())
-        return out
+        with st.lock:
+            """Put the arm tip on the table (freedrive or pendant), then click the tip in the live view.
+            Robot-frame points live in their own list: they are never mixed with table-mm clicks."""
+            arm = _need_cartesian()
+            if st.override is not None:
+                raise HTTPException(409, "An uploaded photo is shown: calibrate on the live camera (Back to live)")
+            st.invalidate_targets()
+            x, y, _ = arm.tcp_mm()
+            st.arm_points.append([p.u, p.v, x, y])
+            pts = st.arm_points
+            out = {"points": len(pts), "tcp_mm": [round(x, 1), round(y, 1)]}
+            if len(pts) >= 4:
+                c = Calibration(points=[list(q) for q in pts], source="clicks", size=st.frame_size)
+                try:
+                    out["error_mm"] = round(c.fit(), 2)
+                except ValueError as e:
+                    st.arm_points.pop()
+                    return fail(ValueError(f"{e} (that point was not kept)"), "calibration")
+                if len(pts) < 5:
+                    out.pop("error_mm", None)
+                    return out | {"need_points": 5}
+                c.source, c.camera = "arm", st.camera_spec
+                if st.camera_on_arm:
+                    c.pose = list(arm.home_joints or arm.home_mm or ())
+                st.calib = c
+                c.save(st.calib_path)
+                st.audit.event("calibration", **c.as_dict())
+            return out
 
     @app.post("/api/calibration/marker_from_arm")
     def api_marker_from_arm(marker_id: int = Form(...)):
@@ -1260,25 +1324,27 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/arm/teach_pose")
     def api_arm_teach_pose(name: str = Form("home_joints")):
-        """Record the arm's current joint angles as a named pose: home_joints (with the camera on the arm: the
-        survey pose, where the camera sees the whole table) or look_joints (the room scan starts here)."""
-        arm = _need_cartesian()
-        if name not in ("home_joints", "look_joints"):
-            raise HTTPException(400, "name must be home_joints or look_joints")
-        try:
-            q = arm.backend.joints()
-        except NotImplementedError as e:
-            return fail(e, "teach_pose")
-        poses = save_pose(st.s.data_dir, name, q)
-        if name == "home_joints":
-            arm.home_joints = poses[name]
-            if st.camera_on_arm and st.calib and st.calib.source in ("arm", "aruco_robot"):
-                st.calib = None                # the view changed: the old pixel -> robot mapping is wrong now
-                if st.calib_path.exists():
-                    st.calib_path.unlink()
-        st.audit.event("teach_pose", name=name, joints=poses[name])
-        return {"poses": poses, "note": "survey pose changed: calibrate again (ArUco)" if name == "home_joints"
-                and st.camera_on_arm else ""}
+        with st.lock:
+            """Record the arm's current joint angles as a named pose: home_joints (with the camera on the arm: the
+            survey pose, where the camera sees the whole table) or look_joints (the room scan starts here)."""
+            arm = _need_cartesian()
+            if name not in ("home_joints", "look_joints"):
+                raise HTTPException(400, "name must be home_joints or look_joints")
+            try:
+                q = arm.backend.joints()
+            except NotImplementedError as e:
+                return fail(e, "teach_pose")
+            st.invalidate_targets()
+            poses = save_pose(st.s.data_dir, name, q)
+            if name == "home_joints":
+                arm.home_joints = poses[name]
+                if st.camera_on_arm and st.calib and st.calib.source in ("arm", "aruco_robot"):
+                    st.calib = None                # the view changed: the old pixel -> robot mapping is wrong now
+                    if st.calib_path.exists():
+                        st.calib_path.unlink()
+            st.audit.event("teach_pose", name=name, joints=poses[name])
+            return {"poses": poses, "note": "survey pose changed: calibrate again (ArUco)" if name == "home_joints"
+                    and st.camera_on_arm else ""}
 
     @app.post("/api/arm/clear_errors")
     def api_arm_clear_errors(request: Request):
@@ -1357,35 +1423,49 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if blocked:
             raise HTTPException(409, blocked)
         x, y = _to_mm(p)
+        if isinstance(st.arm, (CartesianArm, TaughtGridArm)) and st.arm.limits:
+            err = st.arm.limits.check(x, y, st.arm.z)
+            if err:
+                raise ArmBusy(err)
         st.start_arm(st.arm.point_at, x, y, pixels=p.u is not None)
         st.audit.event("arm_point", x_mm=x, y_mm=y)
         return {"x_mm": round(x, 1), "y_mm": round(y, 1)}
 
     @app.post("/api/arm/lift_tray")
     def api_lift_tray(r: LiftReq):
-        """Feature 7 (experimental): lift the slotted tray under an object with the fork and set it down elsewhere."""
-        if not lift_allowed():
-            return JSONResponse({"error": "Tray lifting is off. Measure TROVA_TRAY_Z_SLOT_MM and TROVA_TRAY_APPROACH "
-                                          "on the real tray with staff, then set TROVA_ALLOW_LIFT=1."}, 403)
-        if not hasattr(st.arm, "run_waypoints"):
-            raise HTTPException(400, f"Arm '{st.arm.name}' has no waypoint support")
-        if st.arm_blocked():
-            return JSONResponse({"error": st.arm_blocked(), "blocked": True}, 409)
-        if r.pick_u is None:
-            lf = st.last_find
-            if not lf or not lf.get("table_mm"):
-                raise HTTPException(400, "Find the object first, or give pick_u, pick_v")
-            pick = tuple(lf["table_mm"])
-        else:
-            pick = st.calib.pixel_to_table(r.pick_u, r.pick_v)
-        place = st.calib.pixel_to_table(r.place_u, r.place_v)
-        z_hover = getattr(st.arm, "z", 150.0)
-        wps = tray_waypoints(pick, place, z_hover, TrayParams.from_env())
-        st.start_arm(st.run_lift, wps, job="lift")
-        st.audit.event("arm_lift_tray", pick=[round(v, 1) for v in pick], place=[round(v, 1) for v in place],
-                       waypoints=[[w[0]] + [round(v, 1) for v in w[1:]] for w in wps])
-        return {"ok": True, "pick_mm": [round(v, 1) for v in pick], "place_mm": [round(v, 1) for v in place],
-                "waypoints": len(wps)}
+        with st.lock:
+            """Feature 7 (experimental): lift the slotted tray under an object with the fork and set it down elsewhere."""
+            if not lift_allowed():
+                return JSONResponse({"error": "Tray lifting is off. Measure TROVA_TRAY_Z_SLOT_MM and TROVA_TRAY_APPROACH "
+                                              "on the real tray with staff, then set TROVA_ALLOW_LIFT=1."}, 403)
+            if not hasattr(st.arm, "run_waypoints"):
+                raise HTTPException(400, f"Arm '{st.arm.name}' has no waypoint support")
+            if st.arm_blocked():
+                return JSONResponse({"error": st.arm_blocked(), "blocked": True}, 409)
+            if r.pick_u is None:
+                lf = st.pending_move
+                if not lf or not lf.get("table_mm"):
+                    raise HTTPException(400, "Find the object first, or give pick_u, pick_v")
+                st.require_target(lf)
+                pick = tuple(lf["table_mm"])
+            else:
+                pick = st.calib.pixel_to_table(r.pick_u, r.pick_v)
+            place = st.calib.pixel_to_table(r.place_u, r.place_v)
+            z_hover = getattr(st.arm, "z", 150.0)
+            wps = tray_waypoints(pick, place, z_hover, TrayParams.from_env())
+            limits = getattr(st.arm, "limits", None)
+            if limits is None and not (st.s.arm == "sim" and type(st.arm) is SimArm):
+                raise ArmBusy("No safety box for tray lift")
+            for label, x, y, z in wps:
+                err = limits.check(x, y, z) if limits else None
+                if err:
+                    raise ArmBusy(f"{label}: {err}")
+            stamp = st.view_stamp()
+            st.start_arm(st.run_lift, wps, job="lift", guard=lambda: stamp == st.view_stamp())
+            st.audit.event("arm_lift_tray", pick=[round(v, 1) for v in pick], place=[round(v, 1) for v in place],
+                           waypoints=[[w[0]] + [round(v, 1) for v in w[1:]] for w in wps])
+            return {"ok": True, "pick_mm": [round(v, 1) for v in pick], "place_mm": [round(v, 1) for v in place],
+                    "waypoints": len(wps)}
 
     @app.post("/api/arm/teach")
     def api_arm_teach(p: Point):
@@ -1537,23 +1617,27 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     # ------------------------------------------------------------------ voice (Grok Voice realtime)
     @app.post("/api/arm/point_last")
     def api_point_last(a: Approach | None = None):
-        """Move to the object of the last find (used after a spoken 'yes').
-        First supervised run: stage 1 hovers above it, stage 2 descends; each needs its own shown confirmation."""
-        lf = getattr(st, "pending_move", None)
-        if not lf or not (lf.get("table_mm") or lf.get("targets")):
-            raise HTTPException(400, "Nothing found yet to point at")
-        if st.first_run:
-            return _approach(lf, a)
-        blocked = st.arm_blocked()
-        if blocked:
-            return JSONResponse({"error": blocked, "blocked": True}, 409)
-        if lf.get("targets"):                                   # the last request was "point at all ..."
-            st.start_arm(st.run_tour, lf["targets"], job="tour", ticket=lf["_ticket"])
-            st.audit.event("arm_tour", targets=lf["targets"], after="voice confirmation")
-            return {"ok": True, "label": lf["result"]["label"], "targets": lf["targets"]}
-        st.start_arm(st.arm.point_at, *lf["table_mm"], ticket=lf["_ticket"])
-        st.audit.event("arm_point", x_mm=lf["table_mm"][0], y_mm=lf["table_mm"][1], after="voice confirmation")
-        return {"ok": True, "label": lf["result"]["label"], "table_mm": lf["table_mm"]}
+        with st.lock:
+            """Move to the object of the last find (used after a spoken 'yes').
+            First supervised run: stage 1 hovers above it, stage 2 descends; each needs its own shown confirmation."""
+            lf = getattr(st, "pending_move", None)
+            if not lf or not (lf.get("table_mm") or lf.get("targets")):
+                if st.first_run:
+                    raise ArmBusy("First supervised run refused: no current target; find again")
+                raise ArmBusy("No current target: find again before pointing")
+            st.require_target(lf)
+            if st.first_run:
+                return _approach(lf, a)
+            blocked = st.arm_blocked()
+            if blocked:
+                return JSONResponse({"error": blocked, "blocked": True}, 409)
+            if lf.get("targets"):                                   # the last request was "point at all ..."
+                st.start_arm(st.run_tour, lf["targets"], job="tour", ticket=lf["_ticket"], guard=lambda: st.target_valid(lf))
+                st.audit.event("arm_tour", targets=lf["targets"], after="voice confirmation")
+                return {"ok": True, "label": lf["result"]["label"], "targets": lf["targets"]}
+            st.start_arm(st.arm.point_at, *lf["table_mm"], ticket=lf["_ticket"], guard=lambda: st.target_valid(lf))
+            st.audit.event("arm_point", x_mm=lf["table_mm"][0], y_mm=lf["table_mm"][1], after="voice confirmation")
+            return {"ok": True, "label": lf["result"]["label"], "table_mm": lf["table_mm"]}
 
     def _approach(pm: dict, a: Approach | None):
         problems = st.first_run_problems()
@@ -1585,7 +1669,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         speed = a.speed_mm_s or st.first_run_speed
         # the picture (and so the target) is only valid at the survey pose: the first stage must start there
         first = a.stage == 0 or (a.stage == 1 and not ap.get("q_level"))
-        st.start_arm(st.run_approach, pm, ap, speed, job="approach", pixels=first, ticket=pm["_ticket"])
+        st.start_arm(st.run_approach, pm, ap, speed, job="approach", pixels=first, ticket=pm["_ticket"], guard=lambda: st.target_valid(pm))
         st.audit.event("arm_approach_confirmed", stage=a.stage, target_mm=[x, y, z], speed_mm_s=speed)
         return {"ok": True, "stage": a.stage, "target_mm": [x, y, z], "speed_mm_s": speed, "warning": COLLISION_WARNING}
 

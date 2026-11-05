@@ -143,11 +143,13 @@ curl -s -X POST "localhost:8000/api/arm/reset?token=$TROVA_TOKEN" -H "x-trova-op
 
 - [ ] Move the arm by hand until the camera sees the whole table. Then Setup → **Teach survey pose here**.
 - [ ] Print the ArUco markers **flat**, taped onto the same surface the objects stand on. Don't use the raised blocks
-      or cube faces: a marker above the surface, seen at an angle, adds parallax error. All 4 must be visible
+      or cube faces: a marker above the surface, seen at an angle, adds parallax error. All 5 must be visible
       from the survey pose.
-- [ ] Touch the centre of each ArUco marker (0-3) with the tip. Use **Record marker from arm** for each one.
+- [ ] Place markers 0-3 near the corners and marker 4 near the centre. Four points fit exactly and cannot test
+      calibration error. Trova requires at least five robot-frame points and rejects a maximum error above 15 mm.
+- [ ] Touch the centre of each ArUco marker (0-4) with the tip. Use **Record marker from arm** for each one.
 - [ ] Return to the survey pose (**Arm home**). Then **Calibrate (ArUco)**. The result must show `source
-      aruco_robot`, an error ≤ 8 mm and a `pose` equal to the survey pose.
+      aruco_robot`, a maximum per-point error ≤ 8 mm and a `pose` equal to the survey pose.
 - [ ] Teaching a new survey pose deletes the calibration. If you re-teach, calibrate again.
 
 ## 4. Preflight

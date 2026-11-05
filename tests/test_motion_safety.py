@@ -27,7 +27,7 @@ def cart_client(tmp_path, monkeypatch, **extra):
     st = app.state.trova
     st.frame()
     st.calib = Calibration.default(1280, 800, 600, 400)
-    st.calib.source = "arm"
+    st.calib.source, st.calib.camera = "arm", st.s.camera
     save_pose(tmp_path, "look_joints", [0.0] * 5)
     return st, c
 

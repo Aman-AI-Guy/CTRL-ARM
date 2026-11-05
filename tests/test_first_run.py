@@ -18,6 +18,7 @@ WARNING = "Collision avoidance: NOT PRESENT. Hold the physical E-stop."
 def first_run_client(tmp_path, monkeypatch, survey=None, **extra):
     def fake_aruco(frame, pos):        # the simulated table has no printed markers: a known pixel -> robot mapping
         c = Calibration.default(frame.shape[1], frame.shape[0], 600, 400)
+        c.points.append([frame.shape[1]/2, frame.shape[0]/2, 300, 200])
         c.size = [frame.shape[1], frame.shape[0]]
         return c
     monkeypatch.setattr(server, "calibrate_aruco", fake_aruco)
@@ -132,7 +133,7 @@ def test_refuses_when_a_first_run_check_fails(tmp_path, monkeypatch, problem):
         c.post("/api/arm/stop")
     r = confirm(c, ap)
     assert r.status_code == 409 and "refused" in r.json()["error"], r.json()
-    assert approach(c)["problems"]
+    assert approach(c) is None or approach(c)["problems"]
     assert [i for i in c.get("/api/preflight?grok=0").json()["items"] if i["name"] == "First run" and i["status"] == "fail"]
     assert st.arm.backend.history == []
 

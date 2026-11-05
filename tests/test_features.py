@@ -244,7 +244,7 @@ def test_calibration_safety(tmp_path, monkeypatch):
         out = c.post("/api/calibration/arm_click", json={"u": u, "v": v})
     assert out.status_code == 400 and "not kept" in out.json()["error"]  # the first arm click was the wrong one
     c.post("/api/calibration/reset")
-    for (u, v), (x, y) in zip([(0, 0), (1280, 0), (1280, 800), (0, 800)], [(200, -200), (520, -200), (520, 0), (200, 0)]):
+    for (u, v), (x, y) in zip([(0, 0), (1280, 0), (1280, 800), (0, 800), (640, 400)], [(200, -200), (520, -200), (520, 0), (200, 0), (360, -100)]):
         fake.pos = [x, y, 0.0]
         fake.target = list(fake.pos)
         out = c.post("/api/calibration/arm_click", json={"u": u, "v": v}).json()
@@ -793,6 +793,7 @@ def test_camera_on_arm_survey_pose_flow(tmp_path, monkeypatch):
     r = c.post("/api/arm/teach_pose", data={"name": "home_joints"}).json()  # the arm is where the camera sees the table
     assert r["poses"]["home_joints"] == [0.0] * 5 and st.at_survey()
     st.calib = Calibration.default(1280, 800, 600, 400)
+    st.calib.pose = [0.0] * 5
     st.calib.source, st.calib.size = "aruco_robot", [1280, 800]             # as if calibrated from ArUco at this pose
     c.post("/api/background", data={"mode": "capture"})
     c.post("/api/reference", data={"describe": "false"})
@@ -937,10 +938,12 @@ def test_state_stays_json_after_a_room_scan(tmp_path, monkeypatch):
 
 def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
     """The arm's Pi camera streams MJPEG over Wi-Fi: it must use the newest-frame reader with the 2 s stale check."""
+    import threading
     import numpy as np
 
     import trova.camera as cam_mod
     alive = [True]
+    failed_read = threading.Event()
 
     class FakeStream:
         def __init__(self, src):
@@ -953,7 +956,10 @@ def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
             return True
 
         def read(self):
-            return (True, np.zeros((1232, 1640, 3), np.uint8)) if alive[0] else (False, None)
+            if not alive[0]:
+                failed_read.set()
+                return False, None
+            return True, np.zeros((1232, 1640, 3), np.uint8)
 
         def release(self):
             pass
@@ -962,6 +968,7 @@ def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
     try:
         assert isinstance(src, cam_mod.WebcamSource) and src.read().shape == (1232, 1640, 3)
         alive[0] = False                                     # Wi-Fi drops: no new frames
+        assert failed_read.wait(2)  # no successful read can still publish a new timestamp
         src._ts -= cam_mod.STALE_S + 1
         with pytest.raises(RuntimeError, match="no new frame"):
             src.read()
