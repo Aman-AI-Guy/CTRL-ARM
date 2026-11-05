@@ -175,6 +175,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-05 Docs: `.env.example` lists every setting the code reads (operator name/token, host, data dir, batch, slow find, pan sign, watch blocked time), enforced by a test; README's camera-on-arm setup uses the Pi's MJPEG stream and says the Pi drives the LED ring.
 - 2026-11-05 Browser speech: "stop watching" after an interim stop now also turns the watch off (the final stop transcript reaches runSpoken); parser knows "park", "torna a casa", "is the line clear", "controlla la linea", "la linea è libera". Tests drive `listen()` with a fake SpeechRecognition in node.
 - 2026-11-05 Camera: only the reader thread releases a webcam/stream capture (never under a blocked read); streams open/read with 1.5 s timeouts; a source that opens but sends no frames stops its reader before failing; reopening after a drop re-applies the requested size and `source.size_changed` reports a size change. Stream test race fixed.
 - 2026-11-05 Grok's direct / room / dog boxes are validated (0..1000, ordered) before use, never clamped into an arm target; dog route photos are one list sorted by name, .JPG/.jpeg included.

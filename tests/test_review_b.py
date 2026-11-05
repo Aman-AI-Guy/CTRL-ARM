@@ -405,3 +405,21 @@ def test_speech_parser_knows_the_documented_commands():                        #
     js = ("const S = require(process.argv[1]); const [said, sw] = JSON.parse(process.argv[2]);"
           "console.log(JSON.stringify(said.map(t => S.parse(t, sw).cmd)));")
     assert _node(js, json.dumps([said, STOP_WORDS])) == ["home", "home", "home", "check", "check", "check"]
+
+
+# ---------------------------------------------------------------- docs (#59, #60)
+ROOT = STATIC.parent.parent
+
+
+def test_env_example_lists_every_setting_the_code_reads():                    # 59
+    read = set()
+    for p in (ROOT / "trova").rglob("*.py"):
+        read |= set(re.findall(r"""getenv\(\s*["'](TROVA_[A-Z0-9_]+)["']""", p.read_text()))
+    listed = set(re.findall(r"^(TROVA_[A-Z0-9_]+)=", (ROOT / ".env.example").read_text(), re.M))
+    assert {"TROVA_OPERATOR_NAME", "TROVA_OPERATOR_TOKEN", "TROVA_HOST", "TROVA_DATA"} <= read
+    assert read - listed == set()
+
+
+def test_readme_arm_camera_is_the_pi_stream():                                 # 60
+    line = next(x for x in (ROOT / "README.md").read_text().splitlines() if x.startswith("- **Camera on the arm**"))
+    assert "TROVA_CAMERA=http://trova-cam.local:8080/stream.mjpg" in line and "TROVA_CAMERA=<index>" not in line
