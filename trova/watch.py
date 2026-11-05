@@ -258,7 +258,7 @@ class Watch:
         if not self.valid_run(run, run.worker):
             return
         try:
-            real, filtered, _, summary, latency = chg.verify_changes(
+            real, filtered, _, summary, latency, offline = chg.verify_changes(
                 st.grok, st.reference["frame"], f, cands, st.s.lang, st.reference.get("names"))
         except GrokError as e:
             alert["grok"] = f"unavailable: {e}"[:200]
@@ -267,7 +267,7 @@ class Watch:
             return
         alert["changes"] = [c.as_dict() for c in real]
         alert["filtered"] = [c.as_dict() for c in filtered]
-        alert["grok"] = f"explained in {latency:.1f} s"
+        alert["grok"] = "offline: not verified by Grok" if offline else f"explained in {latency:.1f} s"
         if summary:
             alert["summary"] = summary
         if not real and not alert["zone_problems"]:     # Grok: every candidate was a false alarm

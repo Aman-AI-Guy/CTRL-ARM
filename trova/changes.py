@@ -34,7 +34,7 @@ class Change:
     label: str = ""
     explanation: str = ""
     risk: str = ""
-    verified: bool | None = None   # None = not checked by Grok yet
+    verified: bool | None = None   # None = not checked by Grok (not yet, skipped, or answered offline)
 
     def as_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "label": self.label, "explanation": self.explanation,
@@ -53,6 +53,7 @@ class ChangeCheck:
     frames_used: int = 0
     grok_latency_s: float = 0.0
     total_s: float = 0.0
+    offline: bool = False          # Grok was unreachable: candidates kept by the local stand-in, not verified
     ref_marked: np.ndarray | None = None
     cur_marked: np.ndarray | None = None
     current: np.ndarray | None = None
@@ -61,7 +62,8 @@ class ChangeCheck:
         return {"line_clear": self.line_clear, "summary": self.summary, "occluded": self.occluded,
                 "changes": [c.as_dict() for c in self.changes],
                 "filtered": [c.as_dict() for c in self.filtered], "frames_used": self.frames_used,
-                "grok_latency_s": round(self.grok_latency_s, 2), "total_s": round(self.total_s, 2)}
+                "grok_latency_s": round(self.grok_latency_s, 2), "total_s": round(self.total_s, 2),
+                "offline": self.offline}
 
 
 def _hist(frame: np.ndarray, box: Box) -> np.ndarray:
@@ -231,16 +233,24 @@ NO_CHANGE = {"en": "No differences from the reference.", "it": "Nessuna differen
              "both": "No differences from the reference. / Nessuna differenza rispetto al riferimento."}
 
 
+OFFLINE = {"en": "OFFLINE: not verified by Grok. ", "it": "OFFLINE: non verificato da Grok. ",
+           "both": "OFFLINE: not verified by Grok / non verificato da Grok. "}
+OFFLINE_NOTE = ("OFFLINE: Grok was unreachable. Changes were not verified by Grok and printed labels were not read "
+                "(codes only): check the line by hand.")
+
+
 def verify_changes(grok: GrokClient, ref_frame: np.ndarray, cur_frame: np.ndarray, changes: list[Change],
-                   lang: str = "en", ref_names: dict[int, str] | None = None) -> tuple[list, list, bool, str, float]:
+                   lang: str = "en", ref_names: dict[int, str] | None = None
+                   ) -> tuple[list, list, bool, str, float, bool]:
+    """-> (real, filtered, line_clear, summary, latency_s, offline). Offline: every candidate stays, unverified."""
     lang = lang if lang in LANG_LINES else "en"
     language = LANG_LINES[lang]
     if not changes:
-        return [], [], True, NO_CHANGE[lang], 0.0
+        return [], [], True, NO_CHANGE[lang], 0.0, False
     if len(changes) > MAX_VERIFY:      # close-ups would be too small to judge; this many usually means the camera moved
         for c in changes:
             c.risk = c.risk or ("high" if c.kind == "added" else "medium")
-        return list(changes), [], False, TOO_MANY[lang].format(n=len(changes)), 0.0
+        return list(changes), [], False, TOO_MANY[lang].format(n=len(changes)), 0.0, False
     ref_names = ref_names or {}
 
     def line(c):
@@ -261,12 +271,13 @@ def verify_changes(grok: GrokClient, ref_frame: np.ndarray, cur_frame: np.ndarra
         if v is None:          # Grok skipped it: keep it, unverified, so nothing is silently dropped
             real.append(c)
             continue
-        is_real = v.get("is_real") is not False          # anything but an explicit "false alarm" stays a change
-        c.verified = is_real
+        is_real = v.get("is_real") is not False or r.offline   # only Grok itself may call a false alarm
+        c.verified = None if r.offline else is_real
         c.label, c.explanation = v.get("label") or c.label, v.get("explanation") or c.explanation
         c.risk = v.get("risk") if v.get("risk") in ("low", "medium", "high") else c.risk
         (real if is_real else filtered).append(c)
-    return real, filtered, (not real) and bool(r.data.get("line_clear", True)), r.data.get("summary", ""), r.latency_s
+    summary = (OFFLINE[lang] if r.offline else "") + r.data.get("summary", "")
+    return real, filtered, (not real) and bool(r.data.get("line_clear", True)), summary, r.latency_s, r.offline
 
 
 def check(grok: GrokClient | None, ref_frame: np.ndarray, ref_boxes: list[Box], frames: list[np.ndarray],
@@ -278,7 +289,7 @@ def check(grok: GrokClient | None, ref_frame: np.ndarray, ref_boxes: list[Box], 
     cur = frames[-1]
     out = ChangeCheck(occluded=occluded, frames_used=len(frames), current=cur)
     if verify and grok is not None:
-        out.changes, out.filtered, out.line_clear, out.summary, out.grok_latency_s = verify_changes(
+        out.changes, out.filtered, out.line_clear, out.summary, out.grok_latency_s, out.offline = verify_changes(
             grok, ref_frame, cur, cands, lang, ref_names)
     else:
         out.changes, out.line_clear = cands, not cands

@@ -4,7 +4,8 @@ batch (a carton, a leaflet, a label roll) from ending up in the next one. Trova 
 - QR codes and barcodes are decoded locally by OpenCV (exact, offline);
 - Grok reads the printed text on close-ups: product, lot / batch number, expiry date ("?" for unreadable);
 - the batch check flags: a lot different from the current batch, a code that disagrees with the print,
-  an expired date, an unreadable lot. Any of these makes the line NOT clear.
+  an expired date, an unreadable lot or expiry, a label nobody read (Grok offline or silent on that object).
+  Any of these makes the line NOT clear. The code's expiry wins over the printed one when it parses.
 
 `label_sheet()` makes a printable sheet of demo labels (current lot, an old lot, an expired one).
 """
@@ -46,7 +47,8 @@ Codes decoded by the scanner (exact, trust them over the print if they disagree,
 {codes}"""
 
 LOT_RE = re.compile(r"\b(?:LOTTO|LOT|BATCH|CH\.?-?B\.?)(?![A-Z])\s*[:#.]?\s*([A-Z0-9?][A-Z0-9?\-/]*)", re.I)
-EXP_RE = re.compile(r"\b(?:EXP\.?|SCAD\.?|SCADENZA|USE BY)\s*[:.]?\s*([0-9]{1,4}[-/.][0-9]{1,2}(?:[-/.][0-9]{2,4})?)", re.I)
+EXP_RE = re.compile(r"\b(?:EXP\.?|SCAD\.?|SCADENZA|USE BY)\s*[:.]?\s*([0-9]{1,4}[-/.][0-9]{1,4}(?:[-/.][0-9]{2,4})?)(?![0-9])",
+                    re.I)
 
 
 def parse_lot(text: str) -> str:
@@ -157,17 +159,27 @@ def read_labels(grok: GrokClient, frame: np.ndarray, boxes: list[Box], lot: str 
     res.latency_s, res.offline = r.latency_s, r.offline
     seen = {b.id for b in boxes}
     got = {it.get("box_id"): it for it in r.data.get("items", []) if isinstance(it, dict) and it.get("box_id") in seen}
+    unread = []          # nobody read the print: offline (codes only), or Grok skipped the box
     for b in boxes:
-        it = got.get(b.id, {})
+        it = got.get(b.id)
+        if it is None or r.offline:
+            unread.append(b)
+        it = it or {}
         code_text = " | ".join(c["text"] for c in by.get(b.id, []))
         print_lot, code_lot = (it.get("lot") or "").upper().strip(), parse_lot(code_text)
-        expiry = it.get("expiry") or parse_expiry_text(code_text)
+        print_exp = (it.get("expiry") or "").strip()
+        print_exp = parse_expiry_text(print_exp) or print_exp          # "EXP 2025-06" -> "2025-06"
+        code_exp = parse_expiry_text(code_text)
+        expiry = code_exp if parse_date(code_exp) else (print_exp or code_exp)   # the decoded code is exact
         if not (it.get("has_label") or code_text or print_lot):
             continue
         res.items.append({"box_id": b.id, "box": b.to_list(), "text": it.get("text", ""), "product": it.get("product", ""),
                           "lot": code_lot or print_lot, "print_lot": print_lot, "code": code_text, "code_lot": code_lot,
-                          "expiry": expiry})
-    res.problems = check_batch(res.items, lot, today)
+                          "expiry": expiry, "print_expiry": print_exp})
+    why = "Grok offline, only codes were decoded" if r.offline else "Grok gave no answer for it"
+    res.problems = check_batch(res.items, lot, today) + [
+        {"box_id": b.id, "kind": "not_read", "risk": "medium",
+         "text": f"object {b.id}: printed label not read ({why}): check it by hand"} for b in unread]
     return res
 
 
@@ -188,7 +200,9 @@ def check_batch(items: list[dict], lot: str, today: dt.date | None = None) -> li
         elif lot and not it["lot"]:
             add(it, "no_lot", "medium", f"{n}: has a label but no lot number was found")
         d = parse_date(it["expiry"]) if it["expiry"] else None
-        if d and d < today:
+        if it["expiry"] and d is None:
+            add(it, "unreadable_expiry", "medium", f"{n}: expiry date not readable ({it['expiry']}): check by hand")
+        elif d and d < today:
             add(it, "expired", "high", f"{n}: expired on {d.isoformat()}")
     return out
 

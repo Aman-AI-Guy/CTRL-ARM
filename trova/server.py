@@ -1001,11 +1001,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except GrokError as e:
                 return fail(e, "changes")
             result = res.as_dict()
+            offline = res.offline
             if st.zones:
                 names = {}
                 if any(z.rule == "allowed" for z in st.zones):   # only "allowed" zones need names from Grok
                     try:
-                        names = describe_table(st.grok, frames[-1], per[-1], st.s.lang).names()
+                        inv = describe_table(st.grok, frames[-1], per[-1], st.s.lang)
+                        names = {} if inv.offline else inv.names()   # local colour names prove nothing: not allowed
+                        offline = offline or inv.offline
                     except GrokError as e:
                         st.audit.event("error", where="zone_names", error=str(e))
                 zres = eval_zones(st.zones, per[-1], names)
@@ -1019,6 +1022,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     lr = lbl.read_labels(st.grok, frames[-1], per[-1], st.batch["lot"])
                     result["batch"] = lr.as_dict()
+                    offline = offline or lr.offline
                     if lr.problems:
                         result["line_clear"] = False
                         result["summary"] = (result["summary"] + " Labels: " + "; ".join(p["text"] for p in lr.problems) + ".").strip()
@@ -1026,6 +1030,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     result["batch"] = {"lot": st.batch["lot"], "error": str(e), "ok": False, "items": [], "problems": []}
                     result["line_clear"] = False
                     result["summary"] = (result["summary"] + " Labels could not be read: check them by hand.").strip()
+            result["offline"] = offline
             paths = {"ref_marked": st.audit.save_image("ref_changes", res.ref_marked),
                      "cur_marked": st.audit.save_image("cur_changes", res.cur_marked),
                      "cur_raw": st.audit.save_image("current_raw", res.current)}
@@ -1033,7 +1038,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             st.metrics["checks"] += 1
             st.last_check = {"event_id": ev["id"], "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                              "result": result, "reference": st.reference["path"], "signoff": None,
-                             "model": st.grok.stats()["model"], "mock": st.grok.mock, **paths}
+                             "model": st.grok.stats()["model"], "mock": st.grok.mock, "offline": result["offline"],
+                             **paths}
             return st.last_check
 
     @app.post("/api/signoff")
@@ -1089,6 +1095,7 @@ img{{width:100%;border:1px solid #ccc;border-radius:6px}}.g{{display:grid;grid-t
 table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:6px;text-align:left;vertical-align:top}}
 .v{{font-size:22px;font-weight:700;color:{'#137333' if r['line_clear'] else '#b3261e'}}}</style></head><body>
 <h1>Line clearance record</h1><p>Check {c['event_id']} at {c['time']} · model {html.escape(str(c['model']))}{' (mock)' if c['mock'] else ''}</p>
+{'<p class="v" style="color:#9a6700">' + html.escape(chg.OFFLINE_NOTE) + '</p>' if c.get('offline') else ''}
 <p class="v">{verdict}</p><p>{html.escape(r['summary'])}</p>
 <div class="g"><div><b>Reference</b><img src="/files/{c['ref_marked']}"></div><div><b>Current</b><img src="/files/{c['cur_marked']}"></div></div>
 <h2>Changes</h2><table><tr><th>#</th><th>Kind</th><th>Object</th><th>Risk</th><th>Why it matters</th></tr>{rows or '<tr><td colspan=5>none</td></tr>'}</table>

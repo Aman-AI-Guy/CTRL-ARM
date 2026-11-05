@@ -56,6 +56,7 @@ class Inventory:
     summary: str = ""
     latency_s: float = 0.0
     time: str = ""
+    offline: bool = False          # names made up locally (colours) because Grok was unreachable
 
     def names(self) -> dict[int, str]:
         return {i: d["name"] for i, d in self.items.items()}
@@ -77,7 +78,7 @@ def describe(grok: GrokClient, frame: np.ndarray, boxes: list[Box], lang: str = 
     for o in r.data.get("objects", []):
         if o.get("box_id") in ids and o.get("name", "").lower() != "nothing":
             inv.items[o["box_id"]] = {"name": o["name"], "category": o.get("category", "other"), "note": o.get("note", "")}
-    inv.summary, inv.latency_s = r.data.get("summary", ""), r.latency_s
+    inv.summary, inv.latency_s, inv.offline = r.data.get("summary", ""), r.latency_s, r.offline
     return inv
 
 
