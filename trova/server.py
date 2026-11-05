@@ -12,17 +12,19 @@ import os
 import threading
 import time
 import urllib.request
+import uuid
+from contextvars import ContextVar
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from . import changes as chg
-from .arm import CartesianArm, SimArm, TaughtGridArm, load_poses, make_arm, save_pose
+from .arm import CartesianArm, FakeCartesian, FakeJointBackend, SimArm, TaughtGridArm, load_poses, make_arm, save_pose
 from .arm.skills import TrayParams, lift_allowed, waypoints as tray_waypoints
 from .audit import AuditLog
 from .boxes import Box
@@ -51,7 +53,10 @@ from .record_pdf import build as build_record_pdf
 from . import history, preflight
 from .watch import Watch
 from . import room as room_mod
+from . import table_scan as table_scan_mod
+from .arm.xarm5_sim import Xarm5Sim
 from .light import make_light
+from .safety import LiftStore
 from . import labels as lbl
 from .zones import RULES, Zone, draw_zones, evaluate as eval_zones, load_zones, save_zones
 from .grok import GrokClient, GrokError
@@ -60,6 +65,12 @@ from .proposals import drop_occluders, find_blobs, is_occluded
 
 STATIC = Path(__file__).parent / "static"
 SLOW_S = float(os.getenv("TROVA_SLOW_S", "8"))
+FIRST_RUN_MAX_SPEED = 20.0      # mm/s: the first supervised run never goes faster; env may only lower it
+FIRST_RUN_MAX_JOINT_SPEED = 5.0  # deg/s for joint moves in that mode (stage 0, homing)
+CONFIRM_TTL_S = 60.0            # a first-run confirmation older than this is stale: find again
+COLLISION_WARNING = "Collision avoidance: NOT PRESENT. Hold the physical E-stop."
+# Captured before route locks/model calls; remains cancelled even after an operator reset.
+MOTION_TICKET: ContextVar[threading.Event | None] = ContextVar("motion_ticket", default=None)
 
 
 class ArmBusy(RuntimeError):
@@ -250,6 +261,54 @@ def _observe_clearance() -> float | None:
     return value if value > 0 else None
 
 
+class TableStartReq(BaseModel):
+    """move=false labels the current view only: no motion."""
+    model_config = ConfigDict(extra="forbid")
+    move: bool = True
+
+
+class TableFindReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+
+
+class TableChooseReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    object_id: int | None = None
+    answer: str | None = None
+
+
+class TableApproachReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    object_id: int | None = None
+
+
+class TableConfirmReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    proposal_id: str
+
+
+class Approach(BaseModel):
+    """First supervised run: confirm exactly the shown stage and target."""
+    stage: int
+    confirm: str
+    x_mm: float
+    y_mm: float
+    speed_mm_s: float | None = None
+
+
+class StopReset(BaseModel):
+    operator: str
+    stop_nonce: str
+    area_clear: bool = False
+    controller_ready: bool = False
+
+
+class LiftRecovery(StopReset):
+    fork_freed: bool = False
+    note: str = ""
+
+
 class State:
     def __init__(self, s: Settings):
         self.s = s
@@ -271,6 +330,19 @@ class State:
         self.arm = make_arm(s.arm, s.data_dir, s.table_w_mm, s.table_h_mm)
         # Pose reads stay off the motion driver. Empty means "use whatever the arm driver reports".
         self.reader = open_reader(os.getenv("TROVA_ARM_READ", ""))
+        # Simulator exemptions require BOTH an explicit simulator spec and a known simulator implementation.
+        self.physical = not (
+            (s.arm == "sim" and type(self.arm) is SimArm)
+            or (s.arm == "cartesian:fake" and isinstance(self.arm, CartesianArm)
+                and type(self.arm.backend) is FakeCartesian)
+            or (s.arm == "grid:fake" and isinstance(self.arm, TaughtGridArm)
+                and type(self.arm.backend) is FakeJointBackend)
+            or (s.arm == "xarm5sim" and isinstance(self.arm, CartesianArm)
+                and type(self.arm.backend) is Xarm5Sim))
+        self.lift_store = LiftStore(s.data_dir) if self.physical else None
+        self.persistence_error: str | None = None
+        self.operator_name = os.getenv("TROVA_OPERATOR_NAME", "").strip()
+        self.operator_token = os.getenv("TROVA_OPERATOR_TOKEN", "").strip()
         # the camera is on the arm (the event's xArm 5): every picture is taken from the taught survey pose
         self.camera_on_arm = os.getenv("TROVA_CAMERA_ON_ARM", "0").lower() in ("1", "true", "yes")
         self.settle_s = float(os.getenv("TROVA_CAMERA_SETTLE_S", "0.6"))
@@ -278,10 +350,24 @@ class State:
             self.source.attach(self.arm, s.data_dir)   # simulated arm camera: renders what the arm would see
         self.arm_thread: threading.Thread | None = None
         self.arm_lock = threading.Lock()        # one motion command at a time
+        self.safety_lock = threading.Lock()     # local state only: never held over I/O, joins or model calls
+        self.stop_latched = threading.Event()   # independent of command cancellation; only reset clears it
+        self.stop_epoch = threading.Event()     # invalidates ALL requests admitted before/during STOP
+        self.stops_pending = 0                 # reset cannot overtake a driver.stop() still in flight
+        self.stop_sequence = 0
+        self.stop_nonce = uuid.uuid4().hex      # fresh across boots AND every STOP; never a reusable reset permission
+        self.stop_error: str | None = None
+        self.manual_mode = False
         self.cancel = threading.Event()         # set by STOP; a fresh one per command
         self.stop_ts = 0.0                      # wall time of the last STOP
         self.arm_job = ""                       # point | tour | lift | home
-        self.lift_interrupted = False           # the fork may still be in a slot: no automatic moves
+        self.lift_interrupted = bool(self.lift_store and self.lift_store.read() != "clear")
+        if self.physical:
+            # Every boot is a new disarmed session, even if the last lift record is clean.
+            self.stop_latched.set()
+            self.stop_epoch.set()
+            self.cancel.set()
+            self.arm.latch_stop()              # local event only: controller recovery is NEVER automatic
         self.thresh, self.min_area = s.blob_thresh, s.min_area_frac
         self.last_find: dict | None = None
         self.pending: dict | None = None
@@ -338,6 +424,21 @@ class State:
         self.pending_motion: dict | None = None
         self.orbit_permit = None
         self.orbit_worker = None
+        # voice table scan with the V2 camera model (table_scan.py)
+        self.table_lock = threading.Lock()
+        self.table_scan: dict = {"status": "idle"}
+        self.table_objects: list[dict] = []
+        self.table_frames: dict[str, np.ndarray] = {}
+        self.table_sheet: np.ndarray | None = None
+        self.table_pending: dict | None = None
+        # first supervised run on hardware: find -> confirm -> hover -> confirm -> descend -> measure (off by default)
+        self.first_run = os.getenv("TROVA_FIRST_RUN", "0").lower() in ("1", "true", "yes")
+        self.first_run_speed = min(FIRST_RUN_MAX_SPEED, float(os.getenv("TROVA_FIRST_RUN_SPEED_MM_S", "20")))
+        self.first_run_hover = float(os.getenv("TROVA_FIRST_RUN_HOVER_MM", "100"))
+        self.miss_mm = float(os.getenv("TROVA_ARM_MISS_MM", "10"))
+        if self.first_run and isinstance(self.arm, CartesianArm):
+            self.arm.speed = min(self.arm.speed, self.first_run_speed)   # every Cartesian move, home included
+            self.arm.joint_speed = min(self.arm.joint_speed, FIRST_RUN_MAX_JOINT_SPEED)
 
     def _reconstruction_done(self, job: dict) -> None:
         """Runs in the job thread. A finished mesh with renders is reviewed by Grok right away."""
@@ -430,14 +531,21 @@ class State:
         raw = find_blobs(frame, self.background, self.thresh, self.min_area)
         return drop_occluders(raw, frame.shape), is_occluded(raw, frame.shape)
 
-    def arm_blocked(self, pixels: bool = True) -> str | None:
+    def arm_blocked(self, pixels: bool = True, *, interlocks: bool = True) -> str | None:
         """Why the arm must not move right now (None = it may). pixels=False: the target is given in robot mm,
         so only the safety rules apply, not the camera calibration."""
-        if self.arm_job == "lift" and self.arm_thread and self.arm_thread.is_alive():
+        if interlocks and self.stop_latched.is_set():
+            return "Software STOP is latched: operator safety checks and /api/arm/reset required" + (
+                "; a tray lift was interrupted: recover the fork separately" if self.lift_interrupted else "")
+        if interlocks and self.manual_mode:
+            return "The arm is in manual teaching mode: leave Freedrive / compliant mode before automatic motion"
+        if interlocks and self.arm_job == "lift" and self.arm_thread and self.arm_thread.is_alive():
             return "The arm is lifting a tray: wait for it to finish, or press STOP"
-        if self.lift_interrupted:
+        if interlocks and self.lift_interrupted:
             return ("A tray lift was interrupted, the fork may still be in the slot: free the arm by hand "
-                    "(Freedrive) or with the pendant, then press Arm home")
+                    "with staff, then confirm /api/arm/recover_lift while STOP remains latched")
+        if interlocks and self.persistence_error:
+            return "Safety persistence failed: " + self.persistence_error
         if isinstance(self.arm, CartesianArm):
             if not self.arm.limits:
                 return "No safety box: set TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax (robot mm) with staff, restart"
@@ -457,49 +565,295 @@ class State:
                         f"{self.frame_size[0]}x{self.frame_size[1]}: calibrate again")
         return None
 
+    def first_run_problems(self) -> list[str]:
+        """First supervised run: every item must hold or the mode refuses to move (also listed by preflight)."""
+        if not isinstance(self.arm, CartesianArm):
+            return ["Needs a Cartesian arm: TROVA_ARM=xarm:<ip> (cartesian:fake to rehearse)"]
+        p, c = [], self.calib
+        survey = self.arm.home_joints or self.arm.home_mm
+        if not c or c.source not in ("arm", "aruco_robot"):
+            p.append("Calibration: not made with the arm (touch the ArUco markers with the tip, then Calibrate (ArUco))")
+        else:
+            if not c.size or not self.frame_size or list(c.size) != list(self.frame_size):
+                p.append(f"Calibration: made at image size {c.size}, the camera now gives {self.frame_size}: calibrate again")
+            if self.camera_on_arm and not (survey and c.pose and len(c.pose) == len(survey)
+                                           and max(abs(a - b) for a, b in zip(c.pose, survey)) <= 0.01):
+                p.append("Calibration: made at a different survey pose (or none recorded): Calibrate (ArUco) again")
+        if not self.arm.limits:
+            p.append("Safety box: TROVA_ARM_LIMITS not set")
+        if not survey:
+            p.append("Home pose: not set")
+        if not (self.operator_name and self.operator_token):
+            p.append("Operator credentials: TROVA_OPERATOR_NAME / TROVA_OPERATOR_TOKEN not configured")
+        if self.stop_latched.is_set():
+            p.append("STOP is latched: operator reset required")
+        if not 0 < self.first_run_speed <= FIRST_RUN_MAX_SPEED or self.first_run_hover <= 0:
+            p.append("TROVA_FIRST_RUN_SPEED_MM_S must be in (0, 20] and TROVA_FIRST_RUN_HOVER_MM above 0")
+        return p
+
+    def approach_view(self) -> dict | None:
+        """What the operator sees before confirming: target, height, distance from the current pose, problems."""
+        ap = (self.pending_move or {}).get("approach")
+        if not ap:
+            return None
+        out = {k: v for k, v in ap.items() if k not in ("issued", "seq")}
+        try:
+            tcp = self.arm.tcp_mm()
+            out["distance_mm"] = round(sum((a - b) ** 2 for a, b in zip(tcp, ap["to_mm"])) ** 0.5, 1)
+        except Exception:  # noqa: BLE001
+            out["distance_mm"] = None
+        if ap["stage"] in (0, 1, 2):
+            box = self.arm.limits.check(*ap["to_mm"]) if self.arm.limits else None
+            out["problems"] = self.first_run_problems() + ([f"Safety box: {box}"] if box else [])
+        return out | {"marked": self.pending_move.get("marked"), "warning": COLLISION_WARNING}
+
+    def new_approach(self, stage, target_mm: list[float], **extra) -> dict:
+        """A single-use confirmation for exactly this stage and target, dead after STOP or CONFIRM_TTL_S.
+        to_mm: where the tip goes in this stage (stage 0: levelled pose by forward kinematics)."""
+        z = round(self.arm.z + self.first_run_hover if stage in (0, 1) else self.arm.z, 1)
+        out = {"stage": stage, "confirm": uuid.uuid4().hex if stage in (0, 1, 2) else None, "target_mm": target_mm,
+               "z_mm": z, "to_mm": [*target_mm, z], "speed_mm_s": self.first_run_speed, "issued": time.time(),
+               "seq": self.stop_sequence}
+        return out | extra
+
+    def first_approach(self, target_mm: list[float]) -> dict:
+        """Stage 0 only when the xArm 5 flange is tilted (camera survey pose): it moves in straight lines only with
+        the flange level (manual p. 156), so level it in place first, then stage 1 is a straight line."""
+        b = self.arm.backend
+        if b.is_level():
+            return self.new_approach(1, target_mm)
+        q = b.joints()
+        ql = b.level_joints(q)
+        return self.new_approach(0, target_mm, q_from=[round(v, 2) for v in q], q_level=ql,
+                                 to_mm=[round(v, 1) for v in b.fk_mm(ql)])
+
+    def at_joints(self, q: list[float], tol_deg: float = 1.0) -> bool:
+        try:
+            return max(abs(a - b) for a, b in zip(self.arm.backend.joints(), q)) <= tol_deg
+        except Exception:  # noqa: BLE001
+            return False
+
+    def at_hover(self, ap: dict, tol_mm: float = 5.0) -> bool:
+        try:
+            tcp = self.arm.tcp_mm()
+        except Exception:  # noqa: BLE001
+            return False
+        return sum((a - b) ** 2 for a, b in zip(tcp, [*ap["target_mm"], ap["z_mm"] + self.first_run_hover])) ** 0.5 <= tol_mm
+
+    def run_approach(self, pm: dict, ap: dict, speed: float) -> None:
+        """Worker for one first-run stage: move, record target vs the pose the controller reports, then hand out
+        the next confirmation (stage 2) or ask for the measured error."""
+        x, y = ap["target_mm"]
+        # start poses are rechecked here, right before moving: nothing else moves while this worker runs
+        if ap["stage"] == 2 and not self.at_hover(ap):
+            self.arm.state, self.arm.last_error = "refused", "not at this target's hover point: stage 2 refused"
+            ok = False
+        elif ap["stage"] == 1 and ap.get("q_level") and not self.at_joints(ap["q_level"]):
+            self.arm.state, self.arm.last_error = "refused", "not at the levelled pose: stage 1 refused"
+            ok = False
+        elif ap["stage"] == 0:
+            ok = self.arm.go_joints(ap["q_level"])         # safety box via FK, STOP latch, reached check
+        else:
+            ok = self.arm.approach(x, y, ap["z_mm"], speed)
+        try:
+            tcp = [round(v, 1) for v in self.arm.tcp_mm()]
+        except Exception:  # noqa: BLE001
+            tcp = None
+        off = round(sum((a - b) ** 2 for a, b in zip(tcp, ap["to_mm"])) ** 0.5, 1) if tcp else None
+        self.audit.event("arm_approach", stage=ap["stage"], target_mm=ap["to_mm"], tcp_mm=tcp, offset_mm=off,
+                         reached=ok, speed_mm_s=speed, error=getattr(self.arm, "last_error", None), find=pm.get("event_id"))
+        with self.safety_lock:
+            if self.pending_move is not pm:
+                return                             # a newer find replaced this target
+            if not ok or self.stop_latched.is_set():
+                pm["approach"] = None              # STOP / refusal / miss: start again from a new find
+            elif ap["stage"] == 0:
+                pm["approach"] = self.new_approach(1, ap["target_mm"], q_level=ap["q_level"])
+            elif ap["stage"] == 1:
+                pm["approach"] = self.new_approach(2, ap["target_mm"])
+            else:
+                pm["approach"] = self.new_approach("measure", ap["target_mm"], tcp_mm=tcp, offset_mm=off)
+
+    def motion_ticket(self, ticket=None) -> threading.Event:
+        request_ticket = MOTION_TICKET.get()
+        # A stored result/alarm may add restrictions, never override a cancelled HTTP request's authority.
+        if request_ticket is not None and request_ticket.is_set():
+            return request_ticket
+        return ticket if ticket is not None else (request_ticket or self.stop_epoch)
+
+    def authorize_motion(self, *, pixels: bool = False, ticket=None, since=None) -> None:
+        """The single admission check, used for pointing AND all preparatory/home/room moves."""
+        if (ticket is not None and ticket.is_set()) or (since is not None and self.stop_ts >= since):
+            raise ArmBusy("STOP cancelled this pending command: submit a new command after operator reset")
+        blocked = self.arm_blocked(pixels=pixels)
+        if blocked:
+            raise ArmBusy(blocked)
+
     # ---------- arm motion: one command at a time, STOP always wins
     def stop_arm(self) -> None:
-        """Never waits for anything: mark the time, cancel the running command, stop the driver."""
-        self.stop_ts = time.time()
-        self.cancel.set()
-        self.task_cancel.set()
-        self.pending_motion = None
-        self.task_resume = None
-        self.arm.stop()
-        self.light.show("stop")
-        if self.last_agent:
-            self.last_agent.update(status="stopped", workflow_state="movement_refused_or_failed",
-                                   reason="STOP requested", confirmation=None)
-            feedback(self.last_agent, self.last_agent.get("goal", ""))
+        """No arm/model lock: publish cancellation before calling the driver's immediate stop path."""
+        with self.safety_lock:
+            self.stop_ts = time.time()
+            self.stop_sequence += 1
+            self.stop_nonce = uuid.uuid4().hex
+            self.stop_latched.set()
+            self.stop_epoch.set()
+            self.cancel.set()
+            self.task_cancel.set()
+            self.pending_motion = None
+            self.task_resume = None
+            self.table_pending = None           # a table-scan camera move must be confirmed again
+            self.stops_pending += 1
+        try:
+            self.arm.stop()
+        except Exception as e:
+            with self.safety_lock:
+                self.stop_error = str(e) or type(e).__name__
+            raise
+        else:
+            with self.safety_lock:
+                self.stop_error = None
+        finally:
+            with self.safety_lock:
+                self.stops_pending -= 1
+            self.light.show("stop")
+            if self.last_agent:
+                self.last_agent.update(status="stopped", workflow_state="movement_refused_or_failed",
+                                       reason="STOP requested", confirmation=None)
+                feedback(self.last_agent, self.last_agent.get("goal", ""))
 
-    def _take_arm(self, job: str) -> threading.Event:
-        """Caller holds arm_lock. End the running command (unless it must not be cut), then arm a fresh cancel."""
+    def _take_arm(self, job: str, *, pixels: bool, ticket, since) -> threading.Event:
+        """Caller holds arm_lock. Never clear a driver's STOP as a side effect of a command."""
+        self.authorize_motion(pixels=pixels, ticket=ticket, since=since)
         if self.arm_thread and self.arm_thread.is_alive():
             if self.arm_job == "lift":
                 raise ArmBusy("The arm is lifting a tray: wait for it to finish, or press STOP")
-            self.cancel.set()
-            self.arm.stop()
             self.arm_thread.join(timeout=3)
             if self.arm_thread.is_alive():
                 raise ArmBusy("The arm is still finishing the last move: wait a moment and retry")
-        self.cancel = threading.Event()
-        self.arm.ready()
-        self.arm_job = job
-        return self.cancel
+        self.authorize_motion(pixels=pixels, ticket=ticket, since=since)
+        with self.safety_lock:
+            # STOP can run during the checks/join. Publishing the command is atomic with STOP.
+            if self.stop_latched.is_set() or ticket.is_set():
+                raise ArmBusy("Software STOP cancelled this command: operator reset required")
+            self.cancel = threading.Event()
+            self.arm_job = job
+            return self.cancel
 
-    def start_arm(self, fn, *args, since: float | None = None, job: str = "point") -> bool:
-        """Run a motion in the arm thread. `since`: when the user asked; a STOP after that cancels it.
-        Returns False when it was cancelled before starting."""
-        since = time.time() if since is None else since
+    def start_arm(self, fn, *args, since: float | None = None, job: str = "point",
+                  pixels: bool = True, ticket=None, wait: bool = False, guard=None) -> bool:
+        """Admit one guarded motion; blocked/cancelled commands raise ArmBusy (HTTP 409)."""
+        if self.first_run and job not in ("home", "approach"):
+            raise ArmBusy("First supervised run mode: only the two-stage approach and Arm home may move the arm")
+        ticket = self.motion_ticket(ticket)
         with self.arm_lock:
-            cancel = self._take_arm(job)
-            if self.stop_ts >= since:          # STOP pressed while Trova was still thinking
-                cancel.set()
-                self.arm.stop()
-                return False
-            self.arm_thread = threading.Thread(target=fn, args=args, daemon=True)
-            self.arm_thread.start()
-            return True
+            if guard is not None and not guard():
+                raise ArmBusy("The watch worker/generation is no longer authorized")
+            cancel = self._take_arm(job, pixels=pixels, ticket=ticket, since=since)
+            if guard is not None and not guard():
+                raise ArmBusy("The watch worker/generation is no longer authorized")
+
+            def run():
+                if (not cancel.is_set() and not ticket.is_set() and not self.stop_latched.is_set()
+                        and (guard is None or guard())):
+                    fn(*args)
+
+            worker = threading.Thread(target=run, daemon=True)
+            self.arm_thread = worker
+            worker.start()
+        if wait:
+            worker.join()                  # STOP never needs arm_lock; reset requires this worker to finish
+            self.authorize_motion(pixels=pixels, ticket=ticket, since=since)
+        return True
+
+    def authenticate_operator(self, supplied: str, claimed: str = "") -> str:
+        if not self.physical:
+            return claimed.strip()
+        if not self.operator_name or not self.operator_token:
+            raise HTTPException(403, "Hardware recovery requires configured TROVA_OPERATOR_NAME and TROVA_OPERATOR_TOKEN")
+        if not hmac.compare_digest(supplied.encode(), self.operator_token.encode()):
+            raise HTTPException(401, "Operator authentication required (x-trova-operator-token)")
+        return self.operator_name
+
+    def operator_reset(self, r: StopReset, *, recover_lift: bool = False, credential: str = "") -> str:
+        """Software reset only. Controller/e-stop recovery must already have been performed by staff."""
+        identity = self.authenticate_operator(credential, r.operator)
+        if not identity or not r.area_clear or not r.controller_ready:
+            raise ArmBusy("An operator must confirm area_clear and controller_ready; reset performs no controller recovery")
+        stop_sequence = self.stop_sequence
+        if not self.arm_lock.acquire(blocking=False):
+            raise ArmBusy("A motion is still being admitted: wait for it to finish")
+        try:
+            with self.safety_lock:
+                if r.stop_nonce != self.stop_nonce:
+                    raise ArmBusy("Stale STOP confirmation: read /api/state.stop_nonce and confirm the current STOP")
+            if self.arm_thread and self.arm_thread.is_alive():
+                raise ArmBusy("The cancelled motion/scan must finish before reset or lift recovery")
+            if self.manual_mode:
+                raise ArmBusy("Leave manual teaching mode before reset or lift recovery")
+            if isinstance(self.arm, CartesianArm):
+                try:
+                    moving = self.arm.backend.is_moving()
+                except Exception as e:
+                    raise ArmBusy("Cannot verify controller idle: " + str(e)) from e
+                if moving:
+                    raise ArmBusy("The controller still reports motion: reset refused")
+            blocked = self.arm_blocked(pixels=False, interlocks=False)
+            if blocked:
+                raise ArmBusy(blocked)
+            if self.arm.state in ("error", "moving", "refused") or getattr(self.arm, "last_error", None):
+                raise ArmBusy("Resolve the controller/driver error separately before software reset")
+            if recover_lift:
+                if not self.lift_interrupted or not r.fork_freed or not r.note.strip():
+                    raise ArmBusy("Confirm fork_freed and document staff's manual lift recovery decision")
+                with self.safety_lock:
+                    if (self.stops_pending or not self.stop_latched.is_set() or self.stop_sequence != stop_sequence
+                            or r.stop_nonce != self.stop_nonce):
+                        raise ArmBusy("STOP must remain latched throughout lift recovery")
+                if self.lift_store:
+                    try:
+                        self.lift_store.write("clear")
+                    except OSError as e:
+                        self.persistence_error = str(e)
+                        raise ArmBusy("Cannot persist lift recovery: " + str(e)) from e
+            with self.safety_lock:
+                if (self.stops_pending or not self.stop_latched.is_set() or self.stop_sequence != stop_sequence
+                        or r.stop_nonce != self.stop_nonce):
+                    raise ArmBusy("STOP must be latched and its driver stop completed before reset or recovery")
+                if self.stop_error:
+                    raise ArmBusy("Driver STOP failed: resolve controller communication and retry STOP before reset: "
+                                  + self.stop_error)
+                if recover_lift:
+                    self.lift_interrupted = False    # explicit recovery only; STOP remains latched
+                    self.persistence_error = None
+                    self.stop_nonce = uuid.uuid4().hex  # recovery confirmation cannot also be replayed as rearming
+                else:
+                    if self.persistence_error:
+                        raise ArmBusy("Resolve safety persistence failure and confirm lift recovery before reset")
+                    self.arm.ready()                # event clear only; never a controller recovery or move
+                    self.stop_epoch = threading.Event()
+                    self.stop_latched.clear()
+                    self.arm.state = "idle"
+                    self.stop_nonce = uuid.uuid4().hex
+            return identity
+        finally:
+            if recover_lift and self.lift_interrupted and self.lift_store:
+                # A concurrent STOP invalidated the recovery decision during disk I/O. Restore dirty evidence.
+                try:
+                    self.lift_store.write("in_progress")
+                except OSError as e:
+                    self.persistence_error = str(e)
+            self.arm_lock.release()
+
+    def set_manual_mode(self, on: bool, change_mode) -> None:
+        """Manual recovery/teaching is explicit, serialized with motion admission, and never resets STOP."""
+        with self.arm_lock:
+            if self.arm_thread and self.arm_thread.is_alive():
+                raise ArmBusy("Wait for the motion thread to finish before changing manual mode")
+            if on:
+                self.manual_mode = True     # fail closed if the controller mode change fails
+            change_mode(on)
+            self.manual_mode = on
 
     def at_survey(self) -> bool:
         """Camera on the arm: is the arm at the survey pose, i.e. does the picture match the calibration?"""
@@ -507,17 +861,21 @@ class State:
             return True
         return self.arm.at_home()
 
-    def clear_view(self) -> None:
+    def clear_view(self, *, move: bool = True, ticket=None) -> None:
         """A real arm parks before every capture so it is not mistaken for an object. With the camera on the arm,
         home is the survey pose: the picture is only valid there, after the image settles."""
         if isinstance(self.arm, SimArm):
             return
-        if self.lift_interrupted:
-            raise ArmBusy(self.arm_blocked())
-        with self.arm_lock:
-            was_there = self.at_survey() if self.camera_on_arm else False
-            self._take_arm("home")
-            self.arm.home()
+        ticket = self.motion_ticket(ticket)
+        was_there = isinstance(self.arm, CartesianArm) and self.arm.at_home()
+        busy = self.arm_thread and self.arm_thread.is_alive()
+        if not busy and was_there and not self.manual_mode:
+            return                         # already parked: reading a frame requires no motion/reset
+        if not move:
+            raise ArmBusy("move=false: no safe parked camera view is available; explicitly home the arm first")
+        self.start_arm(self.arm.home, job="home", pixels=False, ticket=ticket, wait=True)
+        if self.arm.state != "idle":
+            raise ArmBusy("The arm did not reach home: " + (getattr(self.arm, "last_error", None) or self.arm.state))
         if self.camera_on_arm:
             if not self.at_survey():
                 raise ArmBusy("The arm did not reach the survey pose: " + (self.arm.last_error or self.arm.state))
@@ -578,10 +936,527 @@ class State:
         self.room = out
         self.audit.event("room_scan", **self.room)
 
+    # ---------- voice table scan with the V2 camera model (table_scan.py, docs/TABLE_SCAN_V2.md)
+    @staticmethod
+    def _table_plan_public(plan: dict) -> dict:
+        return {**plan, "steps": [{k: ([round(float(v), 2) for v in s["q"]] if k == "q" else v) for k, v in s.items()}
+                                  for s in plan["steps"]]}
+
+    def _table_set(self, **fields) -> None:
+        with self.table_lock:
+            self.table_scan.update(fields)
+
+    def table_public(self) -> dict:
+        with self.table_lock:
+            out = {k: v for k, v in self.table_scan.items() if not k.startswith("_")}
+            out["objects"] = [dict(o) for o in self.table_objects]
+            p = self.table_pending
+            out["proposal"] = None if not p else {k: p[k] for k in ("id", "object_id", "expires_at", "summary")} | {
+                "plan": self._table_plan_public(p["plan"])}
+        return out
+
+    def table_pose(self) -> tuple[list[float], bool]:
+        """Joints for the V2 model and whether they come from the real controller. A real controller must be still
+        and fault free: a pose read during motion or under a controller error is not used as evidence."""
+        r = self.robot_telemetry()
+        q = r.get("joints")
+        physical = r.get("source") == "telemetry" and not r.get("simulated")
+        if q is None and isinstance(self.arm, CartesianArm):
+            try:
+                q = self.arm.backend.joints()
+                physical = getattr(self.arm, "gateway", None) is not None and not self.arm.gateway.simulated
+            except Exception:  # noqa: BLE001
+                q = None
+        if q is None or len(q) < 5:
+            raise ArmBusy("The table scan needs the five xArm joint angles and none are readable "
+                          "(qualify/operate read the real arm, the simulate profile uses xarm5sim)")
+        if physical and (r.get("moving") or r.get("error_code")):
+            raise ArmBusy(f"The arm must stand still without a controller error (error code {r.get('error_code')}): "
+                          "clear it on the robot, then retry")
+        return [float(v) for v in q[:5]], bool(physical)
+
+    def table_motion_check(self) -> None:
+        if not isinstance(self.arm, CartesianArm) or not hasattr(self.arm.backend, "fk_mm"):
+            raise ArmBusy("Table-scan motion needs a joint-capable xArm driver: TROVA_ARM=xarm:<ip> (operate profile) "
+                          "or xarm5sim (simulate profile). This profile can only label the current view.")
+        mode = self.arm.gateway.mode
+        if mode == "dry_run":
+            raise ArmBusy("Motion mode is dry_run: the plan is shown and nothing moves. Label the current view "
+                          "without motion, or use the simulate / operate profile.")
+        if mode == "hardware" and not table_scan_mod.hardware_acknowledged():
+            raise ArmBusy("The table scan moves the real arm with the V2 calibration, which is not physically "
+                          "qualified. The operator must set TROVA_TABLE_SCAN_V2_HARDWARE=accept-unqualified-v2 and restart.")
+
+    def table_plan(self):
+        cal, meta = table_scan_mod.load_v2()
+        cfg = table_scan_mod.settings()
+        q, physical = self.table_pose()
+        look_q = load_poses(self.s.data_dir).get("table_look_joints")   # operator-taught look pose wins
+        plan = table_scan_mod.plan_scan(cal, cfg, q, getattr(self.arm, "limits", None) or None, look_q=look_q)
+        return plan, cal, meta, cfg, physical
+
+    def table_start(self, move: bool = True) -> dict:
+        plan, cal, meta, cfg, physical = self.table_plan()
+        with self.table_lock:
+            if self.table_scan.get("status") in ("moving", "capturing", "labelling", "approaching"):
+                raise ArmBusy("A table scan or camera move is already running")
+            self.table_pending = None
+            self.table_frames = {}
+            self.table_scan = {"status": "planned", "move": move, "plan": self._table_plan_public(plan), "v2": meta,
+                               "settings": vars(cfg), "started_at": time.time(), "views": [], "step": None,
+                               "find": None, "selected": None, "reason": None}
+        if not move:                       # label what the camera sees from where the arm stands: no motion
+            self._table_set(status="capturing")
+            threading.Thread(target=self._table_observe_here, args=(cal, cfg), daemon=True).start()
+            self.audit.event("table_scan", action="observe_here", physical_pose=physical)
+            return self.table_public()
+        try:
+            if plan["problems"]:
+                raise ArmBusy("Table scan plan refused: " + "; ".join(plan["problems"]))
+            self.table_motion_check()
+            self._table_set(status="moving")
+            self.start_arm(self.run_table_scan, plan, cal, cfg, job="table_scan", pixels=False)
+        except ArmBusy as e:
+            self._table_set(status="refused", reason=str(e))
+            raise
+        self.audit.event("table_scan", action="start", views=sum(1 for s in plan["steps"] if s.get("capture")),
+                         z_mm=plan["z_mm"], aim_mm=plan["aim_mm"], mode=self.arm.gateway.mode, physical_pose=physical)
+        return self.table_public()
+
+    def _table_go(self, q, cfg) -> bool:
+        """One joint move through CartesianArm.go_joints (gateway, safety box, STOP latch, reached check), slower."""
+        arm, speed = self.arm, self.arm.joint_speed
+        cap = cfg.joint_speed_deg_s
+        try:   # joint speed so the sampled TCP never exceeds the workspace TCP speed (TROVA_ARM_SPEED_MM_S)
+            fk, q0, q1 = arm.backend.fk_mm, np.asarray(arm.backend.joints()[:5], float), np.asarray(q, float)
+            span = float(np.max(np.abs(q1 - q0)))
+            if span > 0.1:
+                pts = [np.asarray(fk(q0 + (q1 - q0) * t)[:3], float) for t in np.linspace(0, 1, 25)]
+                mm_per_deg = max(float(np.linalg.norm(b - a)) for a, b in zip(pts, pts[1:])) / (span / 24)
+                tcp_cap = float(getattr(arm.gateway, "max_speed_mm_s", 100.0) or 100.0)
+                if mm_per_deg > 1e-6:
+                    cap = min(cap, max(1.0, tcp_cap / mm_per_deg))
+        except Exception:  # noqa: BLE001 - no FK/telemetry: keep the configured cap (the gateway still checks)
+            pass
+        arm.joint_speed = min(speed, cap)
+        try:
+            return bool(arm.go_joints([float(v) for v in q]))
+        finally:
+            arm.joint_speed = speed
+
+    def _table_capture(self, label: str, cal) -> dict:
+        frame, _meta = self.capture_frame()
+        q, physical = self.table_pose()
+        h, w = frame.shape[:2]
+        if abs(w / h - cal.width / cal.height) > 0.01:
+            if physical:
+                raise ValueError(f"the camera gives {w}x{h} but V2 was calibrated at {cal.width}x{cal.height} "
+                                 "(a hot Pi drops to 640x480): let it cool or restart its stream, then scan again")
+            frame = cv2.resize(frame, (cal.width, cal.height))   # simulation only: positions are not physical anyway
+        flipped = table_scan_mod.image_flipped(cal, q)
+        if flipped:                     # straight-wrist pose: the camera is rolled 180 deg, show/label it upright
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+        boxes = drop_occluders(find_blobs(frame, None, self.thresh, self.min_area), frame.shape)
+        boxes = sorted(boxes, key=lambda b: -b.area)[:15]
+        path = self.audit.save_image(f"table_{label.replace(' ', '_')}", frame)
+        with self.table_lock:
+            self.table_frames[label] = frame
+        return {"label": label, "q": q, "physical": physical, "image": path, "boxes": boxes, "flipped": flipped,
+                "size": [int(frame.shape[1]), int(frame.shape[0])]}
+
+    def _table_views_public(self, views: list[dict]) -> list[dict]:
+        with self.table_lock:
+            annotated = dict(self.table_scan.get("_annotated") or {})
+        return [{"label": v["label"], "image": v["image"], "physical": v["physical"],
+                 "annotated": annotated.get(v["label"]), "boxes": len(v["boxes"])} for v in views]
+
+    def run_table_scan(self, plan: dict, cal, cfg) -> None:
+        """Arm thread: rise and tilt, then turn J1 view by view and photograph each. Every photo is labelled as soon
+        as it is taken (in the background, while the arm turns on), so the map grows during the turn; the final
+        merge runs when the last move (back to the taught look pose, if any) is done."""
+        from concurrent.futures import ThreadPoolExecutor
+        cancel, views, results = self.cancel, [], []
+        lang, pool, pub = self._table_lang(), ThreadPoolExecutor(max_workers=3), threading.Lock()
+
+        def ordered():
+            order = {v["label"]: i for i, v in enumerate(views)}
+            return sorted(results, key=lambda r: order.get(r[0]["label"], 0))
+
+        def labelled(fut):
+            try:
+                res = fut.result()
+            except Exception as e:  # noqa: BLE001 - one view failed to label: the scan goes on
+                self.audit.event("error", where="table_label_view", error=str(e))
+                return
+            with pub:
+                results.append(res)
+                try:
+                    self._table_publish(ordered(), list(views), cal, cfg, final=False)
+                except Exception as e:  # noqa: BLE001
+                    self.audit.event("error", where="table_label_progress", error=str(e))
+
+        ended = None
+        try:
+            for step in plan["steps"]:
+                if cancel.is_set() or self.stop_latched.is_set():
+                    ended = ("stopped", "STOP")
+                    break
+                self._table_set(step=step["label"])
+                if not self._table_go(step["q"], cfg):
+                    ended = ("stopped" if self.stop_latched.is_set() else "error", self.arm.last_error or self.arm.state)
+                    break
+                if step.get("capture"):
+                    time.sleep(cfg.settle_s)
+                    if cancel.is_set() or self.stop_latched.is_set():
+                        ended = ("stopped", "STOP")
+                        break
+                    view = self._table_capture(step["label"], cal)
+                    views.append(view)
+                    self._table_set(views=self._table_views_public(views))
+                    pool.submit(self._table_describe, view, lang).add_done_callback(labelled)
+        except Exception as e:  # noqa: BLE001 - camera or controller failure ends the scan, the arm stays where it is
+            ended = ("error", f"{type(e).__name__}: {e}")
+            self.audit.event("error", where="table_scan", error=str(e))
+        if ended:                       # the arm holds where it is; labels already running still reach the map
+            self._table_set(status=ended[0], reason=ended[1])
+            pool.shutdown(wait=False)
+            return
+        self._table_set(status="labelling", step=None)
+
+        def finish():
+            pool.shutdown(wait=True)
+            with pub:
+                try:
+                    self._table_publish(ordered(), views, cal, cfg, final=True)
+                except Exception as e:  # noqa: BLE001
+                    self._table_set(status="error", reason=f"labelling failed: {type(e).__name__}: {e}")
+                    self.audit.event("error", where="table_label", error=str(e))
+        threading.Thread(target=finish, daemon=True).start()
+
+    def _table_observe_here(self, cal, cfg) -> None:
+        try:
+            view = self._table_capture("here", cal)
+        except Exception as e:  # noqa: BLE001
+            self._table_set(status="error", reason=f"{type(e).__name__}: {e}")
+            return
+        self._table_set(views=[{"label": "here", "image": view["image"], "physical": view["physical"]}],
+                        status="labelling")
+        self._table_label([view], cal, cfg)
+
+    def _table_describe(self, view: dict, lang: str):
+        """Background labelling of one photo. Fewer than MIN_OPENCV_BOXES OpenCV boxes: Grok draws and names the
+        boxes itself (one call), so a cluttered table still gets labelled boxes."""
+        with self.table_lock:
+            frame = self.table_frames[view["label"]]
+        if len(view["boxes"]) < table_scan_mod.MIN_OPENCV_BOXES:
+            from .inventory import Inventory, _grok_mode
+            boxes, r = table_scan_mod.grok_boxes(self.grok, frame, lang)
+            if boxes:
+                live = _grok_mode(self.grok, r) == "live"
+                view["boxes"], view["box_source"] = boxes, "grok"
+                inv = Inventory(time=time.strftime("%H:%M:%S"), grok_mode=_grok_mode(self.grok, r),
+                                latency_s=r.latency_s)
+                inv.items = {b.id: {"name": b.label, "category": "", "note": "grok box", "name_from_model": True,
+                                    "label_authoritative": live} for b in boxes}
+                return view, inv
+        return view, describe_table(self.grok, frame, view["boxes"], lang)
+
+    def _table_label(self, views: list[dict], cal, cfg) -> None:
+        """Grok names the boxes of every view (in parallel); V2 turns each box into robot mm; sightings merge."""
+        from concurrent.futures import ThreadPoolExecutor
+        lang = self._table_lang()
+        try:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                results = list(pool.map(lambda v: self._table_describe(v, lang), views))
+            self._table_publish(results, views, cal, cfg, final=True)
+        except Exception as e:  # noqa: BLE001
+            self._table_set(status="error", reason=f"labelling failed: {type(e).__name__}: {e}")
+            self.audit.event("error", where="table_label", error=str(e))
+
+    def _table_publish(self, results: list, views: list[dict], cal, cfg, final: bool) -> None:
+        """Merge the labelled views so far into the object map and draw the boxes. final=False: the scan is still
+        turning (status unchanged); final=True: status done."""
+        lang = self._table_lang()
+        sightings, modes, drawn = [], set(), {}
+        for view, inv in results:
+            modes.add(inv.grok_mode)
+            c = table_scan_mod.for_frame(cal, *view["size"])
+            entries = drawn.setdefault(view["label"], [])
+            for b in view["boxes"]:
+                item = inv.items.get(b.id) or {}
+                name = str(item.get("name") or "unknown")
+                box = [float(b.x0), float(b.y0), float(b.x1), float(b.y1)]
+                if name.lower() in table_scan_mod.UNKNOWN:
+                    entries.append({"box": box, "text": "?", "kind": "unknown"})
+                    continue
+                try:
+                    loc = table_scan_mod.locate_box(c, view["q"], box, view.get("flipped", False))
+                except ValueError:       # the box's foot does not meet the table plane (above the horizon)
+                    entries.append({"box": box, "text": name + " (fuori tavolo)", "kind": "off_table"})
+                    continue
+                s = {"view": view["label"], "name": name, "category": item.get("category", ""),
+                     "note": item.get("note", ""), "box": box, "image": view["image"],
+                     "authoritative": bool(item.get("label_authoritative")) and view["physical"], **loc}
+                sightings.append(s)
+                entries.append({"box": box, "text": name, "kind": "mapped", "sighting": s})
+        objects = table_scan_mod.merge(sightings, cfg.merge_mm)
+        annotated = {}
+        for label, entries in drawn.items():   # OpenCV boxes + Grok labels + map number and mm on every photo
+            for e in entries:
+                s = e.pop("sighting", None)
+                if s is not None and objects:
+                    xy = np.asarray(s["centre_mm"][:2])
+                    o = min(objects, key=lambda m: float(np.linalg.norm(np.asarray(m["centre_mm"][:2]) - xy)))
+                    e["text"] = f"#{o['id']} {e['text']}  x{o['centre_mm'][0]:.0f} y{o['centre_mm'][1]:.0f}"
+            with self.table_lock:
+                frame = self.table_frames.get(label)
+            if frame is not None:
+                annotated[label] = self.audit.save_image(f"table_{label.replace(' ', '_')}_boxes",
+                                                         table_scan_mod.annotate_view(frame, entries))
+        with self.table_lock:
+            self.table_scan["_annotated"] = {**(self.table_scan.get("_annotated") or {}), **annotated}
+        views_public = self._table_views_public(views)
+        physical = all(v["physical"] for v in views)
+        for o in objects:
+            o["physical"] = physical
+            o["place"] = table_scan_mod.place_words(o, self._table_center(), lang)
+        with self.table_lock:
+            frames = dict(self.table_frames)
+        sheet = table_scan_mod.contact_sheet(objects, frames) if objects else None
+        names = ", ".join(f"{o['id']} {o['name']}" for o in objects)
+        summary = ((f"Ho visto {len(objects)} oggetti: {names}." if objects else "Non ho visto oggetti sul tavolo.")
+                   if lang == "it" else
+                   (f"I saw {len(objects)} objects: {names}." if objects else "I saw no objects on the table."))
+        if not physical:
+            summary += (" Posizioni simulate: il braccio non si è mosso davvero." if lang == "it"
+                        else " Simulated positions: the real arm did not move.")
+        if not final:
+            summary = (f"Finora ({len(results)}/{len(views)} foto etichettate): " if lang == "it"
+                       else f"So far ({len(results)}/{len(views)} photos labelled): ") + summary
+        sheet_path = self.audit.save_image("table_sheet", sheet) if sheet is not None and final else None
+        with self.table_lock:
+            self.table_objects, self.table_sheet = objects, sheet
+            self.table_scan.update(summary=summary, grok_mode=sorted(modes), physical_positions=physical,
+                                   views=views_public)
+            if final:
+                self.table_scan.update(status="done", finished_at=time.time(), sheet=sheet_path)
+        if final:
+            self.audit.event("table_scan", action="mapped",
+                             objects=[{k: o[k] for k in ("id", "name", "centre_mm")} for o in objects],
+                             grok_mode=sorted(modes), physical_positions=physical)
+
+    def _table_center(self) -> float:
+        """The table-middle bearing the last scan used (from the start pose unless set), for left/right words."""
+        center = (self.table_scan.get("plan") or {}).get("center_deg")
+        if center is None:
+            center = table_scan_mod.settings().center_deg
+        return float(center) if center is not None else 0.0
+
+    def _table_lang(self) -> str:
+        return os.getenv("TROVA_TABLE_SCAN_LANG", "it").strip() or "it"
+
+    def table_find(self, text: str) -> dict:
+        lang, objects = self._table_lang(), list(self.table_objects)
+        if not objects:
+            return {"status": "not_found", "spoken_message": "Prima scansiona il tavolo: non ho ancora una mappa."
+                    if lang == "it" else "Scan the table first: there is no object map yet."}
+        res = table_scan_mod.find(self.grok, text, objects, self.table_sheet, self._table_center(), lang)
+        by_id = {o["id"]: o for o in objects}
+        if res["status"] == "found":
+            o = by_id[res["object_id"]]
+            spoken = (f"Trovato: numero {o['id']}, {o['name']}, {o['place']}. Vuoi che porti la camera sopra?"
+                      if lang == "it" else f"Found number {o['id']}, {o['name']}, {o['place']}. Shall I bring the camera above it?")
+        elif res["status"] == "clarify":
+            spoken = res["question"]
+        else:
+            spoken = (f"Non trovo \"{text}\" tra gli oggetti scansionati." if lang == "it"
+                      else f"I can't find \"{text}\" among the scanned objects.")
+        with self.table_lock:
+            self.table_pending = None
+            self.table_scan["find"] = {"request": text, **res, "spoken_message": spoken}
+            self.table_scan["selected"] = res.get("object_id")
+        self.audit.event("table_scan", action="find", request=text, status=res["status"], matches=res["matches"],
+                         grok_mode=res.get("grok_mode"))
+        out = {**res, "spoken_message": spoken, "objects": [by_id[i] for i in res["matches"]]}
+        if res["status"] == "found":
+            out.update(self._table_go_to(res["object_id"], f"Trovato: numero {by_id[res['object_id']]['id']}, "
+                                         f"{by_id[res['object_id']]['name']}. " if lang == "it" else
+                                         f"Found number {res['object_id']}. "))
+            with self.table_lock:
+                if self.table_scan.get("find"):
+                    self.table_scan["find"]["spoken_message"] = out["spoken_message"]
+        return out
+
+    def _table_go_to(self, object_id: int, prefix: str) -> dict:
+        """After a find/choice: plan 'over it at the same height' at once (no motion) and ask one confirmation.
+        TROVA_TABLE_SCAN_AUTO_GO=1 (operator setting, .env) executes it without asking; STOP still voids it."""
+        try:
+            prop = self.table_propose(object_id)
+        except ArmBusy as e:
+            return {"approach": "refused", "spoken_message": prefix + str(e)}
+        if prop["status"] != "awaiting_confirmation":
+            return {"approach": prop["status"], "spoken_message": prefix + prop["spoken_message"]}
+        if os.getenv("TROVA_TABLE_SCAN_AUTO_GO", "").strip() == "1":
+            try:
+                self.table_confirm(prop["proposal_id"])
+                return {"approach": "moving",
+                        "spoken_message": prefix + ("Mi muovo." if self._table_lang() == "it" else "Moving.")}
+            except ArmBusy as e:
+                return {"approach": "refused", "spoken_message": prefix + str(e)}
+        return {"approach": "awaiting_confirmation", "proposal_id": prop["proposal_id"],
+                "spoken_message": prefix + prop["spoken_message"]}
+
+    def table_choose(self, object_id: int | None = None, answer: str | None = None) -> dict:
+        lang, objects = self._table_lang(), list(self.table_objects)
+        by_id = {o["id"]: o for o in objects}
+        candidates = ((self.table_scan.get("find") or {}).get("candidates")) or list(by_id)
+        if object_id is None and answer:
+            object_id = table_scan_mod.resolve_choice(answer, candidates, objects, self._table_center())
+        if object_id not in by_id:
+            return {"status": "clarify", "spoken_message": "Non ho capito quale: dimmi il numero dell'oggetto."
+                    if lang == "it" else "I didn't get which one: tell me the object's number."}
+        o = by_id[object_id]
+        with self.table_lock:
+            self.table_pending = None
+            self.table_scan["selected"] = object_id
+            if self.table_scan.get("find"):
+                self.table_scan["find"] = {**self.table_scan["find"], "status": "chosen", "object_id": object_id}
+        self.audit.event("table_scan", action="choose", object_id=object_id, name=o["name"])
+        return {"status": "selected", "object_id": object_id, "object": o,
+                **self._table_go_to(object_id, f"Selezionato il numero {object_id}: {o['name']}. " if lang == "it"
+                                    else f"Selected number {object_id}: {o['name']}. ")}
+
+    def table_propose(self, object_id: int | None = None) -> dict:
+        """Plan 'camera above the object' and hold it for one explicit confirmation (60 s, single use)."""
+        lang = self._table_lang()
+        object_id = object_id if object_id is not None else self.table_scan.get("selected")
+        o = next((x for x in self.table_objects if x["id"] == object_id), None)
+        if o is None:
+            raise ArmBusy("Select an object from the table scan first")
+        cal, _meta = table_scan_mod.load_v2()
+        cfg = table_scan_mod.settings()
+        q, physical = self.table_pose()
+        if bool(o.get("physical")) != physical:
+            raise ArmBusy("The map was made with " + ("real" if o.get("physical") else "simulated")
+                          + " joints but the arm now reads " + ("real" if physical else "simulated")
+                          + " joints: scan the table again in this profile")
+        limits = getattr(self.arm, "limits", None) or None
+        level = os.getenv("TROVA_TABLE_SCAN_APPROACH", "level").strip().lower() != "hover"
+        try:      # level (default): same TCP height, over it or pointing at it; hover: the old 30 cm descent
+            plan = (table_scan_mod.plan_level_over(cal, cfg, q, o["centre_mm"], limits) if level else
+                    table_scan_mod.plan_camera_over(cal, cfg, q, o["centre_mm"], limits))
+        except ValueError as e:
+            plan = {"problems": [str(e)]}
+        if plan["problems"]:
+            msg = "Camera move refused: " + "; ".join(plan["problems"])
+            self._table_set(approach={"status": "refused", "object_id": object_id, "spoken_message": msg})
+            self.audit.event("table_scan", action="approach_refused", object_id=object_id, problems=plan["problems"])
+            raise ArmBusy(msg)
+        x, y, _z = o["centre_mm"]
+        if plan.get("kind") == "level_over":
+            how = ("mi metto sopra" if plan["above"] else "lo indico da qui (troppo lontano per andarci sopra)")
+            how_en = ("I go right above it" if plan["above"] else "I point at it from here (too far to go above)")
+            summary = (f"Numero {object_id}, {o['name']} (x {x:.0f}, y {y:.0f} mm): {how}, alla stessa altezza "
+                       f"Z {plan['z_mm']:.0f} mm, camera {plan['look_down_deg']:.0f}° in giù. Confermi?"
+                       if lang == "it" else
+                       f"Number {object_id}, {o['name']} (x {x:.0f}, y {y:.0f} mm): {how_en}, at the same height "
+                       f"Z {plan['z_mm']:.0f} mm, camera {plan['look_down_deg']:.0f} deg down. Confirm?")
+        else:
+            summary = (f"Porto la camera a {cfg.hover_mm / 10:.0f} cm sopra il numero {object_id}, {o['name']} "
+                       f"(x {x:.0f}, y {y:.0f} mm), in due movimenti lenti. Confermi?"
+                       if lang == "it" else
+                       f"I will bring the camera {cfg.hover_mm / 10:.0f} cm above number {object_id}, {o['name']} "
+                       f"(x {x:.0f}, y {y:.0f} mm), in two slow moves. Confirm?")
+        p = {"id": uuid.uuid4().hex, "object_id": object_id, "plan": plan, "start_q": q, "physical": physical,
+             "issued": time.time(), "expires_at": time.time() + 60, "seq": self.stop_sequence, "summary": summary}
+        try:
+            self.table_motion_check()
+            executable, reason = True, None
+        except ArmBusy as e:
+            executable, reason = False, str(e)
+        with self.table_lock:
+            self.table_pending = p if executable else None
+        self.audit.event("table_scan", action="approach_planned", object_id=object_id, executable=executable,
+                         target_mm=plan["target_mm"], camera_mm=plan["camera_mm"])
+        out = {"status": "awaiting_confirmation" if executable else "plan_only", "object_id": object_id,
+               "proposal_id": p["id"] if executable else None, "expires_at": p["expires_at"],
+               "plan": self._table_plan_public(plan), "spoken_message": summary if executable else
+               (f"Piano pronto ma non eseguibile qui: {reason}" if lang == "it" else f"Plan ready but not executable here: {reason}")}
+        self._table_set(approach={"status": out["status"], "object_id": object_id, "spoken_message": out["spoken_message"],
+                                  "camera_mm": plan["camera_mm"], "tcp_mm": plan["tcp_mm"]})
+        return out
+
+    def table_confirm(self, proposal_id: str) -> dict:
+        with self.table_lock:
+            p = self.table_pending
+            if not p or not hmac.compare_digest(str(proposal_id), p["id"]):
+                raise ArmBusy("No matching camera-move proposal: ask for the move again")
+            self.table_pending = None                 # single use, even if a check below refuses
+        if time.time() > p["expires_at"] or p["seq"] != self.stop_sequence:
+            raise ArmBusy("The proposal expired or a STOP happened since: ask for the move again")
+        q, physical = self.table_pose()
+        if physical != p["physical"] or max(abs(a - b) for a, b in zip(q, p["start_q"])) > 1.0:
+            raise ArmBusy("The arm moved since the plan: ask for the move again")
+        self.table_motion_check()
+        cfg = table_scan_mod.settings()
+        self._table_set(status="approaching", reason=None)
+        try:
+            self.start_arm(self._table_run_approach, p, cfg, job="table_approach", pixels=False)
+        except ArmBusy as e:
+            self._table_set(status="refused", reason=str(e))
+            raise
+        self.audit.event("table_scan", action="approach_confirmed", object_id=p["object_id"],
+                         target_mm=p["plan"]["target_mm"], mode=self.arm.gateway.mode)
+        return {"status": "moving", "object_id": p["object_id"],
+                "spoken_message": "Mi muovo." if self._table_lang() == "it" else "Moving."}
+
+    def _table_run_approach(self, p: dict, cfg) -> None:
+        for step in p["plan"]["steps"]:
+            if self.cancel.is_set() or self.stop_latched.is_set():
+                self._table_set(status="stopped", reason="STOP")
+                return
+            self._table_set(step=step["label"])
+            if not self._table_go(step["q"], cfg):
+                self._table_set(status="stopped" if self.stop_latched.is_set() else "error",
+                                reason=self.arm.last_error or self.arm.state)
+                return
+        view = None
+        try:
+            time.sleep(cfg.settle_s)
+            frame, _meta = self.capture_frame()
+            cal = table_scan_mod.for_frame(table_scan_mod.load_v2()[0], frame.shape[1], frame.shape[0])
+            if table_scan_mod.image_flipped(cal, self.table_pose()[0]):
+                frame = cv2.rotate(frame, cv2.ROTATE_180)          # same upright convention as the scan photos
+            view = self.audit.save_image(f"table_over_{p['object_id']}", frame)
+        except Exception as e:  # noqa: BLE001 - the move finished; only the confirmation picture failed
+            self.audit.event("error", where="table_over_picture", error=str(e))
+        self._table_set(status="over_object", step=None, over={"object_id": p["object_id"], "image": view,
+                                                               "target_mm": p["plan"]["target_mm"],
+                                                               "camera_mm": p["plan"]["camera_mm"]})
+        self.audit.event("table_scan", action="over_object", object_id=p["object_id"], image=view)
+
     def run_lift(self, wps: list) -> None:
         """Feature 7: if the lift does not finish, block automatic moves until the operator frees the arm."""
         self.lift_interrupted = True
-        self.lift_interrupted = not self.arm.run_waypoints(wps)
+        cancel = self.cancel
+        try:
+            if self.lift_store:
+                self.lift_store.write("in_progress")  # MUST reach durable storage before the FIRST waypoint
+            if cancel.is_set() or self.stop_latched.is_set():
+                return
+            completed = self.arm.run_waypoints(wps)
+            if completed and not cancel.is_set() and not self.stop_latched.is_set():
+                if self.lift_store:
+                    self.lift_store.write("clear")
+                with self.safety_lock:
+                    interrupted = cancel.is_set() or self.stop_latched.is_set()
+                    if not interrupted:
+                        self.lift_interrupted = False
+                if interrupted and self.lift_store:
+                    self.lift_store.write("in_progress")
+        except Exception as e:  # retain the dirty marker and interlock on persistence/driver failure
+            self.persistence_error = str(e)
+            self.stop_arm()
 
     def capture_clean(self, attempts: int = 6) -> tuple[np.ndarray, list[Box], bool]:
         for _ in range(attempts):
@@ -740,7 +1615,11 @@ class State:
                 and not pose_changed(pose_before.get('pose6'), pose.get('pose6'), mm=1, deg=.1)
                 and np.max(np.abs(np.subtract(pose_before['joints'], pose['joints']))) <= .1)
             if pose.get('source') == 'telemetry' and not capture_stationary:
-                pose = dict(pose, moving=True)
+                # Still treated as moving (fail closed); only the reason is kept so the operator is told what to fix.
+                code = pose.get('error_code') if pose.get('error_code') else pose_before.get('error_code')
+                why = (f"the controller reports error code {code}: clear it on the robot (staff), then take a new picture"
+                       if code else "the arm moved, or its pose could not be read, while the picture was taken")
+                pose = dict(pose, moving=True, capture_untrusted=why)
             size = [int(frame.shape[1]), int(frame.shape[0])]
             if self.override is None:
                 self.frame_size = size
@@ -770,6 +1649,7 @@ class State:
                 "pose": {"state": pose.get("arm_state"), "tip_mm": pose.get("tip_mm"),
                          "tcp_mm": pose.get("status_tcp_mm"), "pose6": pose.get("pose6"),
                          "source": pose.get("source"), "moving": pose.get("moving"),
+                         "capture_untrusted": pose.get("capture_untrusted"),
                          "joints": pose.get("joints")},
                 "grok_mode": inv.grok_mode, "tracks_reset": reset,
                 "occluded": occl, "objects": objects,
@@ -929,8 +1809,14 @@ class AgentHost:
             finally:
                 holder["final"] = gateway.current_pose()
 
-        if self.cancel.is_set() or not self.st.start_arm(go, job="approach", since=self.started_at):
-            return {"ok": False, "reason": "STOP is latched. The approach was not started."}
+        if self.cancel.is_set():
+            return {"ok": False, "reason": "The task was cancelled. The approach was not started."}
+        try:
+            # pixels=False: the target comes from vision localization and is checked by the gateway, not the
+            # legacy table calibration. "vision_approach" is refused in first-run mode by start_arm.
+            self.st.start_arm(go, job="vision_approach", pixels=False, since=self.started_at)
+        except ArmBusy as exc:
+            return {"ok": False, "reason": f"The approach was not started: {exc}"}
         if getattr(self, 'active_task', None) and holder.get('ok') is not False:
             self.publish(self.active_task)
         if self.st.arm_thread is not None:
@@ -970,8 +1856,10 @@ class AgentHost:
                 holder.update(gateway.execute_joints(task['planned_joints'],task['orbit_speed'],geometry=geometry))
             except Exception as exc:
                 holder.update(ok=False,reason=str(exc))
-        if not self.st.start_arm(go,job='approach',since=self.started_at):
-            return {'ok':False,'reason':'STOP, busy controller or cancelled command.'}
+        try:
+            self.st.start_arm(go, job='vision_approach', pixels=False, since=self.started_at)
+        except ArmBusy as exc:
+            return {'ok':False,'reason':f'STOP, busy controller or cancelled command: {exc}'}
         while self.st.arm_thread and self.st.arm_thread.is_alive():
             scope = self.st.orbit_permit
             expired_scope = bool(scope and scope.started and task.get('joint_operation') == 'scan' and time.time() >= scope.expires_at)
@@ -1081,6 +1969,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.trova = st
     app.mount("/files", StaticFiles(directory=str(st.s.data_dir)), name="files")
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+    @app.middleware("http")
+    async def _motion_request_ticket(request, call_next):
+        token = MOTION_TICKET.set(st.stop_epoch)
+        try:
+            return await call_next(request)
+        finally:
+            MOTION_TICKET.reset(token)
 
     token = os.getenv("TROVA_TOKEN", "").strip()
     if token:   # the venue Wi-Fi is shared: without the token nobody else can move the arm or spend the key
@@ -1192,6 +2088,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
             "motion": st.arm.gateway.public() if hasattr(st.arm, "gateway") else None,
             "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
+            "stop_latched": st.stop_latched.is_set(),
+            "stop_error": st.stop_error,
+            "stop_nonce": st.stop_nonce,
+            "physical_arm": st.physical, "safety_persistence_error": st.persistence_error,
             "camera_on_arm": st.camera_on_arm, "at_survey": st.at_survey(), "poses": load_poses(st.s.data_dir),
             "reference": None if not st.reference else {k: st.reference[k] for k in ("time", "path", "n_objects")},
             "pending_question": st.pending["question"] if st.pending else None,
@@ -1202,7 +2102,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
             "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
             "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(), "batch": st.batch, "room": st.room,
-            "light": st.light.status(),
+            "table_scan": st.table_public(),
+            "light": st.light.status(), "first_run": st.first_run, "approach": st.approach_view() if st.first_run else None,
             "vision": st.vision.assess(size),
             "vision_progress": st.vision.progress(),
             "robot": st.robot_telemetry(),
@@ -1223,15 +2124,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     # ------------------------------------------------------------------ find
-    def do_find(request: str, query_img, history, move: bool = True, reuse: dict | None = None):
+    def do_find(request: str, query_img, history, move: bool = True, reuse: dict | None = None, ticket=None):
+        ticket = st.motion_ticket(ticket)      # captured in the request context, before any lock or model call
         if not st.agent_lock.acquire(blocking=False):
             raise ArmBusy('An autonomous task is running; cancel it before changing the target')
         try:
-            return _do_find(request, query_img, history, move, reuse)
+            return _do_find(request, query_img, history, move, reuse, ticket)
         finally:
             st.agent_lock.release()
 
-    def _do_find(request, query_img, history, move, reuse):
+    def _do_find(request, query_img, history, move, reuse, ticket):
         with st.lock:
             st.invalidate_pending('A new find invalidated the previous proposal.')
             st.selected_context = None
@@ -1239,7 +2141,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if reuse:                       # a clarify answer: same frame and box numbers as the question
                 frame, boxes, occluded = reuse["frame"], reuse["boxes"], reuse["occluded"]
             else:
-                st.clear_view()
+                st.clear_view(move=move, ticket=ticket)
                 frame = st.frame()
                 boxes, occluded = st.proposals(frame)
             captured_pose = (reuse or {}).get('pose') or st.robot_telemetry()
@@ -1273,8 +2175,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if res.status == "found" and st.calib and st.calib.ok:
                 table_mm = [round(v, 1) for v in st.calib.pixel_to_table(*res.box.center)]
                 arm_blocked = st.arm_blocked()
-                if not arm_blocked and move and not st.start_arm(st.arm.point_at, *table_mm, since=asked):
-                    arm_blocked = "STOP was pressed while Trova was looking: the arm stays put"
+                if not arm_blocked and move and not st.first_run:
+                    try:
+                        st.start_arm(st.arm.point_at, *table_mm, since=asked, ticket=ticket)
+                    except ArmBusy as e:
+                        arm_blocked = str(e)
             total = time.perf_counter() - t0
             if res.status == "found":
                 st.metrics["find_times"].append(total)
@@ -1283,17 +2188,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 **paths)
             st.last_find = {"ts": time.time(), "event_id": ev["id"], "request": request, "result": res.as_dict(),
                             "table_mm": table_mm, "arm_blocked": arm_blocked, "total_s": round(total, 2), "box": res.box,
-                            "occluded": occluded, "moved": bool(table_mm and move and not arm_blocked),
+                            "occluded": occluded, "moved": bool(table_mm and move and not arm_blocked and not st.first_run),
                             "boxes": [b.as_dict() for b in boxes], **paths}
-            st.pending_move = st.last_find if res.status == "found" else None
+            st.pending_move = {**st.last_find, "_ticket": ticket} if res.status == "found" else None
+            if st.first_run and table_mm and st.pending_move and isinstance(st.arm, CartesianArm):
+                try:
+                    st.pending_move["approach"] = st.first_approach(table_mm)
+                except Exception as e:  # noqa: BLE001 - no plan, no confirmation: the arm cannot be moved
+                    st.last_find["arm_blocked"] = f"First run: cannot plan the approach: {e}"
+                    st.audit.event("error", where="first_run_plan", error=str(e))
             st.light.show({"found": "found", "not_found": "not_found"}.get(res.status, "idle"))
             st.pending = None
             if res.status == "clarify":
                 st.pending = {"request": request, "query_image": query_img, "history": history, "move": move,
                               "question": res.clarifying_question, "candidates": res.candidate_ids,
-                              "reuse": {"frame": frame, "boxes": boxes, "occluded": occluded, 'pose': captured_pose}}
+                              "reuse": {"frame": frame, "boxes": boxes, "occluded": occluded, 'pose': captured_pose},
+                              "ticket": ticket}
             st.label_wait = None
-            return {k: v for k, v in st.last_find.items() if k != "box"}
+            return {k: v for k, v in st.last_find.items() if k != "box"} | (
+                {"approach": st.approach_view()} if st.first_run else {})
 
     @app.post("/api/find")
     def api_find(text: str = Form(""), photo: UploadFile | None = File(None), move: bool = Form(True)):
@@ -1310,9 +2223,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/find_all")
     def api_find_all(text: str = Form(...), move: bool = Form(True)):
         """Feature 6: "point at all the pens": every match, then the arm visits each in turn."""
+        ticket = st.motion_ticket()
         with st.lock:
             t0, asked = time.perf_counter(), time.time()
-            st.clear_view()
+            st.clear_view(move=move, ticket=ticket)
             frame = st.frame()
             boxes, occluded = st.proposals(frame)
             try:
@@ -1326,13 +2240,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if st.calib and st.calib.ok else []
             blocked = st.arm_blocked() if targets else None
             moved = bool(targets and move and not blocked)
-            if moved and not st.start_arm(st.run_tour, targets, since=asked, job="tour"):
-                moved, blocked = False, "STOP was pressed while Trova was looking: the arm stays put"
+            if moved:
+                try:
+                    st.start_arm(st.run_tour, targets, since=asked, job="tour", ticket=ticket)
+                except ArmBusy as e:
+                    moved, blocked = False, str(e)
             out = {"result": res.as_dict(), "targets": targets, "moved": moved, "arm_blocked": blocked,
                    "marked": st.audit.save_image("find_all", marked), "request": text.strip(),
                    "total_s": round(time.perf_counter() - t0, 2), "occluded": occluded}
             ev = st.audit.event("find_all", **out)
-            st.pending_move = {"result": {"label": res.label}, "targets": targets} if targets else None
+            st.pending_move = {"result": {"label": res.label}, "targets": targets, "_ticket": ticket} if targets else None
             return out | {"event_id": ev["id"]}
 
     @app.post("/api/clarify")
@@ -1343,7 +2260,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(400, "No question pending")
             try:
                 return do_find(p["request"], p["query_image"], p["history"] + [(p["question"], answer)],
-                               p.get("move", True), reuse=p.get("reuse"))
+                               p.get("move", True), reuse=p.get("reuse"), ticket=p["ticket"])
             except (ArmBusy, CameraError):
                 raise
             except (GrokError, ValueError, RuntimeError) as e:
@@ -1576,6 +2493,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             st.calib = calibrate_aruco(st.frame(), pos)
             if mpath.exists() and json.loads(mpath.read_text()).get("_frame") == "robot":
                 st.calib.source = "aruco_robot"
+            if st.camera_on_arm and isinstance(st.arm, CartesianArm) and st.at_survey():
+                st.calib.pose = list(st.arm.home_joints or st.arm.home_mm)   # this mapping is only valid here
         except ValueError as e:
             return fail(e, "calibration")
         st.calib.save(st.calib_path)
@@ -1659,8 +2578,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         """Record the arm's current joint angles as a named pose: home_joints (with the camera on the arm: the
         survey pose, where the camera sees the whole table) or look_joints (the room scan starts here)."""
         arm = _need_cartesian()
-        if name not in ("home_joints", "look_joints"):
-            raise HTTPException(400, "name must be home_joints or look_joints")
+        if name not in ("home_joints", "look_joints", "table_look_joints"):
+            raise HTTPException(400, "name must be home_joints, look_joints or table_look_joints (table scan)")
         try:
             q = arm.backend.joints()
         except NotImplementedError as e:
@@ -1677,11 +2596,20 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 and st.camera_on_arm else ""}
 
     @app.post("/api/arm/clear_errors")
-    def api_arm_clear_errors():
-        """After a collision stop or a protective stop: clear the controller error and enable motion again."""
+    def api_arm_clear_errors(request: Request):
+        """Controller recovery only; never resets the software STOP or interrupted-lift interlock."""
         arm = _need_cartesian()
+        if st.physical:
+            st.authenticate_operator(request.headers.get("x-trova-operator-token", ""))
         try:
-            arm.backend.clear_errors()
+            with st.arm_lock:
+                if st.arm_thread and st.arm_thread.is_alive():
+                    raise ArmBusy("Wait for the motion worker to finish before controller recovery")
+                if st.physical and not st.stop_latched.is_set():
+                    raise ArmBusy("Latch software STOP before explicit controller recovery")
+                arm.backend.clear_errors()
+        except ArmBusy:
+            raise
         except Exception as e:  # noqa: BLE001 - show the SDK message
             return fail(e, "clear_errors")
         arm.state, arm.last_error = "idle", None
@@ -1689,10 +2617,12 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return arm.status()
 
     @app.post("/api/arm/freedrive")
-    def api_arm_freedrive(on: bool = Form(...)):
+    def api_arm_freedrive(request: Request, on: bool = Form(...)):
         arm = _need_cartesian()
+        if st.physical:
+            st.authenticate_operator(request.headers.get("x-trova-operator-token", ""))
         try:
-            arm.freedrive(on)
+            st.set_manual_mode(on, arm.freedrive)
         except NotImplementedError as e:
             return fail(e, "freedrive")
         st.audit.event("arm_freedrive", on=on)
@@ -1710,21 +2640,24 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/arm/stop")
     def api_arm_stop():
-        st.stop_arm()
+        try:
+            st.stop_arm()
+        except Exception as e:  # software latch/cancellation remain set even when the driver cannot acknowledge STOP
+            return fail(e, "arm_stop")
         st.audit.event("arm_stop")
         return st.arm.status()
 
     @app.post("/api/arm/home")
     def api_arm_home():
-        """Explicit operator command: also the way out after an interrupted tray lift."""
-        st.lift_interrupted = False
-        st.start_arm(st.arm.home, job="home")
+        """Homing is motion: it cannot reset STOP or clear an interrupted lift."""
+        st.start_arm(st.arm.home, job="home", pixels=False)
         st.audit.event("arm_home")
         return st.arm.status()
 
     @app.post("/api/arm/jog")
     def api_arm_jog(body: JogReq):
         """Relative jog in the robot base frame. The gateway keeps the requested millimetres and says why if it refuses."""
+        ticket = st.motion_ticket()
         gateway = getattr(st.arm, "gateway", None)
         if gateway is None:
             raise HTTPException(400, "this arm has no motion gateway")
@@ -1738,9 +2671,12 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         def go():
             holder["decision"] = gateway.plan_relative(body.direction, body.distance_mm, execute=True)
 
-        if not st.start_arm(go, job="jog"):
-            planned.ok, planned.status, planned.allow_motion = False, "stopped", False
-            planned.reason = "STOP is latched. A software stop holds position; it is not the physical emergency stop."
+        try:
+            st.start_arm(go, job="jog", pixels=False, ticket=ticket)
+        except ArmBusy as e:              # STOP latch, manual mode, first-run mode, interrupted lift, busy arm
+            planned.ok, planned.allow_motion = False, False
+            planned.status = "stopped" if st.stop_latched.is_set() else "rejected"
+            planned.reason = str(e)
             st.audit.event("arm_jog", direction=body.direction, distance_mm=body.distance_mm,
                            status=planned.status, ok=False, mode=planned.mode, reason=planned.reason)
             return planned.as_dict()
@@ -1756,13 +2692,25 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                        status=decision.status, ok=decision.ok, mode=decision.mode, reason=decision.reason)
         return decision.as_dict()
 
+    @app.post("/api/arm/reset")
+    def api_arm_reset(r: StopReset, request: Request):
+        identity = st.operator_reset(r, credential=request.headers.get("x-trova-operator-token", ""))
+        st.audit.event("arm_reset", operator=identity)
+        return {"stop_latched": st.stop_latched.is_set(), "lift_interrupted": st.lift_interrupted, "moved": False}
+
+    @app.post("/api/arm/recover_lift")
+    def api_arm_recover_lift(r: LiftRecovery, request: Request):
+        identity = st.operator_reset(r, recover_lift=True, credential=request.headers.get("x-trova-operator-token", ""))
+        st.audit.event("arm_lift_recovery", operator=identity, note=r.note.strip())
+        return {"stop_latched": st.stop_latched.is_set(), "lift_interrupted": st.lift_interrupted, "moved": False}
+
     @app.post("/api/arm/point")
     def api_arm_point(p: Point):
         blocked = st.arm_blocked(pixels=p.u is not None)
         if blocked:
             raise HTTPException(409, blocked)
         x, y = _to_mm(p)
-        st.start_arm(st.arm.point_at, x, y)
+        st.start_arm(st.arm.point_at, x, y, pixels=p.u is not None)
         st.audit.event("arm_point", x_mm=x, y_mm=y)
         return {"x_mm": round(x, 1), "y_mm": round(y, 1)}
 
@@ -1806,10 +2754,12 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return {"home_q": st.arm.record_home()}
 
     @app.post("/api/arm/compliant")
-    def api_arm_compliant(on: bool = Form(...)):
+    def api_arm_compliant(request: Request, on: bool = Form(...)):
         if not isinstance(st.arm, TaughtGridArm):
             raise HTTPException(400, "Teaching needs TROVA_ARM=grid:...")
-        st.arm.backend.set_compliant(on)
+        if st.physical:
+            st.authenticate_operator(request.headers.get("x-trova-operator-token", ""))
+        st.set_manual_mode(on, st.arm.backend.set_compliant)
         st.audit.event("arm_compliant", on=on)
         return {"compliant": on}
 
@@ -1883,7 +2833,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return fail_log.summary(st.cases_dir / "failures.jsonl")
 
     def _save_case(case: dict) -> None:
-        with (st.cases_dir / "finds.jsonl").open("a") as f:
+        with (st.cases_dir / "finds.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(case, ensure_ascii=False) + "\n")
 
     # ------------------------------------------------------------------ feature 1: inventory map + M1 snapshot
@@ -2219,21 +3169,78 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     # ------------------------------------------------------------------ voice (Grok Voice realtime)
     @app.post("/api/arm/point_last")
-    def api_point_last():
-        """Move to the object of the last find (used after a spoken 'yes')."""
+    def api_point_last(a: Approach | None = None):
+        """Move to the object of the last find (used after a spoken 'yes').
+        First supervised run: stage 1 hovers above it, stage 2 descends; each needs its own shown confirmation."""
         lf = getattr(st, "pending_move", None)
         if not lf or not (lf.get("table_mm") or lf.get("targets")):
             raise HTTPException(400, "Nothing found yet to point at")
+        if st.first_run:
+            return _approach(lf, a)
         blocked = st.arm_blocked()
         if blocked:
             return JSONResponse({"error": blocked, "blocked": True}, 409)
         if lf.get("targets"):                                   # the last request was "point at all ..."
-            st.start_arm(st.run_tour, lf["targets"], job="tour")
+            st.start_arm(st.run_tour, lf["targets"], job="tour", ticket=lf["_ticket"])
             st.audit.event("arm_tour", targets=lf["targets"], after="voice confirmation")
             return {"ok": True, "label": lf["result"]["label"], "targets": lf["targets"]}
-        st.start_arm(st.arm.point_at, *lf["table_mm"])
+        st.start_arm(st.arm.point_at, *lf["table_mm"], ticket=lf["_ticket"])
         st.audit.event("arm_point", x_mm=lf["table_mm"][0], y_mm=lf["table_mm"][1], after="voice confirmation")
         return {"ok": True, "label": lf["result"]["label"], "table_mm": lf["table_mm"]}
+
+    def _approach(pm: dict, a: Approach | None):
+        problems = st.first_run_problems()
+        if problems:
+            raise ArmBusy("First supervised run refused: " + "; ".join(problems))
+        if a is None:
+            raise ArmBusy("First supervised run: confirm the shown stage and target (stage, confirm, x_mm, y_mm)")
+        if a.speed_mm_s is not None and not 0 < a.speed_mm_s <= st.first_run_speed:
+            raise ArmBusy(f"Speed {a.speed_mm_s} mm/s refused: the first-run cap is {st.first_run_speed} mm/s")
+        with st.safety_lock:
+            ap = pm.get("approach")
+            if not ap or ap["stage"] not in (0, 1, 2) or not ap["confirm"] or not hmac.compare_digest(a.confirm, ap["confirm"]):
+                raise ArmBusy(f"No valid stage-{a.stage} confirmation: use the one shown for the current stage")
+            ap["confirm"] = None                    # single use, even if a check below refuses
+            if a.stage != ap["stage"]:
+                raise ArmBusy(f"This confirmation is for stage {ap['stage']}, not stage {a.stage}: find again")
+            if [round(a.x_mm, 1), round(a.y_mm, 1)] != ap["target_mm"]:
+                raise ArmBusy("This confirmation belongs to a different target: find again")
+            if ap["seq"] != st.stop_sequence or time.time() - ap["issued"] > CONFIRM_TTL_S:
+                raise ArmBusy("Stale confirmation (STOP, or older than 60 s): find again")
+        x, y, z = ap["to_mm"]
+        box = st.arm.limits.check(x, y, z)
+        if box:
+            raise ArmBusy("Outside the safety box: " + box)
+        if a.stage == 2 and not st.at_hover(ap):    # descend only straight down from this target's hover point
+            raise ArmBusy("The arm is not at this target's hover point: stage 2 refused")
+        if a.stage == 1 and ap.get("q_level") and not st.at_joints(ap["q_level"]):
+            raise ArmBusy("The arm is not at the levelled pose from stage 0: stage 1 refused")
+        speed = a.speed_mm_s or st.first_run_speed
+        # the picture (and so the target) is only valid at the survey pose: the first stage must start there
+        first = a.stage == 0 or (a.stage == 1 and not ap.get("q_level"))
+        st.start_arm(st.run_approach, pm, ap, speed, job="approach", pixels=first, ticket=pm["_ticket"])
+        st.audit.event("arm_approach_confirmed", stage=a.stage, target_mm=[x, y, z], speed_mm_s=speed)
+        return {"ok": True, "stage": a.stage, "target_mm": [x, y, z], "speed_mm_s": speed, "warning": COLLISION_WARNING}
+
+    @app.post("/api/arm/measured_error")
+    def api_measured_error(error_mm: float = Form(...)):
+        """First supervised run: the ruler error after stage 2. Above TROVA_ARM_MISS_MM it is an arm_missed failure."""
+        pm = st.pending_move or {}
+        with st.safety_lock:
+            ap = pm.get("approach")
+            if not ap or ap["stage"] != "measure":
+                raise HTTPException(400, "Nothing to measure: finish stage 2 first")
+            if not 0 <= error_mm < 1000:
+                raise HTTPException(400, "error_mm must be between 0 and 1000")
+            pm["approach"] = None                   # one measurement per approach
+        target = [*ap["target_mm"], ap["z_mm"]]
+        missed = error_mm > st.miss_mm
+        st.audit.event("arm_accuracy", target_mm=target, tcp_mm=ap.get("tcp_mm"), offset_mm=ap.get("offset_mm"),
+                       measured_error_mm=error_mm, threshold_mm=st.miss_mm, missed=missed, find=pm.get("event_id"))
+        if missed:
+            fail_log.record(st.cases_dir / "failures.jsonl", pm, "arm_missed", SLOW_S,
+                            {"error_mm": error_mm, "target_mm": target, "tcp_mm": ap.get("tcp_mm")})
+        return {"error_mm": error_mm, "missed": missed, "threshold_mm": st.miss_mm}
 
     @app.get("/api/voice/config")
     def api_voice_config(confirm: bool = True):
@@ -2293,6 +3300,58 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     preflight.register(app, st)      # feature 9: GET /api/preflight
     history.register(app, st, STATIC)   # feature 13: /history, /api/history(.csv), /api/history/verify
 
+    # ------------------------------------------------------------------ voice table scan with the V2 camera model
+    @app.get("/api/table_scan")
+    def api_table_scan():
+        return st.table_public()
+
+    @app.post("/api/table_scan/plan")
+    def api_table_scan_plan():
+        """The scan path from the current joints, with its checks. Never moves the arm."""
+        try:
+            plan, _cal, meta, cfg, physical = st.table_plan()
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e)) from None
+        try:
+            st.table_motion_check()
+            executable, reason = not plan["problems"], None if not plan["problems"] else "; ".join(plan["problems"])
+        except ArmBusy as e:
+            executable, reason = False, str(e)
+        return {"plan": st._table_plan_public(plan), "v2": meta, "settings": vars(cfg), "physical_pose": physical,
+                "executable": executable, "reason": reason, "moved": False}
+
+    @app.post("/api/table_scan/start")
+    def api_table_scan_start(r: TableStartReq | None = None):
+        """Rise to TROVA_TABLE_SCAN_Z_MM, tilt down, turn J1 view by view, photograph, then Grok + V2 map every object.
+        move=false: label the current view only. Poll GET /api/table_scan."""
+        try:
+            return st.table_start(move=True if r is None else r.move)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.post("/api/table_scan/find")
+    def api_table_scan_find(r: TableFindReq):
+        try:
+            return st.table_find(r.text.strip())
+        except GrokError as e:
+            return fail(e, "table_find")
+
+    @app.post("/api/table_scan/choose")
+    def api_table_scan_choose(r: TableChooseReq):
+        return st.table_choose(r.object_id, r.answer)
+
+    @app.post("/api/table_scan/approach")
+    def api_table_scan_approach(r: TableApproachReq | None = None):
+        """Plan 'camera above the chosen object'; returns a proposal to confirm. Never moves the arm."""
+        try:
+            return st.table_propose(None if r is None else r.object_id)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.post("/api/table_scan/confirm")
+    def api_table_scan_confirm(r: TableConfirmReq):
+        return st.table_confirm(r.proposal_id)
+
     # ------------------------------------------------------------------ feature 14: look around the room
     @app.post("/api/room/find")
     def api_room_find(text: str = Form(...)):
@@ -2308,7 +3367,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             arm.backend.joints()
         except NotImplementedError as e:
             return fail(e, "room")
-        if not st.start_arm(st.run_room, text.strip(), job="room"):
+        if not st.start_arm(st.run_room, text.strip(), job="room", pixels=False):
             raise HTTPException(409, "STOP was pressed")
         st.audit.event("room_find", request=text.strip())
         return {"started": True, "views": len(room_mod.pan_settings()["angles"])}
@@ -2356,9 +3415,14 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     @app.post("/api/watch/ack")
     def api_watch_ack(who: str = Form("")):
         a = st.watch.ack(who.strip())
+        motion_blocked = None
         if a and a.get("pointed") and not isinstance(st.arm, SimArm):
-            st.start_arm(st.arm.home, job="home")      # the arm pointed at the problem: park it again
-        return {"acknowledged": a["id"] if a else None, "watch": st.watch.as_dict()}
+            try:
+                st.start_arm(st.arm.home, job="home", pixels=False, ticket=st.watch.motion_ticket_for(a),
+                             guard=st.watch.motion_guard_for(a))
+            except ArmBusy as e:
+                motion_blocked = str(e)
+        return {"acknowledged": a["id"] if a else None, "watch": st.watch.as_dict(), "motion_blocked": motion_blocked}
 
     # ------------------------------------------------------------------ demo helpers
     @app.post("/api/demo/tamper")
@@ -2819,7 +3883,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         st.task_cancel.set()
         st.pending_motion = None
         st.task_resume = None
-        if st.arm_job == "approach" and st.arm_thread and st.arm_thread.is_alive():
+        if st.arm_job == "vision_approach" and st.arm_thread and st.arm_thread.is_alive():
             st.stop_arm()
         _refused("Task cancelled. Previous motion confirmations are invalid.", "annulla")
         st.audit.event("vision_task", status="cancel_requested")
@@ -3010,7 +4074,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     @app.post("/api/scan/finish")
     def api_scan_finish():
-        if st.arm_job == 'approach' and st.arm_thread and st.arm_thread.is_alive():
+        if st.arm_job == 'vision_approach' and st.arm_thread and st.arm_thread.is_alive():
             raise HTTPException(409, 'Wait for the approach to finish or cancel it before finishing the scan')
         try:
             done = st.scans.finish()

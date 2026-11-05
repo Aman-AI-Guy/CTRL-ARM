@@ -50,14 +50,15 @@ def record(path: Path, last_find: dict, cause: str, slow_s: float, extra: dict |
              "owner": OWNER.get(cause, "team"), "fix": FIX.get(cause, ""), "status": last_find["result"]["status"],
              "label": last_find["result"].get("label"), "total_s": last_find.get("total_s"),
              "frame": last_find.get("frame"), **(extra or {})}
-    with Path(path).open("a") as f:
+    with Path(path).open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return entry
 
 
 def summary(path: Path) -> dict:
     p = Path(path)
-    rows = [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+    from .audit import read_text_lines
+    rows = [json.loads(line) for line in read_text_lines(p) if line.strip()] if p.exists() else []
     counts = Counter(c for r in rows for c in r["causes"])
     return {"total": len(rows),
             "by_cause": [{"cause": c, "count": n, "owner": OWNER.get(c, "team"), "fix": FIX.get(c, ""),

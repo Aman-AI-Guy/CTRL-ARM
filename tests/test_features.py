@@ -157,6 +157,8 @@ def test_stop_during_tour_pause_and_during_a_find(tmp_path, monkeypatch):
     c.post("/api/arm/stop")
     st.arm_thread.join(timeout=3)
     assert st.tour["status"] == "stopped" and st.tour["index"] == 0
+    reset = {"operator": "Ana", "area_clear": True, "controller_ready": True}
+    assert c.post("/api/arm/reset", json={**reset, "stop_nonce": c.get("/api/state").json()["stop_nonce"]}).status_code == 200
 
     unique = _unique_color(c)
     slow = lambda prompt, images, ctx: (time.sleep(0.8), finder._mock_select(prompt, images, ctx))[1]  # noqa: E731
@@ -171,8 +173,11 @@ def test_stop_during_tour_pause_and_during_a_find(tmp_path, monkeypatch):
     finally:
         register_mock("trova_select", finder._mock_select)
     assert out["result"]["status"] == "found" and not out["moved"] and "STOP" in out["arm_blocked"]
-    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()   # a new request moves again
-    assert r["moved"]
+    r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
+    assert not r["moved"] and "STOP" in r["arm_blocked"]  # new commands cannot reset STOP
+    assert c.post("/api/arm/reset", json={**reset, "stop_nonce": c.get("/api/state").json()["stop_nonce"]}).status_code == 200
+    assert c.post("/api/find", data={"text": f"the {unique} one"}).json()["moved"]
+    st.arm_thread.join(timeout=3)
 
 
 def test_one_motion_at_a_time_and_interrupted_lift(tmp_path, monkeypatch):
@@ -195,7 +200,12 @@ def test_one_motion_at_a_time_and_interrupted_lift(tmp_path, monkeypatch):
     r = c.post("/api/find", data={"text": f"the {unique} one"}).json()
     assert not r["moved"] and "interrupted" in r["arm_blocked"]
     st.arm.speed = 5000
-    c.post("/api/arm/home")                              # the operator's explicit way out
+    assert c.post("/api/arm/home").status_code == 409    # home never clears STOP or the lift interlock
+    reset = {"operator": "Ana", "area_clear": True, "controller_ready": True}
+    assert c.post("/api/arm/recover_lift", json={**reset, "stop_nonce": c.get("/api/state").json()["stop_nonce"], "fork_freed": True,
+                                               "note": "Staff freed the fork by hand"}).status_code == 200
+    assert c.post("/api/arm/reset", json={**reset, "stop_nonce": c.get("/api/state").json()["stop_nonce"]}).status_code == 200
+    c.post("/api/arm/home")
     assert not st.lift_interrupted and c.post("/api/find", data={"text": f"the {unique} one"}).json()["moved"]
     first = st.arm_thread
     c.post("/api/arm/point", json={"x_mm": 100, "y_mm": 100})
@@ -938,3 +948,37 @@ def test_state_stays_json_after_a_room_scan(tmp_path, monkeypatch):
     assert s.status_code == 200 and s.json()["at_survey"] is False
     pre = {i["name"]: i for i in c.get("/api/preflight").json()["items"]}
     assert pre["Home pose"]["status"] == "ok" and "joints" in pre["Home pose"]["detail"]
+
+
+def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
+    """The arm's Pi camera streams MJPEG over Wi-Fi: it must use the newest-frame reader with the 2 s stale check."""
+    import numpy as np
+
+    import trova.camera as cam_mod
+    alive = [True]
+
+    class FakeStream:
+        def __init__(self, src):
+            self.src = src
+
+        def isOpened(self):
+            return True
+
+        def set(self, *a):
+            return True
+
+        def read(self):
+            return (True, np.zeros((1232, 1640, 3), np.uint8)) if alive[0] else (False, None)
+
+        def release(self):
+            pass
+    monkeypatch.setattr(cam_mod.cv2, "VideoCapture", FakeStream)
+    src = cam_mod.open_source("http://trova-cam.local:8080/stream.mjpg")
+    try:
+        assert isinstance(src, cam_mod.WebcamSource) and src.read().shape == (1232, 1640, 3)
+        alive[0] = False                                     # Wi-Fi drops: no new frames
+        src._ts -= cam_mod.STALE_S + 1
+        with pytest.raises(RuntimeError, match="no new frame"):
+            src.read()
+    finally:
+        src.close()

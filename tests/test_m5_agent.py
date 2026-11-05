@@ -55,7 +55,9 @@ def orbit_scene(tmp_path,monkeypatch):
         def is_moving(self):return False
         def stop(self):pass
     backend=SimulatedJoints()
-    st.arm=CartesianArm(backend,z_hover_mm=300,home_mm=None,limits=context.gateway.limits,speed_mm_s=20)
+    # Central motion authorization (start_arm -> arm_blocked) requires a home pose: the recorded survey joints.
+    st.arm=CartesianArm(backend,z_hover_mm=300,home_mm=None,limits=context.gateway.limits,speed_mm_s=20,
+                        home_joints=list(original['q0']))
     st.arm.gateway.camera=context.gateway.camera
     # The retained replay doesn't use a fixed-orientation sphere; configure a fixture prerequisite.
     from trova.motion import CameraBody

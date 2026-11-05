@@ -22,6 +22,18 @@ import cv2
 import numpy as np
 
 
+def read_text_lines(path: Path) -> list[str]:
+    """Lines of a UTF-8 log. Lines written by older Windows builds (platform default cp1252) are decoded as such, so
+    the same text comes back and the hash chain, which hashes the text, still verifies."""
+    out = []
+    for raw in Path(path).read_bytes().splitlines():
+        try:
+            out.append(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            out.append(raw.decode("cp1252", errors="replace"))
+    return out
+
+
 class AuditLog:
     def __init__(self, data_dir: Path):
         self.dir = Path(data_dir) / "runs"
@@ -31,7 +43,7 @@ class AuditLog:
         self._lock = threading.Lock()
         self._last_hash = ""
         if self.file.exists():
-            for line in self.file.read_text().splitlines()[-300:]:
+            for line in read_text_lines(self.file)[-300:]:
                 try:
                     e = json.loads(line)
                 except json.JSONDecodeError:
@@ -54,7 +66,7 @@ class AuditLog:
             canonical = self._canonical(e)
             e = json.loads(canonical)                 # exactly what is stored (tuples -> lists, numbers -> JSON)
             e["hash"] = self._chain(self._last_hash, canonical)
-            with self.file.open("a") as f:
+            with self.file.open("a", encoding="utf-8") as f:   # never the platform default (cp1252 on Windows)
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
             self._last_hash = e["hash"]
             self._recent.append(e)
@@ -64,7 +76,7 @@ class AuditLog:
         if not self.file.exists():
             return []
         out = []
-        for line in self.file.read_text().splitlines():
+        for line in read_text_lines(self.file):
             try:
                 out.append(json.loads(line))
             except json.JSONDecodeError:
@@ -74,7 +86,7 @@ class AuditLog:
     def verify(self) -> dict:
         """Recompute the hash chain. Events written before the chain existed (no hash) are counted, not checked."""
         prev, n, hashed = "", 0, 0
-        for i, line in enumerate(self.file.read_text().splitlines() if self.file.exists() else []):
+        for i, line in enumerate(read_text_lines(self.file) if self.file.exists() else []):
             n += 1
             try:
                 e = json.loads(line)

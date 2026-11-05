@@ -17,7 +17,8 @@ STOP_WORDS = ["stop", "halt", "fermo", "ferma", "fermati", "basta", "alt"]
 
 KEYTERMS = ["Trova", "stop", "fermo", "basta", "blister", "forbici", "penna", "pennarello", "tazza", "nastro",
             "graffettatrice", "chiavetta USB", "scissors", "marker", "stapler", "mug", "tape", "line clearance",
-            "riferimento", "reference", "cosa è cambiato", "what changed"]
+            "riferimento", "reference", "cosa è cambiato", "what changed", "scansiona il tavolo", "bicchiere",
+            "lattina", "camera sopra", "procedi"]
 
 
 def instructions(confirm_moves: bool, dog: bool) -> str:
@@ -57,6 +58,25 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
 - For "scansionalo" or "scan it", call run_vision_task; the backend chooses a useful reachable view and requires a new proposal confirmation. For "ricostruisci" or "reconstruct it", the same tool starts a separate local reconstruction job. If COLMAP or suitable images are missing, report the actual failure. Never claim a mesh before a job reports reconstructed true, or texture before textured_mesh true. If the operator says "l'ho capovolto" or "I flipped it", pass those words to run_vision_task: old localization is invalidated and selection is required again. Cross-orientation registration and complete surface coverage are not implemented.
 - scan_requests: after a reconstruction, or when the operator asks "cosa devo fare?", "what do you need from me?". Read the first pending request's instruction as written, then wait. When the operator says they did it ("fatto", "done"), call scan_request_done with its request_id and status done, then say the returned spoken_message; if they cannot, use status skipped. If complete is true, say nothing more is needed from them, but never say the mesh is closed or complete: surface coverage is not measured.
 - {dog_line}
+
+# Table scan (camera on the arm, V2 calibration)
+- scan_table: "scansiona il tavolo", "guarda il tavolo", "look around the table", "what's on the whole table?". The arm
+  rises to 60 cm, tilts the camera down at the table and turns to photograph it; every object is named and placed.
+  It takes a minute or two: say once that you are scanning, then wait for the result and read its spoken_message.
+  If it returns refused or error, say the reason. move is false only if they ask to label the current view without moving.
+- find_on_table: after a scan, any request to find one object ("trova la tazza rossa", "dov'è il bicchiere?",
+  "trovami le pinze", "indicami le pinze", "mettiti sopra le pinze"). Pass their words. If status is "clarify", read
+  the question exactly (it lists the numbers and where each one is), then pass their answer to choose_table_object;
+  they can also tap the object in the interface. When it (or choose_table_object) returns a proposal_id with
+  approach "awaiting_confirmation", the move over the object at the same height is already planned: read
+  spoken_message (it ends with "Confermi?") and on their yes call confirm_camera_move with that proposal_id directly.
+  If approach is "moving", the operator enabled automatic moves: say it is moving.
+- choose_table_object: the operator picks one candidate ("il numero 3", "quello a sinistra del robot").
+  Pass object_id when they say a number, otherwise pass their words as answer.
+- move_camera_above: "porta la camera sopra", "vai sopra", "move the camera above it". It only plans and returns a
+  proposal; read its spoken_message, which asks for confirmation. Never say you are moving yet.
+- confirm_camera_move: only after an explicit yes ("sì", "procedi", "yes") to that proposal, with its proposal_id.
+  A refused confirmation is not retried. If they say no, do nothing.
 
 # Safety
 The arm only observes and points; it never grabs. describe_table and select_object never move it. point_at_found also routes to the task planner; it cannot bypass proposal confirmation. jog_relative and run_vision_task are checked by the motion gateway and may be refused. You cannot turn on hardware or change a safety limit. stop_arm holds position in software; it is not the physical emergency stop. If a tool returns an error, "rejected", "held", or "blocked", say the reason and do not retry by yourself. Never infer success from ok alone; read workflow_state, hardware_moved, simulation_moved, goal_achieved and spoken_message."""
@@ -130,6 +150,25 @@ def tools(dog: bool) -> list[dict]:
          "parameters": {"type": "object", "properties": {}}},
         {"type": "function", "name": "arm_home", "description": "Park the arm out of the camera's view.",
          "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "scan_table",
+         "description": "Rise to 60 cm, tilt the arm camera down at the table, turn and photograph it, then name and "
+                        "place every object (V2 calibration). Waits until the map is ready. move=false labels the "
+                        "current view without moving.",
+         "parameters": {"type": "object", "properties": {"move": {"type": "boolean"}}}},
+        {"type": "function", "name": "find_on_table",
+         "description": "Find one object in the last table scan from the person's words. If several match, status is "
+                        "clarify and question lists them by number and position.",
+         "parameters": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]}},
+        {"type": "function", "name": "choose_table_object",
+         "description": "The operator's choice after a clarify question: object_id if they said a number, else answer.",
+         "parameters": {"type": "object", "properties": {"object_id": {"type": "integer"}, "answer": {"type": "string"}}}},
+        {"type": "function", "name": "move_camera_above",
+         "description": "Plan placing the arm camera above the chosen table-scan object. Returns a proposal that needs "
+                        "an explicit yes; it does not move the arm.",
+         "parameters": {"type": "object", "properties": {"object_id": {"type": "integer"}}}},
+        {"type": "function", "name": "confirm_camera_move",
+         "description": "Execute the camera-above proposal, only after the operator explicitly said yes to it.",
+         "parameters": {"type": "object", "properties": {"proposal_id": {"type": "string"}}, "required": ["proposal_id"]}},
     ]
     if dog:
         t.append({"type": "function", "name": "search_other_rooms",

@@ -20,7 +20,7 @@ GROUPS = {
     "clearance": {"reference", "change_check", "signoff", "record_pdf", "judge_check", "labels", "batch", "zone"},
     "alarms": {"watch", "watch_alert", "watch_ack", "watch_false_alarm"},
     "arm": {"arm_stop", "arm_home", "arm_point", "arm_jog", "arm_tour", "arm_lift_tray", "arm_freedrive",
-            "arm_compliant", "arm_approach"},
+            "arm_compliant", "arm_approach", "arm_approach_confirmed", "arm_accuracy"},
     "setup": {"background", "source", "upload_scene", "calibration", "marker_from_arm", "preflight", "metrics_reset"},
     "vision": {"vision_task", "vision_capture", "scan"},
     "voice": {"voice"},
@@ -86,6 +86,9 @@ def summarize(e: dict) -> dict:
             result = f"{len(e['targets'])} targets"
         elif "on" in e:
             result = "on" if e["on"] else "off"
+        elif "target_mm" in e:      # first supervised run
+            result = f"stage {e.get('stage', '-')}: target {e['target_mm']} mm, controller {e.get('tcp_mm')}" + (
+                f", ruler error {e['measured_error_mm']} mm" if "measured_error_mm" in e else "")
         result += f" ({e['after']})" if e.get("after") else ""
     elif k == "calibration":
         what, result = "calibration", f"{e.get('source')}, error {e.get('error_mm')} mm"

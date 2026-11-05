@@ -2,8 +2,9 @@
 
 No pendant: release the e-stop, power the box, put the Mac on its subnet (often 192.168.1.x).
 xArm5 is 5-axis: Cartesian moves need roll=180, pitch=0; we keep the yaw we read at connect.
-Units: mm and degrees. set_position is non-blocking with wait=False and QUEUES commands, so we stop the
-queue before every new target. Stop = set_state(4) then re-enable (holds position, not a power cut).
+Units: mm and degrees. set_position is non-blocking with wait=False and QUEUES commands; a still-moving
+controller is refused. STOP requests SDK stop state 4, checks its result and NEVER enables/restarts motion.
+This does not command torque off. Controller recovery/enabling is a separate explicit staff operation.
 Set the tool tip with set_tcp_offset (or in UFACTORY Studio) before calibrating: TROVA_ARM_TCP_MM=0,0,<length>
 applies it at connect (not saved on the controller). First connection: python -m trova.arm.bringup <ip>.
 """
@@ -29,14 +30,23 @@ class XArmBackend(CartesianBackend):
         self.lock = threading.Lock()
         self.accel = accel_mm_s2
         self.arm = XArmAPI(ip, is_radian=False)
-        # Read-only connect: do not clear errors, enable the motors, or set the state.
-        # The operator does that from "Clear arm errors", or the voice CLI does it only after MOVE.
+        # Read-only connect: do not clear errors, enable the motors, or set the state. Connection is not operator
+        # authorization to recover faults or enable the controller. The operator does that from "Clear arm errors",
+        # or the voice CLI does it only after MOVE.
         tcp = os.getenv("TROVA_ARM_TCP_MM", "").strip()
         if tcp:      # the pointer / printed tool: positions then refer to its tip, not the flange
             x, y, z = (float(v) for v in tcp.split(","))
-            self.arm.set_tcp_offset([x, y, z, 0, 0, 0], wait=True)
+            self._check(self.arm.set_tcp_offset([x, y, z, 0, 0, 0], wait=True), "set_tcp_offset")
         code, pose = self.arm.get_position()
-        self.yaw = pose[5] if code == 0 and pose else 0.0
+        self._check(code, "get_position")
+        if not pose or len(pose) < 6:
+            raise RuntimeError("xArm get_position returned no complete pose")
+        self.yaw = pose[5]
+
+    @staticmethod
+    def _check(code, operation):
+        if type(code) is not int or code != 0:
+            raise RuntimeError(f"xArm {operation} returned code {code}")
 
     def move_linear(self, x, y, z, speed_mm_s):
         from ..motion import require_ticket
@@ -44,25 +54,46 @@ class XArmBackend(CartesianBackend):
         speed_mm_s = min(float(speed_mm_s), ticket.max_speed_mm_s)
         accel = min(self.accel, ticket.max_accel_mm_s2)
         with self.lock:
-            if self.arm.get_is_moving():          # the SDK queues moves: flush before retargeting
-                self._halt()
+            if self._moving():                  # never recover/re-enable a moving controller implicitly
+                raise RuntimeError("xArm controller is still moving: STOP and explicit staff recovery required")
             # xArm 5 moves in straight lines only with the flange parallel to the base (roll +-180, pitch 0). Coming
             # from a taught pose that is not (e.g. a camera survey pose), plan this one move in joint space via IK.
             code, pose = self.arm.get_position()
-            flat = code == 0 and pose and abs(abs(pose[3]) - 180) < 3 and abs(pose[4]) < 3
-            extra = {} if flat else {"motion_type": 2}
+            self._check(code, "get_position")
+            extra = {} if self._flat(pose) else {"motion_type": 2}
             code = self.arm.set_position(x=x, y=y, z=z, roll=180, pitch=0, yaw=self.yaw, speed=speed_mm_s,
                                          mvacc=accel, wait=False, **extra)
         if code != 0:
             raise RuntimeError(f"xArm set_position returned code {code} (error {self.arm.error_code})")
+
+    @staticmethod
+    def _flat(pose) -> bool:
+        return bool(pose) and len(pose) >= 5 and abs(abs(pose[3]) - 180) < 3 and abs(pose[4]) < 3
+
+    def is_level(self) -> bool:
+        with self.lock:
+            code, pose = self.arm.get_position()
+        self._check(code, "get_position")
+        return self._flat(pose)
+
+    def level_joints(self, q):
+        """Manual p. 156: the flange is parallel to the base when J4 = -(J2 + J3). The controller's own forward
+        kinematics must confirm it, otherwise this arm's joint convention differs and stage 0 is refused."""
+        ql = [float(v) for v in q]
+        ql[3] = -(ql[1] + ql[2])
+        with self.lock:
+            code, pose = self.arm.get_forward_kinematics(ql)
+        if code != 0 or not self._flat(pose):
+            raise RuntimeError(f"J4 = -(J2+J3) does not level the flange here (FK code {code}, pose {pose})")
+        return ql
 
     def move_joints(self, q, speed_deg_s):
         from ..motion import require_ticket
         ticket = require_ticket()
         speed_deg_s = min(float(speed_deg_s), ticket.max_joint_speed_deg_s)
         with self.lock:
-            if self.arm.get_is_moving():
-                self._halt()
+            if self._moving():                  # never recover/re-enable a moving controller implicitly
+                raise RuntimeError("xArm controller is still moving: STOP and explicit staff recovery required")
             code = self.arm.set_servo_angle(angle=list(q), speed=speed_deg_s,
                                             mvacc=min(speed_deg_s * 5, ticket.max_joint_accel_deg_s2), wait=False)
         if code != 0:
@@ -94,12 +125,19 @@ class XArmBackend(CartesianBackend):
 
     def is_moving(self) -> bool:
         with self.lock:
-            return bool(self.arm.get_is_moving())
+            return self._moving()
+
+    def _moving(self) -> bool:
+        # SDK get_is_moving() discards get_state()'s error code and may return cached state.
+        code, state = self.arm.get_state()
+        self._check(code, "get_state")
+        if state not in (0, 1, 2, 3, 4, 5, 6):
+            raise RuntimeError(f"xArm unknown controller state {state}")
+        return state == 1
 
     def _halt(self):
-        self.arm.set_state(4)
-        self.arm.motion_enable(True)
-        self.arm.set_state(0)
+        # SDK documents 4 as stop state, 0 as motion state. No motion_enable(False)/torque-off command.
+        self._check(self.arm.set_state(4), "set_state(STOP)")
 
     def stop(self):
         with self.lock:
@@ -122,16 +160,16 @@ class XArmBackend(CartesianBackend):
         from ..motion import require_ticket
         require_ticket()
         with self.lock:
-            self.arm.set_mode(2 if on else 0)
-            self.arm.set_state(0)
+            self._check(self.arm.set_mode(2 if on else 0), "set_mode")
+            self._check(self.arm.set_state(0), "set_state")
 
     def clear_errors(self):
         with self.lock:
-            self.arm.clean_error()
-            self.arm.clean_warn()
-            self.arm.motion_enable(True)
-            self.arm.set_mode(0)
-            self.arm.set_state(0)
+            self._check(self.arm.clean_error(), "clean_error")
+            self._check(self.arm.clean_warn(), "clean_warn")
+            self._check(self.arm.motion_enable(True), "motion_enable")
+            self._check(self.arm.set_mode(0), "set_mode")
+            self._check(self.arm.set_state(0), "set_state")
 
     def close(self):
         try:

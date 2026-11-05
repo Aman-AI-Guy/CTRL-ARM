@@ -56,6 +56,14 @@ class CartesianBackend(ABC):
         """Where the tool would be at these joint angles: lets the safety box check joint moves too."""
         raise NotImplementedError
 
+    def is_level(self) -> bool:
+        """Can straight-line moves start from here? Only the 5-axis xArm needs a level flange (manual p. 156)."""
+        return True
+
+    def level_joints(self, q: list[float]) -> list[float]:
+        """The same pose with the flange levelled in place (first supervised run, stage 0)."""
+        raise NotImplementedError(f"{self.name}: no flange levelling")
+
     def clear_errors(self) -> None:
         pass
 
@@ -127,8 +135,9 @@ class CartesianArm(ArmDriver):
         """A STOP arrived: stop again (it may have raced a move still being sent, which would replace it)."""
         try:
             self.backend.stop()
-        except Exception:  # noqa: BLE001 - the stop already went out once from stop()
-            pass
+        except Exception as e:  # a raced move needs a successful resend; never hide its failure
+            self.state, self.last_error = "error", f"STOP resend failed: {e}"
+            return False
         self.state = "stopped"
         return False
 
@@ -208,6 +217,14 @@ class CartesianArm(ArmDriver):
     def point_at(self, x_mm: float, y_mm: float) -> bool:
         return self._go(x_mm, y_mm, self.z)
 
+    def approach(self, x_mm: float, y_mm: float, z_mm: float, speed_mm_s: float) -> bool:
+        """First supervised run: one straight move to (x, y, z) at most at speed_mm_s; same box, STOP and reached check."""
+        speed, self.speed = self.speed, min(self.speed, speed_mm_s)
+        try:
+            return self._go(x_mm, y_mm, z_mm)
+        finally:
+            self.speed = speed
+
     def run_waypoints(self, wps: list[tuple], speed_factor: float = 0.5) -> bool:
         """Feature 7: a fixed sequence of straight moves (label, x, y, z). Stops at the first refusal or stop.
         All waypoints are checked against the safety box BEFORE the first move."""
@@ -252,6 +269,19 @@ class CartesianArm(ArmDriver):
         decision = self.gateway.authorize_joints(q, self.joint_speed, source="joints")
         if self._hold_decision(decision):
             return False
+        if self.limits is None:
+            self.state, self.last_error = "refused", "No safety box: cannot validate the joint target"
+            return False
+        if self.limits:
+            try:
+                err = self.limits.check(*self.backend.fk_mm(q))
+            except NotImplementedError:
+                err = "forward kinematics unavailable: cannot validate the joint target against the safety box"
+            except Exception as e:  # noqa: BLE001
+                err = f"forward kinematics failed: {e}"
+            if err:
+                self.state, self.last_error = "refused", f"joint pose: {err}"
+                return False
         start_joints = self.gateway.current_joints()
         travel = max(abs(a-b) for a,b in zip(start_joints,q)) if start_joints is not None else 0.0
         deadline_s = self.timeout + travel / max(.1,self.joint_speed)
@@ -395,6 +425,13 @@ class FakeCartesian(CartesianBackend):
 
     def fk_mm(self, q):
         return tuple(self.fk(q))
+
+    def is_level(self):     # toy model: level when J4 = -(J2 + J3), as on the xArm 5
+        q = self.joints()
+        return abs(q[3] + q[1] + q[2]) < 0.5
+
+    def level_joints(self, q):
+        return [q[0], q[1], q[2], -(q[1] + q[2]), *q[4:]]
 
     def is_moving(self):
         with self._lock:

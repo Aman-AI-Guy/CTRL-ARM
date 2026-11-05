@@ -515,7 +515,8 @@ def skill_locate(host, task, argument: str) -> dict:
     snap = task.get("snapshot_pose") or {}
     if snap.get("moving") or robot.get("moving"):
         task["phase"] = "blocked"
-        task["motion_lock"] = "the picture and the pose are not from a stationary arm"
+        task["motion_lock"] = ("the picture and the pose are not from a stationary arm"
+                               + (f": {snap['capture_untrusted']}" if snap.get("capture_untrusted") else ""))
         return _result("locate_object", False, task["motion_lock"], task, rejection=task["motion_lock"])
     if pose_changed(snap.get("pose6"), robot.get("pose6")):
         task["phase"] = "blocked"

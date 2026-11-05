@@ -65,8 +65,42 @@ The default `TROVA_CAMERA=demo` is a synthetic table with a "tamper" button (add
 3. **What changed**: set the **Batch**, **Save reference** → someone changes the table → **Check now** → **Sign off** (approving a NOT clear line needs a reason) → **Open record** / **Download PDF**. **Watch the line** keeps checking on its own.
 4. **Jury mode**: after each find press ✓ or ✗ (on ✗, click the right object or "not on the table"). Every judged find is saved as an eval case in `data/cases/finds.jsonl`.
 5. **Voice**: on the laptop (http://localhost:8000, the browser needs it for the mic) press **Talk to Trova** and speak. With "ask before the arm moves" on, it confirms first.
-6. **STOP** (top right, Escape, the space bar, or saying "stop" / "fermo") halts the arm and holds position; it stays stopped until the next command. Staff e-stop stays primary.
+6. **STOP** (top right, Escape, the space bar, or saying "stop" / "fermo") halts the arm and holds position. Software STOP stays latched until an explicit operator reset; another command, Home, alarm acknowledgement or controller error clearance cannot reset it. Staff e-stop stays primary.
 7. **Optional dog**: `TROVA_DOG=sim`. When a find says "not on the table", **Send the dog** walks the route in `data/dog_route/` (photos named `01_Room 2 desk.jpg`, ...) and Grok checks each stop.
+
+Every physical robot session starts **disarmed**, including after a clean restart, a previous STOP or a crash.
+xArm connection never clears faults or enables the controller. Simulator exemptions
+require an explicit `sim`, `cartesian:fake` or `grid:fake` configuration and the matching built-in fake driver.
+
+Hardware recovery requires configured `TROVA_OPERATOR_NAME` and `TROVA_OPERATOR_TOKEN` (supply these through
+the deployment environment; never commit credentials). Send `x-trova-operator-token` on reset, lift recovery,
+controller error clearance and manual-mode requests. The existing venue token, if configured, is also required.
+The authenticated configured identity is logged; a submitted operator name cannot impersonate staff. Missing
+operator configuration returns 403; a missing/wrong operator credential returns 401. Explicit simulators retain
+offline operation without operator credentials.
+
+Staff must verify the area and separately complete any controller protective-stop / physical emergency-stop
+recovery. Read `/api/state.stop_nonce` immediately before each confirmation, then `POST /api/arm/reset` with JSON
+`{"operator":"Name","stop_nonce":"<current nonce>","area_clear":true,"controller_ready":true}`. Every boot,
+STOP, successful recovery and reset changes the nonce: queued, replayed or stale confirmations return 409.
+Reset refuses while a worker/driver stop is finishing, manual teaching mode is on, required Cartesian limits/home
+are missing, or controller idle cannot be verified. It performs no motion and no controller recovery. Failed driver
+STOP keeps the latch set and blocks reset until communication is restored and STOP succeeds on retry;
+`/api/state.stop_error` exposes the failure. Pending finds/clarifications/point confirmations and old watch motion
+stay cancelled after reset. Start a new find or watch run explicitly. Each watch worker retains its own generation,
+stop event, history, ticket and identity; an old callback cannot borrow a replacement alert's authority.
+
+`data/arm_safety.json` records lift state with fsync + atomic replacement BEFORE the first physical waypoint.
+Missing, corrupt, duplicate-key, unknown-version or incomplete records require staff-confirmed lift recovery;
+even a valid clear record never rearms a session. Storage failures prevent dispatch or retain the lift interlock.
+An interrupted tray lift remains blocked even after reset. With staff, free and secure the fork/load manually,
+leave manual teaching mode, and keep STOP latched (press STOP again if already reset). Confirm the recovery with
+`POST /api/arm/recover_lift` using the reset JSON with a fresh nonce plus `"fork_freed":true` and a written `"note"`. This only clears
+the lift interlock; it keeps STOP latched and never homes. Reset and any later Home are separate operator actions.
+
+`move=false` on Find / Find all never parks or repositions the arm. With a Cartesian arm it uses the current
+parked view, or returns HTTP 409 explaining that an explicit Home is needed. Homing and all camera preparation
+use the same motion authorization checks as pointing, including the required Cartesian safety box and home pose.
 
 ## Hardware hookup
 
@@ -113,6 +147,13 @@ AGENTS.md        shared state file: features, rules, API, changelog. Update it i
 
 ## Known limitations
 
+- Software STOP and its durable lift record are application safeguards, not safety-rated emergency stops or
+  controller protective stops. Every restart is disarmed, but persistence cannot stop a controller executing an
+  abandoned command after a hard crash: hardware watchdogs/controller-side safeguards are separately required.
+  Run one Trova process per robot with exclusive control of its data directory; do not run multiple server workers.
+  Reset relies on staff's physical checks and controller-ready confirmation. Driver/network stop latency and actual
+  SDK stop/hold behavior need independent review and staff-supervised hardware validation. Target safety boxes
+  do not validate the full swept volume of robot links/tool; joint motion refuses unavailable FK.
 - Pale objects on a pale table can be missed by the proposals; Grok's direct-box fallback covers some of them. Tune `TROVA_BLOB_THRESH`.
 - Objects stacked or touching can merge into one box.
 - Pointing accuracy depends on the taught poses; it is interpolation, not inverse kinematics.
