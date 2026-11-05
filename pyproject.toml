@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://aman-ai-guy.github.io/CTRL-ARM/"
+Homepage = "https://github.com/Aman-AI-Guy/CTRL-ARM"
 Repository = "https://github.com/Aman-AI-Guy/CTRL-ARM"
 Changelog = "https://github.com/Aman-AI-Guy/CTRL-ARM/releases"
 
