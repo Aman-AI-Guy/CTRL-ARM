@@ -992,15 +992,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if len(frames) == 3:
                     break
                 time.sleep(0.25)
-            if not frames:
-                return JSONResponse({"error": "Hand or arm in view: clear the table view and retry"}, 409)
+            blocked = not frames      # every frame had a large blob at the edge: a hand, the arm, or a leftover object
+            if blocked:
+                frames, per = [f], [b]
             try:
-                res = chg.check(st.grok if verify else None, st.reference["frame"], st.reference["boxes"],
+                res = chg.check(st.grok if verify and not blocked else None, st.reference["frame"], st.reference["boxes"],
                                 frames, per, occluded=occl and len(frames) < 3, lang=st.s.lang,
                                 ref_names=st.reference.get("names"))
             except GrokError as e:
                 return fail(e, "changes")
             result = res.as_dict()
+            if blocked:
+                result["line_clear"], result["occluded"] = False, True
+                result["summary"] = ("View blocked during the whole check: a hand, the arm or a large object at the edge "
+                                     "of the view. Clear the view and check again; an object left there is NOT clear. "
+                                     + result["summary"])
             offline = res.offline
             if st.zones:
                 names = {}

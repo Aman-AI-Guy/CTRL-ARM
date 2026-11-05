@@ -147,20 +147,30 @@ def diff_objects(ref_frame: np.ndarray, ref_boxes: list[Box], cur_frame: np.ndar
     return changes
 
 
+def _oversize(c: Change) -> bool:
+    return any(b is not None and b.extra.get("oversize") for b in (c.ref_box, c.cur_box))
+
+
 def _same(a: Change, b: Change) -> bool:
-    if a.kind != b.kind:
-        return False
-    ba, bb = (a.cur_box or a.ref_box), (b.cur_box or b.ref_box)
-    return ba is not None and bb is not None and ba.iou(bb) > 0.3
+    """Same place, whatever the kind: a 'moved' covers both its old and new place, so one frame's removed + added
+    and another frame's moved are the same change."""
+    return any(x.iou(y) > 0.3 for x in (a.ref_box, a.cur_box) if x is not None
+               for y in (b.ref_box, b.cur_box) if y is not None)
 
 
 def persistent_changes(per_frame: list[list[Change]], min_votes: int = 2) -> list[Change]:
-    """Keep changes seen in at least min_votes of the frames (taken from the last frame)."""
+    """Keep changes seen in at least min_votes of the frames, in any of them; each is reported once, from the newest
+    frame that has it."""
     if not per_frame:
         return []
     if len(per_frame) == 1:
         return per_frame[0]
-    kept = [c for c in per_frame[-1] if sum(any(_same(c, o) for o in f) for f in per_frame) >= min_votes]
+    kept: list[Change] = []
+    for f in reversed(per_frame):
+        newer = list(kept)                       # never dedupe against the same frame: a swap is removed + added
+        for c in f:
+            if sum(any(_same(c, o) for o in g) for g in per_frame) >= min_votes and not any(_same(c, k) for k in newer):
+                kept.append(c)
     for k, c in enumerate(kept, start=1):
         c.id = k
     return kept
@@ -274,6 +284,8 @@ def verify_changes(grok: GrokClient, ref_frame: np.ndarray, cur_frame: np.ndarra
         is_real = v.get("is_real") is not False or r.offline   # only Grok itself may call a false alarm
         c.verified = None if r.offline else is_real
         c.label, c.explanation = v.get("label") or c.label, v.get("explanation") or c.explanation
+        if _oversize(c) and not is_real:       # a large unknown region is never closed as a false alarm
+            is_real, c.explanation = True, f"Large unknown region (over a quarter of the view): check by hand. {c.explanation}"
         c.risk = v.get("risk") if v.get("risk") in ("low", "medium", "high") else c.risk
         (real if is_real else filtered).append(c)
     summary = (OFFLINE[lang] if r.offline else "") + r.data.get("summary", "")

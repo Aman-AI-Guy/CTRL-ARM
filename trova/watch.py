@@ -3,14 +3,17 @@
 added, removed or moved, or an object enters a "must be empty" zone. Optionally the arm points at the problem.
 
 - Persistence: a change must be in 2 of the last 3 clean frames (same rule as "Check now").
-- A hand or the arm in view pauses the watch (no alarm on people working).
+- A hand or the arm in view pauses the watch (no alarm on people working). If the view stays blocked longer than
+  TROVA_WATCH_BLOCKED_S (10 s), e.g. a carton pushed against the edge of the view, that is an alarm.
 - Each new alarm is explained by Grok in the background (what it is, why it matters); if Grok calls every
   candidate a false alarm, the alarm closes itself. The alarm appears before Grok answers.
-- An alarm stays until the operator acknowledges it; the same situation does not alarm again after that.
+- An alarm stays until the operator acknowledges it; the same situation does not alarm again after that
+  (compared with a pixel tolerance, so box jitter or renumbered objects are not a new situation).
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import deque
@@ -22,7 +25,7 @@ from .grok import GrokError
 from .marks import color_name, crop, draw_changes
 from .zones import draw_zones, evaluate as eval_zones
 
-GRID_PX = 40     # changes within this many pixels count as the same situation
+SAME_PX = 60     # the same kind of change within this many pixels is the same situation (box jitter is not new)
 
 
 @dataclass(frozen=True)
@@ -35,12 +38,20 @@ class WatchRun:
     history: deque
 
 
-def _signature(changes: list, zone_problems: list[str]) -> tuple:
-    def where(c):
-        b = c.cur_box or c.ref_box
-        cx, cy = b.center
-        return c.kind, round(cx / GRID_PX), round(cy / GRID_PX)
-    return tuple(sorted(where(c) for c in changes)) + tuple(sorted(zone_problems))
+def _signature(changes: list, zres: list[dict]) -> tuple:
+    """The situation as (what, x, y) atoms: something gone from a place, something new at a place, an object in a
+    zone (by zone name, never by reading-order number). A 'moved' is gone + new, like a removed + added pair."""
+    atoms = [("gone", *c.ref_box.center) for c in changes if c.ref_box is not None]
+    atoms += [("new", *c.cur_box.center) for c in changes if c.cur_box is not None]
+    atoms += [(f"zone:{z['name']}", (o["box"][0] + o["box"][2]) / 2, (o["box"][1] + o["box"][3]) / 2)
+              for z in zres if not z["ok"] for o in z["objects"]]
+    return tuple(sorted(atoms))
+
+
+def _same_situation(a: tuple | None, b: tuple | None) -> bool:
+    def covered(xs, ys):
+        return all(any(x[0] == y[0] and abs(x[1] - y[1]) <= SAME_PX and abs(x[2] - y[2]) <= SAME_PX for y in ys) for x in xs)
+    return a is not None and b is not None and covered(a, b) and covered(b, a)
 
 
 class Watch:
@@ -55,6 +66,8 @@ class Watch:
         self.checks = 0
         self._hist: deque = deque(maxlen=3)
         self._acked: tuple | None = None
+        self.blocked_s = float(os.getenv("TROVA_WATCH_BLOCKED_S", "10"))   # view blocked this long: alarm
+        self._blocked_since: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.motion_ticket = None
@@ -89,6 +102,7 @@ class Watch:
         with self._control:
             self.stop()                  # old run is permanently invalid before a replacement is published
             self.on, self.point, self.status = True, point, "starting"
+            self._blocked_since = None
             self.motion_ticket = self.st.motion_ticket()
             self._hist = deque(maxlen=3)  # a resumed old worker must not populate the new run's history
             self._stop = threading.Event()
@@ -168,8 +182,18 @@ class Watch:
             st.lock.release()
         self.checks += 1
         if occluded:
-            self._pause("paused: hand or arm in view", run)
+            now = time.time()
+            if self._blocked_since is None:
+                self._blocked_since = now
+            if now - self._blocked_since < self.blocked_s:
+                self._pause("paused: hand or arm in view", run)
+                return
+            run.history.clear()          # not a hand passing by: an object at the edge, or the view is blocked
+            problem = (f"view blocked for {now - self._blocked_since:.0f} s: a hand, the arm or a large object at the "
+                       "edge of the view")
+            self._alarm_unless_known(f, [], [problem], [], (("blocked", 0.0, 0.0),), run)
             return
+        self._blocked_since = None
         if not self.valid_run(run, threading.current_thread()):
             return
         run.history.append((f, boxes))
@@ -185,10 +209,12 @@ class Watch:
             self._acked = None
             self.status = "watching: line clear" + (" again (alarm waiting for acknowledgement)" if self.alert else "")
             return
-        sig = _signature(cands, problems)
-        if self.alert and self.alert["signature"] == sig:
+        self._alarm_unless_known(f, cands, problems, zres, _signature(cands, zres), run)
+
+    def _alarm_unless_known(self, f, cands: list, problems: list[str], zres: list, sig: tuple, run: WatchRun) -> None:
+        if self.alert and _same_situation(self.alert["signature"], sig):
             return
-        if sig == self._acked:
+        if _same_situation(sig, self._acked):
             self.status = "watching: acknowledged change still there"
             return
         self._raise(f, cands, problems, zres, sig, run=run)

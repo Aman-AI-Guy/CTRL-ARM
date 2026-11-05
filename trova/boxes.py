@@ -52,7 +52,7 @@ class Box:
         return Box(min(self.x0, other.x0), min(self.y0, other.y0),
                    max(self.x1, other.x1), max(self.y1, other.y1),
                    source=self.source, score=self.score + other.score,
-                   touches_border=self.touches_border or other.touches_border)
+                   touches_border=self.touches_border or other.touches_border, extra={**other.extra, **self.extra})
 
     def to_list(self) -> list[int]:
         return [int(round(v)) for v in (self.x0, self.y0, self.x1, self.y1)]

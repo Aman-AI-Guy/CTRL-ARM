@@ -180,3 +180,89 @@ def test_jury_and_history_pages_have_stop():                                   #
         html = (STATIC / page).read_text()
         assert 'id="stop"' in html and "/api/arm/stop" in html
         assert "keydown" in html and "Escape" in html and "Space" in html
+
+
+# ---------------------------------------------------------------- change detection (#8, #9, #29)
+def _ch(kind, ref=None, cur=None):
+    from trova.boxes import Box
+    from trova.changes import Change
+    return Change(0, kind, Box(*ref) if ref else None, Box(*cur) if cur else None)
+
+
+def test_persistence_counts_every_frame_and_ignores_the_kind():                # 8
+    from trova.changes import persistent_changes
+    add = lambda: _ch("added", cur=(100, 100, 160, 160))         # noqa: E731
+    assert [c.kind for c in persistent_changes([[add()], [add()], []])] == ["added"]
+    pair = lambda: [_ch("removed", ref=(300, 300, 360, 360)), _ch("added", cur=(500, 300, 560, 360))]   # noqa: E731
+    moved = _ch("moved", ref=(300, 300, 360, 360), cur=(500, 300, 560, 360))
+    assert [c.kind for c in persistent_changes([pair(), pair(), [moved]])] == ["moved"]
+
+
+def test_large_object_in_the_middle_is_not_dropped():                         # 9
+    import cv2
+
+    from trova import changes as chg
+    from trova.grok import GrokClient, register_mock
+    from trova.proposals import find_blobs
+    from trova.synthetic import SyntheticTable
+    t = SyntheticTable(seed=3, n_objects=0)
+    ref, empty = t.render(), t.empty()
+    cur = ref.copy()
+    cv2.rectangle(cur, (320, 184), (960, 616), (40, 30, 20), -1)    # a binder over 27% of the view
+    boxes = find_blobs(cur, empty)
+    assert any(b.extra.get("oversize") for b in boxes)
+    register_mock("trova_verify", lambda p, i, ctx: {"changes": [{"change_id": c.id, "is_real": False, "label": "light",
+                                                                  "explanation": "a light change", "risk": "low"}
+                                                                 for c in ctx["changes"]], "line_clear": True, "summary": ""})
+    try:
+        res = chg.check(GrokClient(mock=True), ref, find_blobs(ref, empty), [cur] * 3, [boxes] * 3)
+    finally:
+        register_mock("trova_verify", chg._mock_verify)
+    assert not res.line_clear and res.changes[0].kind == "added"   # Grok cannot close it as a false alarm
+
+
+def test_view_blocked_for_good_is_not_clear_and_alarms(tmp_path, monkeypatch):   # 29
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    c.post("/api/background", data={"mode": "capture"})
+    c.post("/api/reference", data={"describe": "false"})
+    st.source.hand = True                                        # stands for a carton pushed against the edge
+    r = c.post("/api/changes")
+    assert r.status_code == 200 and not r.json()["result"]["line_clear"] and "blocked" in r.json()["result"]["summary"]
+    w = st.watch
+    w.blocked_s = 0
+    w.step()
+    assert w.alert and "view blocked" in w.alert["summary"]
+    w.ack("Ana")
+    w.step()
+    assert w.alert is None and "acknowledged" in w.status
+
+
+# ---------------------------------------------------------------- zones and watch (#26, #27, #28)
+def test_allowed_zone_matches_whole_words_and_single_objects():               # 26
+    from trova.zones import _allowed
+    assert _allowed("blue blister pack", ["blister pack"]) and _allowed("blister packs", ["blister pack"])
+    assert not _allowed("leaflet and blister pack", ["blister pack"])
+    assert not _allowed("pen", ["pencil sharpener"]) and not _allowed("pencil sharpener", ["pen"])
+    assert not _allowed("cap", ["capsule blister"]) and not _allowed("", ["blister pack"])
+
+
+def test_empty_zone_flags_objects_partly_inside():                             # 27
+    from trova.boxes import Box
+    from trova.zones import Zone, evaluate
+    z = Zone(name="line", polygon=[[0, 0], [100, 0], [100, 100], [0, 100]], rule="empty")
+    assert not evaluate([z], [Box(55, 10, 155, 50, id=1)])[0]["ok"]
+    assert evaluate([z], [Box(103, 10, 200, 50, id=1)])[0]["ok"]
+
+
+def test_watch_situation_survives_jitter_and_renumbering():                    # 28
+    from trova.watch import _same_situation, _signature
+    a = _signature([_ch("added", cur=(589.6, 300, 649.6, 360))], [])
+    b = _signature([_ch("added", cur=(590.6, 300, 650.6, 360))], [])
+    assert _same_situation(a, b)                                 # 1 px across the old 40 px grid line
+    z1 = [{"name": "line", "ok": False, "objects": [{"id": 3, "name": "object 3", "box": [10, 10, 60, 60]}]}]
+    z2 = [{"name": "line", "ok": False, "objects": [{"id": 4, "name": "object 4", "box": [12, 10, 62, 60]}]}]
+    assert _same_situation(_signature([], z1), _signature([], z2))
+    gone = _signature([_ch("removed", ref=(589.6, 300, 649.6, 360))], [])
+    assert not _same_situation(gone, a)                          # something else at that place is new
