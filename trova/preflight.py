@@ -132,6 +132,11 @@ def _arm(st) -> list[dict]:
         out.append(_item("Room scan", "ok" if poses.get("look_joints") else "warn",
                          "look pose taught" if poses.get("look_joints") else "no look pose",
                          "" if poses.get("look_joints") else "Point the camera at the room by hand: Teach look pose here"))
+    if st.first_run:
+        problems = st.first_run_problems()
+        out += [_item("First run", "fail", p, "Fix this before the first supervised run") for p in problems] or [
+            _item("First run", "ok", f"ready: hover +{st.first_run_hover:.0f} mm, {st.first_run_speed:.0f} mm/s, "
+                  "calibrated at this survey pose")]
     if lift_allowed():
         out.append(_item("Tray lift", "warn", "enabled", "Only with measured TROVA_TRAY_* values, agreed with staff"))
     if not os.getenv("TROVA_TOKEN", "").strip() and st.s.host not in ("127.0.0.1", "localhost"):

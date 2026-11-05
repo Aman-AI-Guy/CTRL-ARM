@@ -2,6 +2,8 @@
 
   demo                 synthetic table (offline demo; supports "tamper")
   0, 1, 2 ...          webcam index. An iPhone via Continuity Camera shows up as one of these.
+  http://.../stream.mjpg  a network camera (the arm's Pi: http://trova-cam.local:8080/stream.mjpg), read like a
+                       webcam: newest frame only, refused when older than 2 s
                        Turn OFF Center Stage / Portrait / Studio Light (macOS Control Centre ->
                        Video Effects): they reframe the image and break calibration.
   path/to/video.mp4    a recording of the station, looped (work without the arm)
@@ -65,7 +67,7 @@ STALE_S = 2.0   # a webcam frame older than this is refused
 class WebcamSource(FrameSource):
     kind = "webcam"
 
-    def __init__(self, index: int, width: int = 1920, height: int = 1080):
+    def __init__(self, index: int | str, width: int = 1920, height: int = 1080):
         self.index = index
         self.cap = cv2.VideoCapture(index)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -322,6 +324,8 @@ def open_source(spec: str) -> FrameSource:
         return _open_pi(spec)
     if spec.isdigit():
         return WebcamSource(int(spec))
+    if "://" in spec:          # a live stream must never fall back to the video-file reader, which repeats old frames
+        return WebcamSource(spec)
     p = Path(spec)
     if p.is_dir() or p.suffix.lower() in (".jpg", ".jpeg", ".png"):
         return ImageSource(spec)

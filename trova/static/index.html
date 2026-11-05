@@ -602,7 +602,7 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
       <label class="check"><input type="checkbox" id="speak"> leggi le risposte</label><span class="muted wrap" id="pttinfo"></span></div>
     <label class="check"><input type="checkbox" id="confirm" checked> chiedi conferma prima che il braccio si muova</label>
     <div class="cmd"><input type="text" id="agentq" aria-label="Comando scritto" placeholder="Scrivi un comando a Grok" onkeydown="if(event.key==='Enter')runAgent()"><button onclick="runAgent()">Esegui</button></div>
-    <div id="results"><div id="agentres" class="result" aria-live="polite"></div><div id="findres" class="result" aria-live="polite"></div></div>
+    <div id="results"><div id="agentres" class="result" aria-live="polite"></div><div id="findres" class="result" aria-live="polite"></div><div id="approach" class="result" aria-live="polite"></div></div>
     <div id="vlog" aria-live="polite"></div>
   </section>
 
@@ -791,7 +791,7 @@ function showFind(d) {
   setNote('find', r.status === 'found' && r.box ? r.box.box : null, 'Trovato: ' + (r.label || ''), `confidenza ${r.confidence ?? '–'}`);
   let h = '';
   if (r.status === 'found') h = `<div class="big">Trovato: ${esc(r.label)}</div><div>${esc(r.reason)}</div>` +
-      (!d.moved && !d.arm_blocked && d.table_mm ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Indicalo con il braccio</button></div>` : '') +
+      (!d.moved && !d.arm_blocked && d.table_mm && !d.approach ? `<div class="row"><button class="primary" onclick="post('/api/arm/point_last')">Indicalo con il braccio</button></div>` : '') +
       (S && S.lift_allowed && d.table_mm ? `<div class="row"><button onclick="setClick('place')">Solleva il vassoio: clicca dove appoggiarlo</button></div>` : '');
   else if (r.status === 'clarify') {
     h = `<div class="big">${esc(r.clarifying_question)}</div><div class="row">` + r.candidate_ids.map(i => `<button onclick="answer('numero ${i}')">${i}</button>`).join('') +
@@ -802,6 +802,27 @@ function showFind(d) {
   h += `<div class="thumbs">${d.marked ? `<a href="/files/${d.marked}" target="_blank"><img src="/files/${d.marked}" alt="Immagine con i riquadri"></a>` : ''}${d.query ? `<a href="/files/${d.query}" target="_blank"><img src="/files/${d.query}" alt="Foto della richiesta"></a>` : ''}</div>`;
   el.innerHTML = h;
   if (speakOn()) TrovaSpeech.say(TrovaSpeech.phraseFind(d, TrovaSpeech.italian(d.request || '')), sayLang(d.request));
+}
+
+// first supervised run (TROVA_FIRST_RUN=1): show everything before each confirmation; one confirmation per stage
+function showApproach() {
+  const a = S.approach, el = $('approach'), key = a ? a.stage + (a.confirm || '') + (a.problems || []).join() : '';
+  if (key === showApproach.key && !(a && a.confirm)) return;          // keep a half-typed ruler error
+  showApproach.key = key;
+  if (!a) { el.className = 'result'; el.innerHTML = ''; return; }
+  const [x, y] = a.target_mm, warn = `<div class="big" style="color:var(--bad)">${esc(a.warning)}</div>`;
+  const img = a.marked ? `<div class="thumbs"><a href="/files/${a.marked}" target="_blank"><img src="/files/${a.marked}"></a></div>` : '';
+  let h = warn + img;
+  if (a.stage === 'measure') h += `<div>Arrived at ${x}, ${y} mm, height ${a.z_mm} mm (controller reports ${esc((a.tcp_mm || []).join(', '))}). Measure the tip-to-object error with a ruler:</div>` +
+    `<div class="row"><input type="number" id="errmm" min="0" step="0.5" style="max-width:90px"> mm <button onclick="sendForm('/api/arm/measured_error',{error_mm: $('errmm').value})">Record error</button></div>`;
+  else {
+    const p = a.problems || [], what = a.stage === 1 ? 'Stage 1: HOVER above' : 'Stage 2: DESCEND to pointing height at';
+    h += (a.stage === 0 ? `<div>Stage 0: LEVEL the flange in place (joint 4: ${a.q_from[3]}° → ${a.q_level[3].toFixed(1)}°, slow joint move). The tip moves to ${a.to_mm.join(', ')} mm · ${a.distance_mm ?? '?'} mm from the current pose. Then stage 1 hovers above x ${x}, y ${y} in a straight line.</div>`
+      : `<div>${what} x ${x}, y ${y} mm · height ${a.z_mm} mm · ${a.distance_mm ?? '?'} mm from the current pose · ${a.speed_mm_s} mm/s</div>`) +
+      (p.length ? `<div style="color:var(--warn)">Refused: ${esc(p.join('; '))}</div>` : '') +
+      (a.confirm ? `<div class="row"><button class="primary" ${p.length ? 'disabled' : ''} onclick='json("/api/arm/point_last", ${JSON.stringify({stage: a.stage, confirm: a.confirm, x_mm: x, y_mm: y})})'>Confirm stage ${a.stage}</button></div>` : '<div class="muted">moving…</div>');
+  }
+  el.className = 'result show'; el.innerHTML = h;
 }
 
 async function armMissed() { try { await json('/api/judge', {kind: 'find', correct: false, cause: 'arm_missed'}); } catch (e) {} }
@@ -1630,7 +1651,7 @@ async function refresh() {
   $('m-more').textContent = `controlli giusti ${M.check_ok}/${M.checks} · mancati ${M.missed} · chiamate Grok ${S.grok.calls}, media ${S.grok.avg_latency_s ?? '–'} s` + (S.grok.dropped_fields.length ? ' · campi rifiutati dalla API: ' + S.grok.dropped_fields.join(', ') : '');
   $('absentbtn').style.display = S.label_wait ? 'inline-flex' : 'none';
   $('labelwait').className = 'mode' + (S.label_wait ? ' on' : '');
-  showDog(); showWatch(); showRoom();
+  showDog(); showWatch(); showRoom(); showApproach();
   $('poseinfo').textContent = S.camera_on_arm ? (S.at_survey ? 'in posa di rilievo' : 'fuori dalla posa di rilievo') +
     ` · rilievo ${S.poses.home_joints ? 'insegnata' : 'mancante'} · sguardo ${S.poses.look_joints ? 'insegnata' : 'mancante'}` : 'camera sul braccio spenta (TROVA_CAMERA_ON_ARM=1)';
   $('batchinfo').textContent = S.batch && S.batch.lot ? 'lotto corrente ' + S.batch.lot : 'nessun lotto';
