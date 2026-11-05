@@ -362,7 +362,7 @@ Operator-supervised first movement. This was not run. `trova/geom.py` `FIRST_MOV
 
 ## Changelog (newest first)
 
-- 2026-11-05 Removed the GitHub Actions workflows for Pages and package publish. No application behavior changed.
+- 2026-11-05 Updated the README. The hackathon media row now names the pitch slides.
 - 2026-11-05 Pitch slides from Downloads are in `hackathon media/ctrl-arm pitch.pdf` and linked from the README.
 - 2026-11-05 GitHub About, Pages site at `site/index.html`, and package publish on release v0.1.0.
 - 2026-11-05 Removed `Test_3d_live_video_old/` and `hackathon media/FOTO_SCAN/`. The M5 calibration fit those tests compare against is `config/m5_camera_robot.json`. The scan video, renders, STLs, and `BRACCIO/` stay.

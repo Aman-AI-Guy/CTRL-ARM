@@ -78,7 +78,7 @@ Leave `XAI_API_KEY` empty and Trova runs in mock mode: Grok is simulated, so the
 | `xarm_voice_preview.py` | Read-only path: text or microphone, Grok, JSON, then telemetry |
 | `xarm_voice_execute.py` | A relative move through the motion gateway. Dry-run unless the operator unlocks hardware |
 | `media/` | The pitch video and its sources |
-| `hackathon media/` | Scan video, photos, renders, and STL meshes |
+| `hackathon media/` | Scan video, pitch slides, renders, and STL meshes |
 | `Test 3d live video/` | The scan experiment used at the table |
 
 ## Licence
