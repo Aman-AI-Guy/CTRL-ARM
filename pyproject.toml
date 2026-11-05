@@ -2,6 +2,7 @@
 name = "trova"
 version = "0.1.0"
 description = "Find objects on a work table by words or photo with Grok, point at them with a robot arm, and check what changed (line clearance)."
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
   "opencv-python>=4.8",

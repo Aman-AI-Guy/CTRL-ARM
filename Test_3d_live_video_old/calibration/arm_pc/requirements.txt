@@ -1,5 +1,0 @@
-# orbit_here.py + robot_geometry.py
-numpy>=1.24
-xarm-python-sdk>=1.13      # tested with 1.18.4
-# tools/render_plan.py and model/build_robot_model.py (pictures) only
-matplotlib>=3.7

@@ -362,6 +362,9 @@ Operator-supervised first movement. This was not run. `trova/geom.py` `FIRST_MOV
 
 ## Changelog (newest first)
 
+- 2026-11-05 Removed `Test_3d_live_video_old/` and `hackathon media/FOTO_SCAN/`. The M5 calibration fit those tests compare against is `config/m5_camera_robot.json`. The scan video, renders, STLs, and `BRACCIO/` stay.
+- 2026-11-05 README rewritten for submission: demo links, preview and full 3D views, and the STL list. No files removed.
+- 2026-11-05 Licence: the project is MIT (`LICENSE`). UFACTORY's notice in `trova/scan3d/LICENSE-UFACTORY` is unchanged.
 - 2026-11-05 Copied today's photogrammetry STLs into `hackathon media/3D scan/`: mouse (full+preview), pinze/wire cutter (full+preview), tazza verde (preview+arm). Sources were Desktop Hackaton recon and Scan3D_Pinze packs; no code change.
 
 - 2026-11-05 Operator-requested automatic re-arm (`TROVA_AUTO_REARM=1`, off by default and in pytest): the middleware re-arms before each new POST except stop/reset/recovery/cancel/log paths; `/api/state` gains `auto_rearm`, `rearm_note`; in that mode `/api/arm/clear_errors` needs neither a latched STOP nor the operator token. Lift record auto-cleared only while `TROVA_ALLOW_LIFT` is off. New `tests/test_auto_rearm.py`.

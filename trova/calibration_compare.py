@@ -14,7 +14,7 @@ from .scan3d.evidence import sha256
 
 REPO = Path(__file__).resolve().parents[1]
 V2 = REPO / "Test 3d live video/calib/v2/camera_robot.json"
-OLD = REPO / "Test_3d_live_video_old/calibration/calib/camera_robot.json"
+OLD = REPO / "config/m5_camera_robot.json"
 
 
 def stats(values):

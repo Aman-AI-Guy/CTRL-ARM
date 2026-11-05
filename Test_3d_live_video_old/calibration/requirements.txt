@@ -1,7 +1,0 @@
-# Python 3.12 (tested 3.12.10). New PC: python -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt
-# COLMAP 4.2.1 (official Windows CUDA build) is separate: set reconstruct.colmap_dir in scan3d/config.json.
-numpy==2.5.4
-opencv-python==5.0.0.93
-open3d==0.20.0
-matplotlib==3.11.2
-xarm-python-sdk==1.18.4

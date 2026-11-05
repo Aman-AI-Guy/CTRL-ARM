@@ -1,9 +1,8 @@
 .venv/
 __pycache__/
 *.pyc
-# Retained experiment archive: keep raw evidence local; migrate reviewed source explicitly.
-/Test_3d_live_video/
 *:Zone.Identifier
+*.Zone.Identifier
 *.part
 # Keep operator instructions visible even when a local global rule ignores Markdown.
 !/START_HERE.md
@@ -18,10 +17,3 @@ experiments/*_grok.jpg
 experiments/webcam*.jpg
 .DS_Store
 *.egg-info/
-.env
-
-# Local secrets and Windows metadata
-.env
-*.Zone.Identifier
-__pycache__/
-*.pyc

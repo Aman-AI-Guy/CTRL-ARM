@@ -25,7 +25,6 @@ def workspace(path=None):
         # Preserve the original M5 evidence bundle when both generations exist.
         # Newer optical fits are explicit candidates, never a silent replacement.
         known = [repository/'Test_3d_live_video/calibration/calib/pix2robot.py',
-                 repository/'Test_3d_live_video_old/calibration/calib/pix2robot.py',
                  repository/'Test 3d live video/calib/pix2robot.py']
         preferred = [path for path in known if path.is_file()]
         candidates = preferred[:1] if preferred else sorted(repository.glob('*/calibration/calib/pix2robot.py'))
