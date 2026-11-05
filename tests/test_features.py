@@ -937,13 +937,15 @@ def test_state_stays_json_after_a_room_scan(tmp_path, monkeypatch):
 
 def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
     """The arm's Pi camera streams MJPEG over Wi-Fi: it must use the newest-frame reader with the 2 s stale check."""
+    import time
+
     import numpy as np
 
     import trova.camera as cam_mod
     alive = [True]
 
     class FakeStream:
-        def __init__(self, src):
+        def __init__(self, src, *a):
             self.src = src
 
         def isOpened(self):
@@ -962,6 +964,7 @@ def test_stream_url_is_read_live_and_refused_when_stale(monkeypatch):
     try:
         assert isinstance(src, cam_mod.WebcamSource) and src.read().shape == (1232, 1640, 3)
         alive[0] = False                                     # Wi-Fi drops: no new frames
+        time.sleep(0.05)                                     # a frame already being read lands first
         src._ts -= cam_mod.STALE_S + 1
         with pytest.raises(RuntimeError, match="no new frame"):
             src.read()

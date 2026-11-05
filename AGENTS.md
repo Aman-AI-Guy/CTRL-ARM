@@ -175,6 +175,7 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 
 ## Changelog (newest first)
 
+- 2026-11-05 Camera: only the reader thread releases a webcam/stream capture (never under a blocked read); streams open/read with 1.5 s timeouts; a source that opens but sends no frames stops its reader before failing; reopening after a drop re-applies the requested size and `source.size_changed` reports a size change. Stream test race fixed.
 - 2026-11-05 Grok's direct / room / dog boxes are validated (0..1000, ordered) before use, never clamped into an arm target; dog route photos are one list sorted by name, .JPG/.jpeg included.
 - 2026-11-05 Change detection, zones and watch review fixes: 2-of-3 persistence counts every frame, kind-agnostic; oversize blobs kept and flagged (never filtered as false alarm); a view blocked for the whole check is NOT clear (was 409) and a watch blocked over 10 s alarms; 'allowed' zones match whole words and reject multi-object names; 'empty' zones flag partial overlap; watch alarms compare situations with a pixel tolerance and zone names, so acknowledged alarms stay quiet.
 - 2026-11-05 Labels and offline review fixes: labels not read (Grok offline or skipped) are `not_read` problems (NOT clear); unreadable expiry is a problem and the code's expiry wins; `EXP 06/2027` no longer read as 06/20; offline change checks keep `verified: null`, say OFFLINE in the summary, `last_check.offline` and both records; PDF escapes the batch lot.

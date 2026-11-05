@@ -295,3 +295,81 @@ def test_dog_route_one_sorted_list_any_case(tmp_path):                         #
     for n in ("01_desk.png", "02_shelf.jpg", "03_bench.JPG", "04_hall.jpeg", "notes.txt"):
         (folder / n).write_bytes(b"x")
     assert [s.name for s in load_route(tmp_path)] == ["desk", "shelf", "bench", "hall"]
+
+
+# ---------------------------------------------------------------- camera (#51, #52)
+class _FakeCap:
+    """A capture whose read() can block like a stalled stream; records sets and whether release ran mid-read."""
+    instances: list = []
+
+    def __init__(self, src, *a):
+        import threading
+        self.sets, self.reading, self.released, self.released_mid_read = [], False, False, False
+        self.gate = threading.Event()
+        self.mode = "frames"
+        _FakeCap.instances.append(self)
+
+    def isOpened(self):
+        return True
+
+    def set(self, prop, value):
+        self.sets.append((prop, value))
+        return True
+
+    def read(self):
+        import numpy as np
+        if self.mode == "frames":
+            return True, np.zeros((720, 1280, 3), np.uint8)
+        if self.mode == "nothing":
+            return False, None
+        self.reading = True                    # "stall": blocked until the test lets it go
+        self.gate.wait(5)
+        self.reading = False
+        return False, None
+
+    def release(self):
+        self.released = True
+        self.released_mid_read = self.released_mid_read or self.reading
+
+
+def test_stalled_stream_close_and_failed_open_do_not_leak(monkeypatch):        # 51
+    import time
+
+    import trova.camera as cam_mod
+    monkeypatch.setattr(cam_mod.cv2, "VideoCapture", _FakeCap)
+    monkeypatch.setattr(cam_mod.WebcamSource, "JOIN_S", 0.2, raising=False)
+    monkeypatch.setattr(cam_mod.WebcamSource, "FIRST_FRAME_S", 0.3, raising=False)
+    _FakeCap.instances = []
+    src = cam_mod.WebcamSource("http://trova-cam.local:8080/stream.mjpg")
+    cap = _FakeCap.instances[-1]
+    cap.mode = "stall"
+    time.sleep(0.1)
+    src.close()                                                  # the reader is stuck inside cap.read()
+    assert not cap.released_mid_read
+    cap.gate.set()
+    src._thread.join(2)
+    assert cap.released and not cap.released_mid_read          # released by the reader once it got out
+
+    monkeypatch.setattr(_FakeCap, "read", lambda self: (False, None))
+    with pytest.raises(RuntimeError, match="sent no frames"):
+        cam_mod.WebcamSource("http://trova-cam.local:8080/stream.mjpg")
+    time.sleep(0.3)
+    import threading
+    assert not any(t.name != "MainThread" and "_loop" in str(getattr(t, "_target", "")) for t in threading.enumerate())
+    assert _FakeCap.instances[-1].released
+
+
+def test_webcam_reopen_keeps_the_requested_size(monkeypatch):                  # 52
+    import cv2
+
+    import trova.camera as cam_mod
+    monkeypatch.setattr(cam_mod.cv2, "VideoCapture", _FakeCap)
+    monkeypatch.setattr(cam_mod.time, "sleep", lambda s: None)
+    _FakeCap.instances = []
+    src = cam_mod.WebcamSource(0, 1920, 1080)
+    try:
+        src._reopen()
+        assert {(cv2.CAP_PROP_FRAME_WIDTH, 1920), (cv2.CAP_PROP_FRAME_HEIGHT, 1080)} <= set(_FakeCap.instances[-1].sets)
+        assert len(_FakeCap.instances) == 2
+    finally:
+        src._run = False
