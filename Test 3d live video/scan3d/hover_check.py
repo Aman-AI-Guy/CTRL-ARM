@@ -47,7 +47,10 @@ def predict(q0, q, cal: Calibration, target, boxes, radius: float) -> dict:
     geo = RobotGeometry.load()
     turn = geo.head_turn(cal.T_fc[:3, 2])
     F = oh.fk_frames(q)[4]
-    verts = cad_to_head(load_stl(HEAD_STL)).reshape(-1, 3) @ (F[:3, :3] @ turn).T + F[:3, 3]
+    try:
+        verts = cad_to_head(load_stl(HEAD_STL)).reshape(-1, 3) @ (F[:3, :3] @ turn).T + F[:3, 3]
+    except OSError:                                        # camera_head.stl not copied: the 120 mm sphere only
+        verts = None
     lens = (F @ cal.T_fc)[:3, 3]
     hc, hr = cal.head_sphere_world(q)
     top = float(target[2])
@@ -65,18 +68,23 @@ def predict(q0, q, cal: Calibration, target, boxes, radius: float) -> dict:
                     gaps[k] = (g, n)
     return {"lens_above_top_mm": round(float(lens[2] - top), 1),
             "lens_off_axis_mm": round(float(np.hypot(*(lens[:2] - np.asarray(target[:2])))), 1),
-            "head_cad_bottom_above_top_mm": round(float(verts[:, 2].min() - top), 1),
+            "head_cad_bottom_above_top_mm": None if verts is None else round(float(verts[:, 2].min() - top), 1),
             "head_sphere_bottom_above_top_mm": round(float(hc[2] - hr - top), 1),
             "min_gap_on_the_way_mm": {k: [round(g, 1), n] for k, (g, n) in gaps.items()}}
 
 
-def orbit_cmd(a, cal_path, target, boxes, run_dir: Path, url: str, go: bool) -> list[str]:
-    cmd = py(ORBIT_PY, "--ip", a.ip, "--calib", cal_path, "--target=" + ",".join(f"{v:.1f}" for v in target),
-             "--tilts", "0", "--span", "0", "--orbit-dist", f"{a.above:g}", "--obj-height", f"{a.height:g}",
-             "--obj-radius", f"{a.radius:g}", "--self-margin", "10", "--speed", f"{a.speed:g}", "--dwell", f"{a.dwell:g}",
+def orbit_cmd(a, cal_path, target, boxes, run_dir: Path, url: str, go: bool, dists=None, pause=False) -> list[str]:
+    """orbit_here.py: one view straight above target per distance in dists (lens to target, mm; default a.above), in
+    that order. From the arm's joints (a.ip), or offline from typed joints (a.q0, no arm) when there is no ip."""
+    dists = [a.above] if dists is None else list(dists)
+    src = ["--ip", a.ip] if a.ip else ["--q0=" + ",".join(f"{v:g}" for v in a.q0)]
+    cmd = py(ORBIT_PY, *src, "--calib", cal_path, "--target=" + ",".join(f"{v:.1f}" for v in target),
+             "--tilts", ",".join("0" for _ in dists), "--span", "0", "--orbit-dist", ",".join(f"{d:g}" for d in dists),
+             "--obj-height", f"{a.height:g}", "--obj-radius", f"{a.radius:g}", "--self-margin", "10",
+             "--speed", f"{a.speed:g}", "--dwell", f"{a.dwell:g}",
              "--out", run_dir / "plan.json", "--log", run_dir / "log.json", "--snapshots", run_dir, "--snapshot-url", url)
     cmd += ["--box=" + ",".join(f"{v:g}" for v in b) for b in boxes]
-    return cmd + (["--go"] if go else [])
+    return cmd + (["--pause"] if pause else []) + (["--go"] if go else [])
 
 
 def run_child(cmd, stdin=subprocess.DEVNULL) -> int:
@@ -93,6 +101,47 @@ def run_child(cmd, stdin=subprocess.DEVNULL) -> int:
     return code
 
 
+def head_bottom(pr: dict) -> str:
+    """The head's lowest point above the object's top, from the CAD when it was there, else the 120 mm sphere."""
+    if pr.get("head_cad_bottom_above_top_mm") is not None:
+        return f"(CAD) {pr['head_cad_bottom_above_top_mm']:.0f}"
+    return f"(120 mm sphere, no camera_head.stl) {pr['head_sphere_bottom_above_top_mm']:.0f}"
+
+
+def analyse_still(img, q, target, cal: Calibration, info: dict, say=print) -> tuple[dict, np.ndarray]:
+    """One still taken at joints q: where the calibration puts target (the object's top centre, robot mm) in it, where
+    the object is seen (info: find, prompt, height_mm, diameter_mm), and the offset between them in mm. Returns the
+    result and the picture with a green + (predicted) and a blue x and box (seen)."""
+    if img.shape[1::-1] != (cal.width, cal.height):
+        cal = cal.for_size(img.shape[1], img.shape[0])
+    target = np.asarray(target, float)
+    pred = cal.robot_to_pixel(target, q)
+    out = {"q": list(q), "target_mm": target.tolist(), "predicted_pixel": [round(v, 1) for v in pred],
+           "mm_per_px": round(cal.mm_per_pixel(q, target[2]), 4)}
+    say(f"the calibration puts the object's top centre at pixel ({pred[0]:.0f}, {pred[1]:.0f}) "
+        f"({out['mm_per_px']:.3f} mm/px there)")
+    vis = img.copy()
+    cv2.drawMarker(vis, (int(round(pred[0])), int(round(pred[1]))), (0, 255, 0), cv2.MARKER_CROSS, 60, 3)
+    blob = find_object(img, q, cal, info.get("find", "red"), info.get("height_mm", 0.0), info.get("diameter_mm"),
+                       prompt=info.get("prompt"))
+    if blob is None:
+        say("  object not found in this still: look at the picture (green cross = where its centre should be)")
+    else:
+        meas = blob["pixel"]
+        d = cal.pixel_to_plane(*meas, q, target[2]) - cal.pixel_to_plane(*pred, q, target[2])
+        out.update(seen_pixel=[round(v, 1) for v in meas], offset_mm=[round(float(d[0]), 1), round(float(d[1]), 1)],
+                   offset_norm_mm=round(float(np.hypot(d[0], d[1])), 1), cut=blob["cut"])
+        say(f"  object's centre seen at ({meas[0]:.0f}, {meas[1]:.0f}): {out['offset_norm_mm']:.1f} mm from where the "
+            f"calibration put it (robot dx {d[0]:+.1f}, dy {d[1]:+.1f} mm)")
+        if blob["cut"]:
+            say(f"  ! the object runs off the picture ({', '.join(blob['cut'])}): its centre is biased along that "
+                "direction; trust only the other one")
+        cv2.drawMarker(vis, (int(round(meas[0])), int(round(meas[1]))), (255, 0, 0), cv2.MARKER_TILTED_CROSS, 50, 3)
+        x, y, w, h = blob["box_px"]
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (255, 0, 0), 2)
+    return out, vis
+
+
 def analyse(run_dir: Path, cal: Calibration) -> int:
     info = json.loads((run_dir / "hover_target.json").read_text(encoding="utf-8"))
     if info.get("calib") and Path(info["calib"]).exists():          # the calibration the run moved with
@@ -104,37 +153,14 @@ def analyse(run_dir: Path, cal: Calibration) -> int:
         print(f"no still at the hover in {run_dir}")
         return 2
     img = cv2.imread(str(run_dir / row["file"]))
-    if img.shape[1::-1] != (cal.width, cal.height):
-        cal = cal.for_size(img.shape[1], img.shape[0])
-    q, target = row["q"], np.array(info["target_mm"], float)
-    pred = cal.robot_to_pixel(target, q)
-    out = {"still": row["file"], "q": q, "target_mm": target.tolist(), "predicted_pixel": [round(v, 1) for v in pred],
-           "mm_per_px": round(cal.mm_per_pixel(q, target[2]), 4)}
-    print(f"hover still {row['file']}: the calibration puts the object's top centre at pixel ({pred[0]:.0f}, {pred[1]:.0f}) "
-          f"({out['mm_per_px']:.3f} mm/px there)")
-    vis = img.copy()
-    cv2.drawMarker(vis, (int(round(pred[0])), int(round(pred[1]))), (0, 255, 0), cv2.MARKER_CROSS, 60, 3)
-    blob = find_object(img, q, cal, info.get("find", "red"), info.get("height_mm", 0.0), info.get("diameter_mm"))
-    if blob is None:
-        print("  object not found in the hover still: look at hover_check.jpg (green cross = where its centre should be)")
-    else:
-        meas = blob["pixel"]
-        d = cal.pixel_to_plane(*meas, q, target[2]) - cal.pixel_to_plane(*pred, q, target[2])
-        out.update(seen_pixel=[round(v, 1) for v in meas], offset_mm=[round(float(d[0]), 1), round(float(d[1]), 1)],
-                   offset_norm_mm=round(float(np.hypot(d[0], d[1])), 1), cut=blob["cut"])
-        print(f"  object's centre seen at ({meas[0]:.0f}, {meas[1]:.0f}): {out['offset_norm_mm']:.1f} mm from where the "
-              f"calibration put it (robot dx {d[0]:+.1f}, dy {d[1]:+.1f} mm)")
-        if blob["cut"]:
-            print(f"  ! the object runs off the picture ({', '.join(blob['cut'])}): its centre is biased along that "
-                  "direction; trust only the other one")
-        cv2.drawMarker(vis, (int(round(meas[0])), int(round(meas[1]))), (255, 0, 0), cv2.MARKER_TILTED_CROSS, 50, 3)
-        x, y, w, h = blob["box_px"]
-        cv2.rectangle(vis, (x, y), (x + w, y + h), (255, 0, 0), 2)
+    print(f"hover still {row['file']}:", end=" ")
+    out, vis = analyse_still(img, row["q"], info["target_mm"], cal, info)
+    out = {"still": row["file"], **out}
     cv2.imwrite(str(run_dir / "hover_check.jpg"), vis)
     (run_dir / "hover_check.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     pr = info.get("predicted", {})
     if pr:
-        print(f"  ruler check: lens {pr['lens_above_top_mm']:.0f} mm, head bottom (CAD) {pr['head_cad_bottom_above_top_mm']:.0f}"
+        print(f"  ruler check: lens {pr['lens_above_top_mm']:.0f} mm, head bottom {head_bottom(pr)}"
               f" mm above the object's top (table z {cal.table_z:.1f} in this calibration)")
     print(f"-> {run_dir / 'hover_check.jpg'}  (green + = predicted, blue x = seen)")
     return 0
@@ -206,7 +232,7 @@ def main(argv=None) -> int:
     info["predicted"] = pr = predict(q0, pose["q"], cal, target, boxes, a.radius)
     (run_dir / "hover_target.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
     print(f"\nat the hover: lens {pr['lens_above_top_mm']:.0f} mm above the object's top ({pr['lens_off_axis_mm']:.1f} mm "
-          f"off its axis); head bottom {pr['head_cad_bottom_above_top_mm']:.0f} mm (CAD), "
+          f"off its axis); head bottom {head_bottom(pr)} mm, "
           f"{pr['head_sphere_bottom_above_top_mm']:.0f} mm (120 mm sphere)")
     print("smallest gaps on the way (collision spheres, real surfaces are 10-25 mm further): "
           + ", ".join(f"{k} {g:.0f} mm ({n})" for k, (g, n) in pr["min_gap_on_the_way_mm"].items()))
