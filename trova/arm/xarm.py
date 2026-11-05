@@ -63,7 +63,8 @@ class XArmBackend(CartesianBackend):
         with self.lock:
             if self.arm.get_is_moving():
                 self._halt()
-            code = self.arm.set_servo_angle(angle=list(q), speed=speed_deg_s, mvacc=speed_deg_s * 5, wait=False)
+            code = self.arm.set_servo_angle(angle=list(q), speed=speed_deg_s,
+                                            mvacc=min(speed_deg_s * 5, ticket.max_joint_accel_deg_s2), wait=False)
         if code != 0:
             raise RuntimeError(f"xArm set_servo_angle returned code {code} (error {self.arm.error_code})")
 

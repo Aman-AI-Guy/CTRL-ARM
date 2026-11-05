@@ -60,6 +60,7 @@ class MotionTicket:
     max_speed_mm_s: float
     max_accel_mm_s2: float
     max_joint_speed_deg_s: float
+    max_joint_accel_deg_s2: float = 400.0
 
 
 @contextmanager
@@ -422,6 +423,7 @@ class MotionGateway:
         self.joint_limits = joint_limits
         self.keepouts = list(keepouts)
         self.keepout_assessed = bool(keepout_assessed)
+        self.joint_geometry = None  # Operator-qualified robot/head geometry, never supplied by Grok.
         self.camera = camera
         self.note = note
         if mode == "hardware" and (simulated or os.environ.get("PYTEST_CURRENT_TEST")):
@@ -551,7 +553,7 @@ class MotionGateway:
                                 requested=requested, proposal={}, safety=self._base(requested), allow=False)
         return None
 
-    def _limits_and_body(self, samples: list[tuple], safety: dict) -> str | None:
+    def _limits_and_body(self, samples: list[tuple], safety: dict, *, check_camera: bool = True) -> str | None:
         if self.limits is not None:
             for point in samples:
                 err = self.limits.check(*point)
@@ -571,6 +573,10 @@ class MotionGateway:
                     return f"the path enters a keep-out at {where}"
         if self.keepouts:
             safety["keep_out"] = "passed"
+        if not check_camera:
+            # Rotated link/head spheres were checked by the joint-geometry validator.
+            safety['clearance'] = 'rotated_CAD_head_spheres'
+            return None
         if self.camera is None:
             safety["clearance"] = "not_configured"
             return None
@@ -652,10 +658,14 @@ class MotionGateway:
                 return last
         return last
 
-    def authorize_joints(self, target_q, speed_deg_s: float, *, source: str = "joints") -> MotionResult:
+    def authorize_joints(self, target_q, speed_deg_s: float, *, source: str = "joints", geometry=None,
+                         start_q=None) -> MotionResult:
         target_q = [float(v) for v in target_q]
         speed_deg_s = float(speed_deg_s)
         requested = {"joints_deg": [round(v, 3) for v in target_q], "joint_speed_deg_s": speed_deg_s, "source": source}
+        if not all(math.isfinite(v) for v in target_q) or not math.isfinite(speed_deg_s) or speed_deg_s <= 0:
+            return self._finish(ok=False,status='rejected',reason='Joint target/speed must be finite, with positive speed.',
+                                requested=requested,proposal={},safety=self._base(requested),allow=False,speed=0)
         blocked = self._stopped_or_fault(requested)
         if blocked:
             return blocked
@@ -665,8 +675,34 @@ class MotionGateway:
                                 requested=requested, proposal={}, safety=safety,
                                 reason=(f"requested joint speed {speed_deg_s:g} deg/s exceeds the limit "
                                         f"{self.max_joint_speed_deg_s:g} deg/s"))
-        current = self.current_joints()
+        geometry = geometry if geometry is not None else self.joint_geometry
+        if source == 'scan_orbit' and geometry is None:
+            return self._finish(ok=False, status='rejected', reason='Scan orbit has no qualified robot geometry.',
+                                requested=requested, proposal={}, safety=safety, allow=False, speed=0)
+        current = self.current_joints() if start_q is None else start_q
+        if source == 'scan_orbit' and current is None:
+            return self._finish(ok=False, status='rejected', reason='Current joints are unavailable.',
+                                requested=requested, proposal={}, safety=safety, allow=False, speed=0)
         samples_q = sample_joints(current, target_q) if current is not None and len(current) == len(target_q) else [target_q]
+        if any(not math.isfinite(value) for pose in samples_q for value in pose):
+            return self._finish(ok=False, status='rejected', reason='Joint path contains non-finite values.',
+                                requested=requested, proposal={}, safety=safety, allow=False, speed=0)
+        if geometry is not None:
+            if current is None or len(current) != 5 or len(target_q) != 5:
+                return self._finish(ok=False, status='rejected', reason='Orbit requires five current and target joints.',
+                                    requested=requested, proposal={}, safety=safety, allow=False, speed=0)
+            jump = max(abs(a-b) for a,b in zip(current,target_q))
+            if jump > geometry.settings.max_joint_step_deg or abs(target_q[4]-current[4]) > geometry.settings.cable_span_deg:
+                return self._finish(ok=False, status='rejected', reason='Orbit exceeds the joint jump or cable budget.',
+                                    requested=requested, proposal={}, safety=safety, allow=False, speed=0)
+            for pose in samples_q:
+                hits = geometry.check(pose)
+                if hits:
+                    safety['robot_link_geometry'] = 'failed'
+                    return self._finish(ok=False, status='rejected', reason='Robot/head geometry: ' + ', '.join(hits),
+                                        requested=requested, proposal={}, safety=safety, allow=False, speed=0)
+            safety['robot_link_geometry'] = 'CAD-derived spheres, sampled 2 deg; limited self-pair set'
+            safety['continuous_collision_checked'] = False
         if self.joint_limits is not None:
             if len(target_q) != len(self.joint_limits):
                 return self._finish(ok=False, status="rejected", allow=False, speed=0, joint_speed=speed_deg_s,
@@ -698,18 +734,57 @@ class MotionGateway:
                                 requested=requested, proposal={}, safety=safety,
                                 reason="forward kinematics is not available, so the joint path cannot be checked")
         if cartesian_samples:
-            err = self._limits_and_body(cartesian_samples, safety)
+            if geometry is not None:
+                from .scan3d.flange import flange_pose
+                expected = [(flange_pose(q) @ geometry.tcp)[:3,3] for q in samples_q]
+                if self.mode == 'hardware' and any(math.dist(a,b) > 2 for a,b in zip(expected,cartesian_samples)):
+                    return self._finish(ok=False,status='rejected',reason='Controller/local FK or TCP offset differs by more than 2 mm.',
+                                        requested=requested,proposal={},safety=safety,allow=False,speed=0)
+                ratios = [math.dist(a,b) / max(1e-9,max(abs(x-y) for x,y in zip(q0,q1)))
+                          for a,b,q0,q1 in zip(expected,expected[1:],samples_q,samples_q[1:])]
+                if ratios and max(ratios) * speed_deg_s > self.max_speed_mm_s + .001:
+                    return self._finish(ok=False,status='rejected',reason='Sampled TCP velocity exceeds the workspace speed limit.',
+                                        requested=requested,proposal={},safety=safety,allow=False,speed=0)
+                safety['tcp_velocity'] = 'sampled_bound'
+            err = self._limits_and_body(cartesian_samples, safety, check_camera=geometry is None)
             if err:
                 return self._finish(ok=False, status="rejected", allow=False, speed=0, joint_speed=speed_deg_s,
                                     requested=requested, proposal={"fk_mm": _round_point(cartesian_samples[-1])},
                                     safety=safety, reason=f"joint pose: {err}")
         proposal = {"joints_deg": [round(v, 3) for v in target_q], "samples": len(samples_q), "source": source}
+        if geometry is not None:
+            proposal['joint_path'] = samples_q
+            proposal['geometry'] = geometry.signature()
+            if not geometry.qualified:
+                return self._finish(ok=True,status='dry_run',allow=False,speed=0,joint_speed=speed_deg_s,
+                                    requested=requested,proposal=proposal,safety=safety,
+                                    reason='Offline geometry proposal only; current physical model binding is unqualified.')
         if self.mode == "dry_run":
             return self._finish(ok=True, status="dry_run", allow=False, speed=0, joint_speed=speed_deg_s,
                                 requested=requested, proposal=proposal, safety=safety,
                                 reason="dry-run: the joint path passed the configured checks and was not sent")
-        return self._finish(ok=True, status="accepted", allow=True, speed=0, joint_speed=speed_deg_s,
-                            requested=requested, proposal=proposal, safety=safety, reason="accepted")
+        result = self._finish(ok=True, status="accepted", allow=True, speed=0, joint_speed=speed_deg_s,
+                              requested=requested, proposal=proposal, safety=safety, reason="accepted")
+        if geometry is not None and result.ticket:
+            result.ticket.max_joint_accel_deg_s2 = min(result.ticket.max_joint_accel_deg_s2, geometry.settings.joint_accel_deg_s2)
+        return result
+
+    def execute_joints(self, target_q, speed_deg_s, *, geometry):
+        """Use the existing driver and joint reached/STOP checks, after gateway authorization."""
+        decision = self.authorize_joints(target_q,speed_deg_s,source='scan_orbit',geometry=geometry)
+        if not decision.allow_motion:
+            return {'ok':False,'reason':decision.reason,'motion':decision.as_dict()}
+        previous_geometry,self.joint_geometry = self.joint_geometry,geometry
+        arm=self.arm
+        previous_speed=arm.joint_speed
+        arm.joint_speed=min(float(speed_deg_s),self.max_joint_speed_deg_s)
+        try:
+            ok=bool(arm.go_joints(list(target_q)))
+            return {'ok':ok,'reason':('joint viewpoint reached' if ok else arm.last_error or 'Joint movement failed'),
+                    'motion':decision.as_dict(),'final_mm':self.current_pose(),'final_joints':self.current_joints()}
+        finally:
+            arm.joint_speed=previous_speed
+            self.joint_geometry=previous_geometry
 
     def authorize_freedrive(self, on: bool) -> MotionResult:
         requested = {"freedrive": bool(on), "source": "freedrive"}

@@ -29,6 +29,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 
 | Feature | Status | Where | Notes |
 |---|---|---|---|
+| M5 B: integrated joint-space orbit and robot geometry | Offline numerical and mesh coverage checks; no hardware run | `scan3d/orbit_math.py`, `scan3d/orbit_planner.py`, `scan3d/robot_geometry.py`, `motion.py` | Reused five-axis IK and CAD-derived link/head spheres. The retained 220-degree, 12-view sequence replans 12/12 through MotionGateway in offline mode. Joint paths are sampled at 2 degrees, with table/object, selected self pairs, link keep-outs and rotated head checks; no continuous collision proof. The geometry/model binding must be operator-qualified before execution. Sampled TCP speed and joint acceleration caps are enforced. No imported SDK executor is included. |
 | M5 A: retained calibration integration | Algorithms migrated; historical replay verified; no active import | `scan3d/flange.py`, `scan3d/marker_fit.py`, `scan3d/evidence.py`, `geom.py`, `integration_m5.py` | The original 1600×900 flange-frame calibration is not a 1640×1232 TCP calibration. No auto activation, rescale or double rotation. Original half-split evaluation replayed at median 1.8504 mm / p95 4.6725 mm; it uses full-fit marker planes and is not independent ruler validation. Historical 6.148 px reprojection exceeds the active 1.5 px gate. See `docs/M5_INTEGRATION.md`. |
 | Object proposals (empty-table difference, lighting normalisation, occlusion) | Done, tested | `proposals.py` | Tune `TROVA_BLOB_THRESH` on the real table |
 | Find by words / photo, clarifying question, direct-box fallback | Done, tested (mock + request format) | `finder.py` | Needs live key to verify accuracy |
@@ -277,6 +278,8 @@ Operator-supervised first movement. This was not run. `trova/geom.py` `FIRST_MOV
 - Change verification sends at most 12 candidates to Grok; more means "the camera probably moved" (not clear).
 
 ## Changelog (newest first)
+
+- 2026-11-05 M5 B: integrated the original xArm 5 orbit IK and compact CAD-derived geometry into joint authorization/execution through MotionGateway, retained independent hardware unlock and STOP, bounded joint acceleration and duration-aware waits, and added a no-motion recorded-orbit replay. Verified mesh vertex coverage and 12/12 offline trajectory proposals; no physical commands.
 
 - 2026-11-05 M5 A: migrated flange-coordinate and marker bundle-calibration algorithms, added historical provenance/profile compatibility and read-only replay tools, preserved the imported archive, and forced automated tests to simulated/no-telemetry defaults. No physical arm commands or historical calibration activation.
 

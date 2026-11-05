@@ -226,6 +226,9 @@ class CartesianArm(ArmDriver):
         decision = self.gateway.authorize_joints(q, self.joint_speed, source="joints")
         if self._hold_decision(decision):
             return False
+        start_joints = self.gateway.current_joints()
+        travel = max(abs(a-b) for a,b in zip(start_joints,q)) if start_joints is not None else 0.0
+        deadline_s = self.timeout + travel / max(.1,self.joint_speed)
         self.state, self.last_error = "moving", None
         try:
             with motion_ticket(decision.ticket):
@@ -240,7 +243,7 @@ class CartesianArm(ArmDriver):
                 seen = seen or moving
                 if not moving and (seen or time.time() - t0 > START_GRACE_S):
                     break
-                if time.time() - t0 > self.timeout:
+                if time.time() - t0 > deadline_s:
                     self.backend.stop()
                     self.state, self.last_error = "error", "joint move timed out"
                     return False

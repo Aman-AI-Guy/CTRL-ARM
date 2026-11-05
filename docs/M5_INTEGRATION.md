@@ -35,3 +35,17 @@ OPENBLAS_NUM_THREADS=1 /home/simostocco/hackathon/.venv/bin/python -m trova.inte
 ```
 
 The supplied archive reports robust object dimensions **96.3×55.7×37.4 mm**, extremes **102.8×63.4×41.3 mm**, and mesh extents **106.1×66.2×38.6 mm**. These are distinct estimators. Ruler values 98×58×35 mm are historical operator notes, not newly measured ground truth. The recorded hover reports an 8.2 mm offset and a clipped mouse image; full lateral accuracy cannot be inferred from it.
+
+## B: orbit and robot geometry
+
+The migrated numerical camera-position/direction IK is extracted from `arm_pc/orbit_here.py`, with its source hash retained. Controller connection, enable, halt, move, and executable CLI code are omitted. It shares flange FK with calibration. Candidate solutions retain five-axis constraints, the narrowed J2 lower limit, joint-branch handling and CAD-derived collision checks; Trova additionally rejects excessive joint jumps and J5 cable travel instead of merely printing warnings.
+
+The compact `robot_model.json` contains sphere centers/radii in millimetres in the URDF link frames. Its surfaces were checked against every vertex of the retained UFACTORY STL files (metres, converted by ×1000) and the team's camera-head STL (millimetres, CAD-to-flange/head transform preserved). Raw STL/STEP assets remain outside Git. UFACTORY's [upstream BSD license](https://github.com/xArm-Developer/xarm_ros/blob/master/LICENSE) is retained as `LICENSE-UFACTORY`; the team camera-head geometry is operator-supplied, with no new public license asserted for its raw CAD.
+
+MotionGateway checks the geometry inside joint authorization, including every sampled pose, even if a planner's earlier report said it was valid. It checks TCP workspace/keep-outs, rotated head spheres, table/object exclusion, selected self-collision pairs and link keep-outs. It compares controller and local FK/TCP within 2 mm in hardware mode. Requested joint speed is bounded against sampled TCP speed; joint acceleration is carried in the driver ticket. A qualified rotated-head check replaces the fixed-orientation camera offset only for that joint path. Modes and the independent hardware unlock are unchanged.
+
+The checks sample joint-linear paths every 2 degrees. They are not continuous swept-volume checks, the imported self-pair set is incomplete, and controller interpolation equivalence is not proven. `collision_avoidance` remains false. Offline proposals can pass geometric checks but cannot execute until the current model, mounting/TCP, active calibration and operator settings are qualified.
+
+The original 220-degree orbit was replayed from its saved starting joints/target: **12/12** generated views passed the integrated sampled geometry/gateway checks, with no robot opened. This uses the recorded scene assumptions and a deliberately broad offline workspace; it does not qualify the station's current workspace or a physical route. Reproduce with `python -m trova.integration_m5 orbit-replay --output data/m5/orbit_replay.json`.
+
+The original imported suite now runs **50 tests**, rather than the old report's 47. All 50 passed in the preserved temporary copy after installing matplotlib/Open3D. A transient fake-camera server-startup failure occurred in an earlier concurrent run and passed in the serial rerun. Source data and reports were not changed.
