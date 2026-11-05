@@ -29,6 +29,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 
 | Feature | Status | Where | Notes |
 |---|---|---|---|
+| Experimental live V2 integration | Live recognition/pixel/ray/numerical IK exercised; path refused honestly | `localization.py`, `diagnose.py`, `agent.py`, `scan3d/approach.py` | Read-only/dry-run/simulation estimates use the selected V2 fitted tilted plane without activating calibration or motion. Agent responses preserve separate experimental_location; diagnostic continues numerical approach/orbit evaluation, exposing rejected joint paths. Live green-cup estimate lies beyond Y workspace and approach exceeds joint/cable budget, so no live-target simulated or hardware execution is claimed. Existing qualified fake-arm approach/feedback/orbit/reconstruction paths remain shared. See `docs/EXPERIMENTAL_V2_PIPELINE.md`. |
 | M6.2: independent qualification CLI and evidence recovery | Offline tested; no independent current XYZ ledger recovered | `calibration_qualify.py`, `localization.py`, `docs/M62_QUALIFICATION.md` | Inventories new/old archives, distinguishes ruler fitting and hover consistency from independent XYZ, imports only provenance/binding-matched references without approval, authenticates via operator token file, captures/validates read-only and gates operator approval. Full tilted-plane reference scoring exposes signed XYZ errors. Current TCP/world offsets read as zero; physical mount/table continuity remains unknown. |
 | M6.1: pinned V2 candidate and Z=100 diagnostic workspace | 264 Trova tests passed; current physical qualification absent | `config/calibration_candidate.json`, `config/workspace_candidate.json`, `localization.py`, `calibration_compare.py`, `diagnose.py` | Explicit hash-pinned V2 primary candidate; old bundle retained for replay. Requested Z=100 is driverless dry-run only, not promoted to operating Z=200: TCP Z112 fits, head extends to Z5.9. Real-image V2 replay reproduces 1.4359/6.1526 mm median/p95; same-image fixed-model comparison favors V2 but is not independent validation. Typed station template/write endpoint reports six-value TCP order and missing measurements; binding never activates hardware. See `docs/M61_V2_QUALIFICATION.md`. |
 | M6 F: end-to-end read-only diagnostics | 256 Trova tests, 64 original tests and Chromium smoke passed; live camera/Grok/FK read-only check completed | `diagnose.py`, `arm/telemetry.py`, `docs/M6_OPERATOR_GUIDE.md` | `python -m trova.diagnose` initializes no motion driver; reports each camera/recognition/region/telemetry/provider/metric/IK/path/gateway/authorization stage independently. Includes explicit newer/older artifact selection, 19-pose controller FK checks and separately labelled recorded orbit planning. Current live mouse absent, station qualification missing and state 5 block a live metric approach; physical geometry and COLMAP remain operator prerequisites. |
@@ -137,6 +138,8 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 | `tests/` | all | Offline tests (`fake_robot.py` = fake UR/Elite controller) |
 
 ## HTTP API
+
+Experimental localization: autonomous task responses expose experimental_location only in dry-run/simulation alongside the blocked qualified result. No new hardware endpoint or confirmation path. CLI diagnose accepts --experimental-reference-model, --manual-region and --pixel; scenario dimensions are explicitly recorded assumptions, not current physical measurements.
 
 M6.2: provider reference payload optionally accepts reference_id; independent reference diagnostics now report signed XYZ and full tilted-plane errors. `python -m trova.calibration_qualify` supplies inventory, inspect, station, snapshot, reference, import, validate, approve and live actions; no motion endpoint or driver is initialized.
 
@@ -301,6 +304,8 @@ Operator-supervised first movement. This was not run. `trova/geom.py` `FIRST_MOV
 - Change verification sends at most 12 candidates to Grok; more means "the camera probably moved" (not clear).
 
 ## Changelog (newest first)
+
+- 2026-11-05 Added explicit unqualified V2 plane estimates to the existing router/agent and live stage-by-stage diagnostic; rejected numerical IK trajectories are retained for inspection without authorization. Live camera/Grok/real joints produced experimental XYZ and numerical IK, while workspace/joint limits refused approach/orbit. Hardware, calibration and clearance gates unchanged. Adapted English-only safety assertions for the concurrently localized UI without modifying interface work. No physical actuation or push.
 
 - 2026-11-05 M6.2: recovered original ruler/hover/marker records from both archives without promoting fit-derived coordinates; added provenance-preserving qualification CLI and authenticated token-file API access. Corrected independent reference scoring to intersect the bound tilted plane and expose Z error. Fresh read-only image/telemetry succeeded; empty station/ledger leaves V2 unqualified. No physical actuation or authorization.
 

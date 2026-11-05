@@ -537,6 +537,11 @@ def skill_locate(host, task, argument: str) -> dict:
                     image_region=chosen.get('box'), geometric_reference=chosen.get('geometric_reference'),
                     robot_joints_deg=robot.get('joints'), frame='robot_base', units='mm',
                     rejection_reasons=[] if location.get('ok') else [location.get('reason')])
+    if not location.get('ok') and hasattr(host.vision,'experimental_localize_observation') and getattr(host.gateway,'mode',None) in {'dry_run','simulation'}:
+        try:
+            task['experimental_location']=host.vision.experimental_localize_observation(robot,chosen,host.image_size,mode=host.gateway.mode)
+        except (ValueError,KeyError,TypeError) as exc:
+            task['experimental_location']={'ok':False,'experimental':True,'reason':str(exc),'hardware_authorized':False}
     task["location"] = location
     chosen["metric_localization_state"] = "localized" if location.get("ok") else "blocked"
     if location.get("ok") and location.get("point_mm") is not None:
@@ -1073,7 +1078,7 @@ def _timing_summary(rows: list[dict]) -> dict:
 
 
 def _resume_task(task: dict) -> dict:
-    keys = ("goal", "phase", "selected", "objects", "location", "planned_target", "proposal",
+    keys = ("goal", "phase", "selected", "objects", "location", "experimental_location", "planned_target", "proposal",
             "motion_lock", "evaluation", "question", "authoritative", "calibration_valid",
             "calibration", "last_reason", "steps", "replans", "grok_mode", "snapshot_pose",
             "snapshot_id", "ik_verified", "timings", "summary", "confirmation", "workflow_state", "workflow_events",
@@ -1259,7 +1264,7 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
         "selected": task.get("selected"), "question": task.get("question"),
         "approach_plan": task.get('approach_plan'), "joint_operation": task.get('joint_operation'),
         "calibration_valid": task.get("calibration_valid"), "calibration": task.get("calibration"),
-        "location": task.get("location"), "proposal": task.get("proposal"),
+        "location": task.get("location"), "experimental_location":task.get("experimental_location"), "proposal": task.get("proposal"),
         "evaluation": evaluation, "goal_achieved": bool(evaluation.get("goal_achieved")),
         "motion_lock": task.get("motion_lock"), "steps": task["steps"],
         "authoritative": task.get("authoritative"), "grok_mode": task.get("grok_mode"),

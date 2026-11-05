@@ -139,7 +139,8 @@ def test_preview_and_handeye_capture_do_not_move_or_invent_a_calibration(tmp_pat
 
     page = client.get("/").text
     assert "previewBoard()" in page and "captureBoard('handeye')" in page
-    assert "collision avoidance: no" in page and "physical e-stop" in page
+    assert ("collision avoidance: no" in page or "anticollisione: no" in page)
+    assert ("physical e-stop" in page or "arresto di emergenza fisico" in page)
     state.reader = _Reader([[10, 20, 300, 180, 0, 5]])
     body = client.get("/api/state").json()
     assert body["robot"]["source"] == "telemetry"

@@ -805,6 +805,36 @@ class CalibrationRouter(ProviderOperations):
             "verified_tool_position": False,
         }
 
+    def experimental_localize_observation(self,robot,selected,image_size,*,mode="dry_run"):
+        """Unqualified saved-plane estimates only; never an active calibration or motion receipt."""
+        if mode not in {"dry_run","simulation"}:
+            raise ValueError("Experimental estimates are restricted to read-only/dry-run/simulation")
+        provider=self.historical
+        if provider is None:raise ValueError("Selected imported candidate unavailable")
+        compatibility=provider.is_compatible(dict(provider.camera,image_size=image_size),robot)
+        if not compatibility['compatible']:raise ValueError('; '.join(compatibility['reasons']))
+        if sha256(provider.path)!=provider.digest:raise ValueError("Candidate artifact changed")
+        reference=selected.get('geometric_reference') or {}
+        if reference.get('kind') not in {'support_plane_point','known_height_point'}:
+            raise ValueError("Explicit support/known-height pixel reference is required; box center is not depth")
+        uv=finite(reference.get('pixel'),2)
+        if not 0<=uv[0]<provider.cal.width or not 0<=uv[1]<provider.cal.height:raise ValueError('Pixel outside image')
+        box=finite(selected.get('box'),4)
+        if not box[0]<=uv[0]<=box[2] or not box[1]<=uv[1]<=box[3]:raise ValueError('Reference pixel is outside selected region')
+        height=float(reference.get('height_mm',0))
+        if not np.isfinite(height) or height<0:raise ValueError('Invalid reference height')
+        point=provider.cal.pixel_to_object_top(*uv,robot['joints'],height)
+        return {'ok':True,'experimental':True,'calibration_valid':False,'metric_permitted':False,
+                'hardware_authorized':False,'motion_authorized':False,'verified_tool_position':False,
+                'provider':'historical_flange','calibration_sha256':provider.digest,
+                'object_id':selected.get('track_id'),'source_image':reference.get('snapshot_id'),
+                'box':selected['box'],'pixel':uv.tolist(),'point_mm':point.tolist(),
+                'frame':'robot_base','units':'mm','robot_joints_deg':list(robot['joints']),
+                'reference_height_mm':height,'T_base_camera':provider.cal.camera_pose(robot['joints']).tolist(),
+                'plane_abc':list(provider.cal.plane),'plane_source':'saved_V2_fit_not_current_measurement',
+                'uncertainty_mm':None,'historical_p95_mm':provider.cal.data['quality'].get('holdout_p95_mm'),
+                'reason':'Experimental saved-plane coordinate; current independent accuracy, plane/mount continuity and object support assumptions are unverified.'}
+
     def localize_observation(self, robot, selected, image_size):
         report = self.assess(image_size)
         reference = selected.get("geometric_reference")

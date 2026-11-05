@@ -44,6 +44,8 @@ def diagnose(
     recorded_plan=False,
     safety_file=None,
     workspace_candidate=None,
+    experimental_reference_model=None,
+    manual_region=None,
     gateway=None,
     vision=None,
     orbits=None,
@@ -471,6 +473,12 @@ def diagnose(
             "upstream",
             "Localize an image region.",
         )
+    if selected is not None and manual_region is not None:
+        from .localization import finite
+        region=finite(manual_region,4)
+        if not (0<=region[0]<region[2]<=size[0] and 0<=region[1]<region[3]<=size[1]):
+            raise ValueError('Manual region must be inside this decoded image')
+        selected=dict(selected,box=region.tolist(),localization_provenance='explicit_diagnostic_manual_region')
     if selected is not None and pixel is not None:
         reference = {
             "kind": "known_height_point"
@@ -478,7 +486,7 @@ def diagnose(
             else "support_plane_point",
             "pixel": list(pixel),
             "snapshot_id": image_id,
-            "provenance": "operator_input",
+            "provenance": "explicit_diagnostic_input_not_independent_measurement",
             "height_mm": height_mm or 0,
             "height_uncertainty_mm": height_uncertainty_mm or 0,
         }
@@ -683,6 +691,48 @@ def diagnose(
             "Recorded numerical readiness is not a live executable trajectory.",
             "recorded_evidence",
         )
+    experimental = None
+    if experimental_reference_model and selected and still and reference:
+        try:
+            experimental=vision.experimental_localize_observation(robot,selected,size,mode=gateway.mode)
+            record('experimental_pixel_to_base','NOT_VERIFIED','trova.localization.CalibrationRouter.experimental_localize_observation',
+                   'explicit pixel/region and compatible live optical profile/joints',experimental,experimental['reason'],'experimental')
+            from .scan3d.orbit_planner import JointGeometry,OrbitSettings,plan_orbit
+            from .scan3d.approach import propose
+            model_path=Path(experimental_reference_model)
+            model=json.loads(model_path.read_text())
+            # Recorded object geometry is an explicit scenario assumption, never a current measurement.
+            settings=OrbitSettings(object_height_mm=model['height_mm'],object_radius_mm=model['diameter_mm']/2,
+                                   tcp_offset_mm=robot.get('tcp_offset'))
+            a,b,c=experimental['plane_abc']
+            context=JointGeometry(vision.historical.cal.T_fc,{'normal':[-a,-b,1],'point_mm':[0,0,c]},
+                                  experimental['point_mm'],settings,gateway,qualified=False)
+            planned=propose(context,robot['joints'],model['above_mm'])
+            numerical=bool(planned.get('next') or any(c.get('numerical_ik_solution') for c in planned['candidates']))
+            record('experimental_numerical_ik','PASS' if numerical else 'BLOCKED','trova.scan3d.orbit_math.solve_one',
+                   'five-axis numerical camera pose (separate from path authorization)',
+                   {'solutions':[c for c in planned['candidates'] if c.get('numerical_ik_solution')],
+                    'candidate_count':len(planned['candidates'])},
+                   'Numerical solution does not authorize its rejected trajectory.','experimental')
+            experimental['scenario']={'source':str(model_path),'sha256':__import__("hashlib").sha256(model_path.read_bytes()).hexdigest(),
+                'current_object_dimensions_verified':False,'settings':context.signature()}
+            record('experimental_approach','PASS' if planned.get('next') else 'BLOCKED','trova.scan3d.approach.propose',
+                   'V2 estimate and explicitly labelled recorded geometry assumptions',planned,planned['reason'],'experimental')
+            if planned.get('next'):
+                candidate=planned['next']
+                certificate=context.swept_check(robot['joints'],candidate['joints_deg'])
+                record('experimental_interval_clearance','PASS' if certificate['ok'] else 'BLOCKED',
+                       'trova.scan3d.trajectory.IntervalValidator.validate','complete modeled path inside configured limits',
+                       certificate,certificate.get('reason',''),'physical_constraint')
+            orbit=plan_orbit(robot['joints'],context,cancel=threading.Event())
+            record('experimental_orbit','PASS' if orbit.get('next') else 'BLOCKED','trova.scan3d.orbit_planner.plan_orbit',
+                   'actual start joints and same V2 object-centered scenario',orbit,orbit.get('reason',''),'experimental')
+            record('simulated_execution','BLOCKED','trova.motion.MotionGateway.execute_joints',
+                   'gateway-accepted trajectory and simulated driver',None,
+                   'Unqualified geometry is a dry-run proposal only; no acceptance or motion was fabricated. Existing fake-arm execution/feedback/scan regressions exercise the downstream qualified-fixture path.',
+                   'physical_constraint')
+        except (ValueError,KeyError,TypeError) as exc:
+            record('experimental_pipeline','BLOCKED','trova.diagnose.diagnose','compatible pixel/model inputs',None,str(exc),'experimental')
     from .scan3d.executables import discover
 
     discovery = discover()
@@ -733,6 +783,7 @@ def diagnose(
         "selected": selected,
         "location": location,
         "approach": planning,
+        "experimental_location": experimental,
         "counts": {
             status: sum(r["status"] == status for r in stages) for status in STATUSES
         },
@@ -833,8 +884,10 @@ def main():
         help="Existing operator-measured safety JSON; applied only to the driverless dry-run gateway",
     )
     parser.add_argument("--workspace-candidate", type=Path, help="Unmeasured limits for driverless dry-run only")
+    parser.add_argument("--experimental-reference-model",type=Path,help="Recorded hover target supplies explicitly hypothetical object dimensions/clearance; never qualifies hardware")
     parser.add_argument("--text", default="mouse rosso")
     parser.add_argument("--pixel", type=float, nargs=2)
+    parser.add_argument("--manual-region",type=float,nargs=4,help="Explicit image-space region for the recognized target; no metric qualification")
     parser.add_argument("--height-mm", type=float)
     parser.add_argument("--height-uncertainty-mm", type=float)
     parser.add_argument("--check-recorded-fk", action="store_true")
@@ -880,6 +933,8 @@ def main():
             check_recorded_fk=args.check_recorded_fk,
             safety_file=args.safety,
             workspace_candidate=args.workspace_candidate,
+            experimental_reference_model=args.experimental_reference_model,
+            manual_region=args.manual_region,
             recorded_plan=args.recorded_plan,
             output=args.output,
         )

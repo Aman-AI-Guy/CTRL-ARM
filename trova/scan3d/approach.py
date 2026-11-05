@@ -87,6 +87,9 @@ def propose(context, joints, clearance_mm, *, cancel=None):
                 )
                 if not decision.ok:
                     reasons.append(decision.reason)
+                    candidates.append({'joints_deg':q.tolist(),'numerical_ik_solution':True,
+                        'validated':False,'executable':False,'joint_path':[list(map(float,p)) for p in path],
+                        'gateway':decision.as_dict(),'reason':decision.reason})
                     continue
                 center, direction = context.cam.ray(q)
                 item = {

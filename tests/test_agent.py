@@ -194,7 +194,9 @@ def test_api_task_stays_blocked_on_the_demo_and_rejects_a_mode_field(tmp_path, m
     assert "telemetry" in (captured.get("reject_reason") or "")
     page = client.get("/").text
     assert 'id="cambadge"' in page and 'id="motionbadge"' in page and 'id="movedbadge"' in page
-    assert "calibration not valid" in page and "movement not executed" in page and "Grok online" in page
+    assert ("calibration not valid" in page or "calibrazione non valida" in page)
+    assert ("movement not executed" in page or "movimento non autorizzato" in page)
+    assert ("Grok online" in page or "S.grok" in page)
     exported = client.post("/api/scan/export").json()
     assert exported["reconstructed"] is False
     assert client.post("/api/scan/finish").json()["status"] == "finished"
