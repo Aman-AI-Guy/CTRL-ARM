@@ -266,3 +266,32 @@ def test_watch_situation_survives_jitter_and_renumbering():                    #
     assert _same_situation(_signature([], z1), _signature([], z2))
     gone = _signature([_ch("removed", ref=(589.6, 300, 649.6, 360))], [])
     assert not _same_situation(gone, a)                          # something else at that place is new
+
+
+# ---------------------------------------------------------------- Grok boxes (#25), dog route (#58)
+def test_direct_box_outside_the_picture_is_refused():                         # 25
+    import numpy as np
+
+    from trova import finder
+    from trova.grok import GrokClient, register_mock
+    frame = np.zeros((800, 1280, 3), np.uint8)
+    try:
+        for bad in ([1300, 100, 1400, 200], [-400, -300, -300, -200], [500, 500, 400, 600], [1, 2, 3]):
+            register_mock("trova_direct", lambda p, i, ctx, bad=bad: {"found": True, "box_2d": bad, "label": "pen",
+                                                                      "reason": "", "confidence": 0.9})
+            r = finder.find(GrokClient(mock=True), frame, [], "the pen")       # no boxes: direct fallback
+            assert r.status != "found" and r.box is None, bad
+        register_mock("trova_direct", lambda p, i, ctx: {"found": True, "box_2d": [100, 100, 200, 200], "label": "pen",
+                                                         "reason": "", "confidence": 0.9})
+        assert finder.find(GrokClient(mock=True), frame, [], "the pen").status == "found"
+    finally:
+        register_mock("trova_direct", finder._mock_direct)
+
+
+def test_dog_route_one_sorted_list_any_case(tmp_path):                         # 58
+    from trova.dog import load_route
+    folder = tmp_path / "dog_route"
+    folder.mkdir()
+    for n in ("01_desk.png", "02_shelf.jpg", "03_bench.JPG", "04_hall.jpeg", "notes.txt"):
+        (folder / n).write_bytes(b"x")
+    assert [s.name for s in load_route(tmp_path)] == ["desk", "shelf", "bench", "hall"]
