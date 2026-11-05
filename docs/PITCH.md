@@ -1,8 +1,9 @@
 # ctrl-arm pitch: 5 minutes = 1:52 ad + 3:08 live
 
 Video: [`media/ctrl_arm_ad.mp4`](../media/ctrl_arm_ad.mp4) (1080p, 112 s, sound on: the robot speaks Italian).
-Rebuild: see "Rebuilding the video" below. Slides with the video as slide 1 and the full speaker script: the
-ctrl-arm pitch deck (Claude artifact; ask Bhoumik to share it).
+Rebuild: see "Rebuilding the video" below. Slides: [`docs/ctrl_arm_pitch.pdf`](ctrl_arm_pitch.pdf) (slide 1 is the
+video's poster frame; play `media/ctrl_arm_ad.mp4` there) with the speaker script in [`docs/PITCH_NOTES.md`](PITCH_NOTES.md).
+The live deck with the video embedded is a Claude artifact (ask Bhoumik to share it).
 
 ## Run of show
 
