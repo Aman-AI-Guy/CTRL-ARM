@@ -373,3 +373,35 @@ def test_webcam_reopen_keeps_the_requested_size(monkeypatch):                  #
         assert len(_FakeCap.instances) == 2
     finally:
         src._run = False
+
+
+# ---------------------------------------------------------------- browser speech (#36, #56)
+def _node(js: str, *args: str) -> object:
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    return json.loads(subprocess.run([node, "-e", js, str(STATIC / "speech.js"), *args],
+                                     capture_output=True, text=True, check=True).stdout)
+
+
+def test_push_to_talk_stop_watching_reaches_the_final_handler():              # 36
+    from trova.voice import STOP_WORDS
+    js = """const S = require(process.argv[1]); const sw = JSON.parse(process.argv[2]); let rec;
+global.window = {SpeechRecognition: function () { rec = this; this.start = () => {}; }};
+const say = (said) => said.forEach(([t, fin]) => { const r = [{transcript: t}]; r.isFinal = fin; rec.onresult({results: [r]}); });
+const run = (said) => { const out = []; S.listen({lang: 'en-US', stopWords: sw, onInterim: () => {}, onEnd: () => {},
+  onStop: t => out.push(['stop', t]), onFinal: t => out.push(['final', t])}); say(said); return out; };
+console.log(JSON.stringify([run([['stop', false], ['stop watching', true]]), run([['stop', false], ['shop the pens', true]])]));"""
+    watching, misheard = _node(js, json.dumps(STOP_WORDS))
+    assert ["stop", "stop"] in watching and ["final", "stop watching"] in watching
+    assert misheard == [["stop", "stop"]]                        # a revised transcript never runs a find after STOP
+
+
+def test_speech_parser_knows_the_documented_commands():                        # 56
+    from trova.voice import STOP_WORDS
+    said = ["torna a casa", "park", "go home", "is the line clear?", "controlla la linea", "la linea è libera?"]
+    js = ("const S = require(process.argv[1]); const [said, sw] = JSON.parse(process.argv[2]);"
+          "console.log(JSON.stringify(said.map(t => S.parse(t, sw).cmd)));")
+    assert _node(js, json.dumps([said, STOP_WORDS])) == ["home", "home", "home", "check", "check", "check"]
