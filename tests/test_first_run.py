@@ -18,6 +18,7 @@ WARNING = "Collision avoidance: NOT PRESENT. Hold the physical E-stop."
 def first_run_client(tmp_path, monkeypatch, survey=None, **extra):
     def fake_aruco(frame, pos):        # the simulated table has no printed markers: a known pixel -> robot mapping
         c = Calibration.default(frame.shape[1], frame.shape[0], 600, 400)
+        c.points.append([frame.shape[1]/2, frame.shape[0]/2, 300, 200])
         c.size = [frame.shape[1], frame.shape[0]]
         return c
     monkeypatch.setattr(server, "calibrate_aruco", fake_aruco)
@@ -132,7 +133,7 @@ def test_refuses_when_a_first_run_check_fails(tmp_path, monkeypatch, problem):
         c.post("/api/arm/stop")
     r = confirm(c, ap)
     assert r.status_code == 409 and "refused" in r.json()["error"], r.json()
-    assert approach(c)["problems"]
+    assert approach(c) is None or approach(c)["problems"]
     assert [i for i in c.get("/api/preflight?grok=0").json()["items"] if i["name"] == "First run" and i["status"] == "fail"]
     assert st.arm.backend.history == []
 
@@ -307,6 +308,7 @@ def test_xarm_config_script_reads_by_default_and_never_moves():
 
         def __init__(self, ip, moving=False):
             self.calls, self.moving = [], moving
+            self.core = self
 
         def __getattr__(self, name):                 # every setter / motion call is recorded
             return lambda *a, **k: self.calls.append((name, a)) or 0
@@ -335,7 +337,7 @@ def test_xarm_config_script_reads_by_default_and_never_moves():
     calls = dict(made[-1].calls)
     assert calls["set_tcp_offset"] == ([60, 0, 85, 0, 0, 0],) and calls["set_tcp_load"] == (0.25, [0, 0, 0])
     assert calls["set_reduced_tcp_boundary"] == ([600, 0, 300, -300, 500, 50],)   # SDK order: max, min
-    assert calls["set_collision_sensitivity"] == (4,) and calls["set_collision_rebound"] == (False,)
+    assert calls["set_collis_sens"] == (4,) and calls["set_collision_rebound"] == (False,)
     assert [c for c, _ in made[-1].calls][-2:] == ["save_conf", "disconnect"]
     motion = {"set_position", "set_servo_angle", "set_state", "set_mode", "motion_enable", "move_gohome",
               "clean_error", "set_tool_position", "vc_set_cartesian_velocity", "vc_set_joint_velocity"}

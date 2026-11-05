@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from .boxes import Box
+from .config import atomic_json_write
 
 RULES = ("empty", "allowed")
 
@@ -41,7 +42,7 @@ def load_zones(path: Path) -> list[Zone]:
 
 
 def save_zones(path: Path, zones: list[Zone]) -> None:
-    Path(path).write_text(json.dumps([asdict(z) for z in zones], indent=2))
+    atomic_json_write(Path(path), [asdict(z) for z in zones])
 
 
 def _allowed(name: str, allowed: list[str]) -> bool:

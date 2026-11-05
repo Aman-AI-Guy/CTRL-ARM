@@ -78,9 +78,10 @@ class Bringup:
                                      wait=wait, timeout=30)
 
     def stop(self) -> None:          # the same sequence the Trova driver uses (trova/arm/xarm.py)
-        self.api.set_state(4)
-        self.api.motion_enable(True)
-        self.api.set_state(0)
+        code = self.api.set_state(4)
+        code = code[0] if isinstance(code, (list, tuple)) and code else code
+        if type(code) is not int or code != 0:
+            raise Abort(f"STOP failed (set_state(4) returned {code}); use the physical E-stop")
 
     # ---------- the steps
     def step_connect(self) -> None:
@@ -95,7 +96,7 @@ class Bringup:
         try:
             code, rs = a.get_reduced_states()
             if code == 0 and rs:
-                self.say(f"controller safety box on: {bool(rs[4]) if len(rs) > 4 else '?'} · box {rs[1]}")
+                self.say(f"controller safety box on: {bool(rs[5]) if len(rs) > 5 else '?'} · box {rs[1]}")
         except Exception:  # noqa: BLE001 - older firmware
             pass
         self.result["connect"] = {"error": err, "warning": warn}
@@ -192,6 +193,7 @@ class Bringup:
             raise Abort("the arm did not stop early and hold: do NOT run Trova on it, tell staff")
         self.say("  STOP works and holds.")
         if self.yes("Go back down to the ready pose?"):
+            self.enable()
             self.move(start)
 
     def settings(self) -> dict:
@@ -265,11 +267,11 @@ def main() -> None:
         b.run(ip, Path("data") / "xarm_bringup.json")
     except (Abort, KeyboardInterrupt) as e:
         try:
-            api.set_mode(0)
-            api.set_state(0)
-        except Exception:  # noqa: BLE001
-            pass
-        print(f"\nStopped: {e or 'Ctrl+C'}. The arm is in position mode and holds where it is.")
+            b.stop()
+        except Exception as stop_error:  # noqa: BLE001
+            print(f"\nSTOP FAILED: {stop_error}. Use the physical E-stop.")
+        else:
+            print(f"\nStopped: {e or 'Ctrl+C'}. Controller STOP accepted; verify hold with staff.")
     finally:
         try:
             api.disconnect()

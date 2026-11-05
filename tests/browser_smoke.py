@@ -86,6 +86,18 @@ def main() -> int:
                 pg.wait_for_function("document.getElementById('findbtn').textContent === 'Find'", timeout=20000)
                 return text("#findres")
 
+            def rearm_sim():
+                state = pg.request.get(base + "/api/state").json()
+                body = {"operator": "Smoke Test", "stop_nonce": state["stop_nonce"],
+                        "area_clear": True, "controller_ready": True}
+                if state["lift_interrupted"]:
+                    response = pg.request.post(base + "/api/arm/recover_lift", data={
+                        **body, "fork_freed": True, "note": "Simulated fork is free"})
+                    assert response.ok, response.text()
+                    body["stop_nonce"] = pg.request.get(base + "/api/state").json()["stop_nonce"]
+                response = pg.request.post(base + "/api/arm/reset", data=body)
+                assert response.ok, response.text()
+
             step("load", lambda: (pg.goto(base + "/"),
                                   pg.wait_for_function("document.getElementById('live').naturalWidth > 0", timeout=15000),
                                   text("#mode"))[2])
@@ -103,6 +115,7 @@ def main() -> int:
                                                    wait_text("#findres", "Looking for every match"),
                                                    pg.click("body", position={"x": 5, "y": 990}), pg.keyboard.press("Space"),
                                                    pg.wait_for_timeout(600), text("#armst"))[6])
+            step("reset after tour STOP", rearm_sim)
             step("what's on the table", lambda: (press("What's on the table?"), wait_text("#findres", "Naming every"),
                                                  text("#findres")[:60])[2])
             step("save reference", lambda: (press("Save reference"), pg.wait_for_timeout(1500), text("#refinfo"))[2])
@@ -123,6 +136,7 @@ def main() -> int:
             step("tray lift + STOP", lambda: (find(f"the {_unique(pg)} one"), press("Lift its tray", exact=False),
                                               pg.mouse.click(*_corners(pg)[2]), pg.wait_for_timeout(800), press("STOP"),
                                               pg.wait_for_timeout(500), text("#armst"))[6])
+            step("recover and reset simulated lift", rearm_sim)
             step("arm home", lambda: (press("Arm home"), pg.wait_for_timeout(500), text("#armst"))[2])
             step("dog search", lambda: (press("Send the dog to look"), pg.wait_for_timeout(6000),
                                         text("#dogres")[:60])[2])

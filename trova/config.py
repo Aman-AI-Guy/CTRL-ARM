@@ -1,6 +1,8 @@
 """Settings, read from environment variables and an optional .env file (see .env.example)."""
 
+import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,3 +68,17 @@ def load_settings() -> Settings:
         voice_model=os.getenv("TROVA_VOICE_MODEL", "grok-voice-latest"),
         voice=os.getenv("TROVA_VOICE", "eve"),
     )
+
+
+def atomic_json_write(path: Path, value) -> None:
+    """Replace a complete JSON file; a crash before replace leaves the previous version intact."""
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(value, f, indent=2, allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)

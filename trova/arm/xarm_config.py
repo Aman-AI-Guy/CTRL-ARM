@@ -13,21 +13,25 @@ reduced mode at 50 mm/s and 20 deg/s, and the safety boundary (fence) = TROVA_AR
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 
 
 def _nums(s: str, n: int, what: str) -> list[float]:
     v = [float(x) for x in s.split(",")]
-    if len(v) != n:
+    if len(v) != n or not all(math.isfinite(x) for x in v):
         raise SystemExit(f"{what}: give {n} comma-separated numbers")
     return v
 
 
 def read(api) -> dict:
     """Everything the run depends on, as the controller reports it."""
+    code, position = api.get_position()
+    if code != 0 or len(position) < 6 or not all(math.isfinite(v) for v in position):
+        raise SystemExit("Cannot read the current tool position")
     code, red = api.get_reduced_states()
-    return {"position": api.get_position()[1], "tcp_offset": api.tcp_offset, "tcp_load": api.tcp_load,
+    return {"position": position, "tcp_offset": api.tcp_offset, "tcp_load": api.tcp_load,
             "collision_sensitivity": api.collision_sensitivity, "collision_rebound": api.is_collision_rebound,
             "self_collision": api.self_collision_params, "fence_mode": api.is_fence_mode,
             "reduced_states": red if code == 0 else f"code {code}", "mount_direction": api.get_mount_direction()}
@@ -57,6 +61,8 @@ def plan(a, position) -> list[tuple[str, str, tuple]]:
              ("reduced mode on", "set_reduced_mode", (True,)),
              ("safety boundary (fence) on", "set_fence_mode", (True,))]
     if a.payload_kg is not None:
+        if not 0 < a.payload_kg <= 3:
+            raise SystemExit("xArm 5 payload must be finite and 0 < kg <= 3")
         cog = _nums(a.payload_cog, 3, "--payload-cog")
         steps.insert(0, (f"payload {a.payload_kg} kg at {cog} mm", "set_tcp_load", (a.payload_kg, cog)))
     if a.tcp:
@@ -66,12 +72,21 @@ def plan(a, position) -> list[tuple[str, str, tuple]]:
 
 def apply(api, steps) -> None:
     for what, method, args in steps:
-        code = getattr(api, method)(*args)
-        if code != 0:
+        if method == "set_fence_mode":
+            boundary = next(a[0] for _, m, a in steps if m == "set_reduced_tcp_boundary")
+            code, pos = api.get_position()
+            if code != 0 or len(pos) < 3 or not all(math.isfinite(v) for v in pos[:3]) or not all(
+                    boundary[2*i+1] <= v <= boundary[2*i] for i, v in enumerate(pos[:3])):
+                raise SystemExit("Tool outside limits after TCP change (or position unreadable): fence refused, nothing saved")
+        # SDK's high-level sensitivity setter restarts state 0. Its public core command only writes the setting.
+        code = api.core.set_collis_sens(*args) if method == "set_collision_sensitivity" else getattr(api, method)(*args)
+        code = code[0] if isinstance(code, (list, tuple)) and code else code
+        if type(code) is not int or code != 0:
             raise SystemExit(f"FAILED: {what} ({method} returned {code}); nothing after it was set, nothing saved")
         print("set:", what)
     code = api.save_conf()
-    if code != 0:
+    code = code[0] if isinstance(code, (list, tuple)) and code else code
+    if type(code) is not int or code != 0:
         raise SystemExit(f"save_conf returned {code}: settings are active but will be lost on reboot")
     print("saved on the controller")
 
@@ -99,7 +114,7 @@ def main(argv=None, api_factory=None, ask=input) -> None:
         if not a.apply:
             return
         code, state = api.get_state()
-        if code != 0 or state == 1:
+        if code != 0 or state not in (0, 2, 4):
             raise SystemExit("the arm is moving (or its state cannot be read): settings refused")
         steps = plan(a, before["position"])
         print("\nWill set:\n  " + "\n  ".join(s[0] for s in steps))

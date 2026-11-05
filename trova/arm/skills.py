@@ -33,7 +33,9 @@ class TrayParams:
     @classmethod
     def from_env(cls) -> "TrayParams":
         ax, ay = (float(v) for v in os.getenv("TROVA_TRAY_APPROACH", "0,1").split(","))
-        n = math.hypot(ax, ay) or 1.0
+        n = math.hypot(ax, ay)
+        if not math.isfinite(n) or n == 0:
+            raise ValueError("TROVA_TRAY_APPROACH must be a finite non-zero vector")
         return cls(z_slot=float(os.getenv("TROVA_TRAY_Z_SLOT_MM", "30")),
                    insert=float(os.getenv("TROVA_TRAY_INSERT_MM", "40")),
                    lift=float(os.getenv("TROVA_TRAY_LIFT_MM", "40")),

@@ -14,6 +14,7 @@ Each robot family only implements CartesianBackend (connect, move, stop, tcp, fr
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -133,6 +134,8 @@ class CartesianArm(ArmDriver):
                 return False
         self.state, self.last_error = "moving", None
         try:
+            distance = math.dist(self.backend.tcp_mm(), (x, y, z))
+            timeout = max(self.timeout, distance / self.speed * 1.5 + 5)
             self.backend.move_linear(x, y, z, self.speed)
             if self._stop.is_set():
                 return self._halted()
@@ -145,7 +148,7 @@ class CartesianArm(ArmDriver):
                 seen = seen or moving
                 if not moving and (seen or time.time() - t0 > START_GRACE_S):   # some arms start late
                     break
-                if time.time() - t0 > self.timeout:
+                if time.time() - t0 > timeout:
                     self.backend.stop()
                     self.state, self.last_error = "error", "move timed out"
                     return False
@@ -158,8 +161,12 @@ class CartesianArm(ArmDriver):
         try:   # a robot in local mode or in a protective stop ignores the move silently: say so
             tx, ty, tz = self.backend.tcp_mm()
             off = ((tx - x) ** 2 + (ty - y) ** 2 + (tz - z) ** 2) ** 0.5
-        except Exception:  # noqa: BLE001
-            off = 0.0
+        except Exception as e:  # noqa: BLE001
+            self.state, self.last_error = "error", f"Cannot verify arrival: {e}"
+            return False
+        if not math.isfinite(off):
+            self.state, self.last_error = "error", "Cannot verify arrival: non-finite pose"
+            return False
         if off > 10.0:
             self.state, self.last_error = "error", (f"stopped {off:.0f} mm from the target: is the robot in remote mode, "
                                                     "or in a protective stop?")
@@ -224,6 +231,11 @@ class CartesianArm(ArmDriver):
                 return False
         self.state, self.last_error = "moving", None
         try:
+            current = self.backend.joints()
+            if len(current) != len(q) or not all(math.isfinite(v) for v in current + q):
+                raise ValueError("Cannot determine joint distance")
+            distance = max(abs(a - b) for a, b in zip(current, q))
+            timeout = max(self.timeout, distance / self.joint_speed * 1.5 + 5)
             self.backend.move_joints(q, self.joint_speed)
             if self._stop.is_set():
                 return self._halted()
@@ -235,7 +247,7 @@ class CartesianArm(ArmDriver):
                 seen = seen or moving
                 if not moving and (seen or time.time() - t0 > START_GRACE_S):
                     break
-                if time.time() - t0 > self.timeout:
+                if time.time() - t0 > timeout:
                     self.backend.stop()
                     self.state, self.last_error = "error", "joint move timed out"
                     return False

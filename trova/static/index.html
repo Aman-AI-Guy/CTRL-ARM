@@ -225,6 +225,7 @@ async function doCheck() {
 }
 function showCheck(d) {
   const el = $('checkres'); el.className = 'result show'; const r = d.result;
+  el.dataset.checkId = d.event_id; el.dataset.lineClear = String(r.line_clear);
   {
     let h = `<div class="big" style="color:var(${r.line_clear ? '--ok' : '--bad'})">${r.line_clear ? 'Line clear' : 'NOT clear: ' + r.changes.length + ' change(s)'}</div><div>${esc(r.summary)}</div>`;
     h += '<ul class="changes">' + r.changes.map(c => `<li class="risk-${esc(c.risk)}"><b>C${c.id} ${esc(c.kind)}</b> ${esc(c.label)}: ${esc(c.explanation)}</li>`).join('') + '</ul>';
@@ -439,10 +440,10 @@ function showDog() {
 async function signoff(decision) {
   const op = $('operator').value.trim(); if (!op) return alert('Operator name first');
   let note = '';
-  if (decision === 'approve' && S && S.last_check && !S.last_check.result.line_clear) {   // GMP: a deviation needs a reason
+  if (decision === 'approve' && $('checkres').dataset.lineClear === 'false') {   // GMP: a deviation needs a reason
     note = prompt('The line is NOT clear. Reason for approving it anyway (goes into the record):'); if (!note) return;
   }
-  try { await sendForm('/api/signoff', {operator: op, decision, note}); } catch (e) {}
+  try { await sendForm('/api/signoff', {check_id: $('checkres').dataset.checkId || '', operator: op, decision, note}); } catch (e) {}
 }
 async function setSource() { await sendForm('/api/source', {spec: $('src').value}); }
 async function uploadScene() { const f = new FormData(); f.append('photo', $('scene').files[0]); await call('/api/upload_scene', {method: 'POST', body: f}); refresh(); }
