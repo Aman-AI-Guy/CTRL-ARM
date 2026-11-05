@@ -41,6 +41,21 @@ def prepare_dataset(session, destination, orientation):
     images, masks = destination / 'images', destination / 'masks'
     images.mkdir(parents=True)
     masks.mkdir()
+    if session.get('reconstruction_only'):
+        accepted = [v for v in session['views'] if v.get('reconstruction_accepted') and v.get('orientation') == orientation]
+        if len(accepted)<3: raise ValueError('At least three recorded views of the same orientation are required.')
+        if len({v['sha256'] for v in accepted}) != len(accepted):
+            raise ValueError('Recorded dataset contains duplicate images.')
+        for view in accepted:
+            data=Path(view['image']).read_bytes()
+            if hashlib.sha256(data).hexdigest()!=view['sha256']:raise ValueError('A recorded image changed since import.')
+            frame=cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
+            if frame is None:raise ValueError('Invalid recorded JPEG.')
+            name=view['source_name']
+            if Path(name).name!=name:raise ValueError('Invalid recorded image name.')
+            (images/name).write_bytes(data)
+        (destination/'captures.json').write_text(json.dumps(accepted,indent=2))
+        return accepted
     accepted = [v for v in session['views'] if v.get('accepted') and v.get('orientation') == orientation]
     if len(accepted) < 3:
         raise ValueError('At least three accepted overlapping views of one object orientation are required.')
@@ -81,7 +96,9 @@ class ReconstructionJobs:
     def __init__(self, root, executable=None, popen=None, on_done=None):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.executable = executable or shutil.which('colmap')
+        from .scan3d.executables import discover
+        self.discovery = discover(executable)
+        self.executable = self.discovery['path']
         self.popen = popen or subprocess.Popen
         self.jobs = {}
         self.lock = threading.Lock()
@@ -101,8 +118,8 @@ class ReconstructionJobs:
 
     def capabilities(self):
         return {'available': bool(self.executable), 'backend': 'COLMAP',
-                'reason': 'Local COLMAP executable found.' if self.executable else
-                          'COLMAP is not installed. Acquisition and dataset export are available.',
+                'reason': self.discovery['reason'] if self.executable else 'COLMAP is not installed or executable validation failed. Acquisition and dataset export are available.',
+                'open3d_postprocessing': __import__('importlib.util',fromlist=['find_spec']).find_spec('open3d') is not None,
                 'metric_scale_claimed': False, 'cross_orientation_registration': False,
                 'texturing': 'attempted only if the installed COLMAP advertises mesh_texturer'}
 
@@ -142,6 +159,15 @@ class ReconstructionJobs:
     def _command(self, job, args, timeout=600):
         if job['_cancel'].is_set():
             raise InterruptedError('Reconstruction cancelled.')
+        args = list(args)
+        if self.discovery.get('legacy_sift_flags'):
+            translations={'--FeatureExtraction.use_gpu':'--SiftExtraction.use_gpu',
+                          '--FeatureExtraction.max_image_size':'--SiftExtraction.max_image_size',
+                          '--FeatureMatching.use_gpu':'--SiftMatching.use_gpu'}
+            args=[translations.get(str(value),value) for value in args]
+        # Sparse CPU extraction is portable; dense PatchMatch still reports unsupported CUDA explicitly.
+        for index,value in enumerate(args[:-1]):
+            if str(value).endswith('.use_gpu'): args[index+1]=os.getenv('TROVA_COLMAP_USE_GPU','0')
         job['stage'] = args[0]
         with (job['_folder'] / 'colmap.log').open('ab') as log:
             process = self.popen([self.executable, *map(str, args)], stdout=log, stderr=log,
@@ -170,6 +196,25 @@ class ReconstructionJobs:
             job['status'] = 'running'
             views = prepare_dataset(session, folder / 'dataset', job['orientation'])
             job['quality']['input_images'] = len(views)
+            if session.get('reconstruction_only'):
+                if session.get('postprocessing_replay'):
+                    from .scan3d.benchmark import replay
+                    result = replay(folder,cancel=job['_cancel'])
+                else:
+                    if not self.executable:raise RuntimeError(self.capabilities()['reason'])
+                    from .scan3d.reconstruct_pipeline import reconstruct
+                    result = reconstruct(folder,folder/'dataset/images',lambda args:self._command(job,args,timeout=3600),job['_cancel'])
+                if job['_cancel'].is_set():raise InterruptedError('Reconstruction cancelled.')
+                job.update(status='completed',reason='Recorded dataset processed; see provenance and rerun flags.',
+                           reconstructed=True,provenance=result['provenance'],benchmark=result,textured_mesh=False)
+                job['quality'].update(registered_images=result['registered_images'],
+                    metric_scale_claimed=True, metric_scale_source='triangulated measured 39 mm ArUco markers',
+                    estimated_object_dimensions_mm=result['estimated_object_dimensions_mm'],
+                    mesh_bbox_extent_mm=result['mesh_bbox_extent_mm'],
+                    full_reconstruction_rerun=result['full_reconstruction_rerun'])
+                for path in [*folder.glob('mesh/*'),*folder.glob('renders/*'),*folder.glob('benchmark.json')]:
+                    if path.is_file():job['artifacts'][path.name]=str(path.relative_to(folder))
+                return
             if not self.executable:
                 raise RuntimeError(self.capabilities()['reason'])
             images, masks = folder / 'dataset/images', folder / 'dataset/masks'

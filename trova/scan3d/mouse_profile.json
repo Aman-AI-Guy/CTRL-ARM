@@ -1,0 +1,50 @@
+{
+  "settings": {
+    "camera_model": "SIMPLE_RADIAL",
+    "matcher": "exhaustive",
+    "sequential_overlap": 10,
+    "mapper": "mapper",
+    "sift_max_image_size": 1640,
+    "max_num_features": 8192,
+    "dense_max_image_size": 1000,
+    "patchmatch_iterations": 5,
+    "patchmatch_window_radius": 5,
+    "patchmatch_window_step": 1,
+    "patchmatch_num_samples": 15,
+    "patchmatch_src_images": 10,
+    "geom_consistency": 1,
+    "fusion_min_num_pixels": 5,
+    "max_images": 60
+  },
+  "mesh_settings": {
+    "plane_distance_mm": 2.0,
+    "table_margin_mm": 3.0,
+    "crop_radius_mm": 150,
+    "max_height_mm": 300,
+    "voxel_mm": 1.0,
+    "outlier_neighbors": 20,
+    "outlier_std": 2.0,
+    "dbscan_eps_mm": 4.0,
+    "dbscan_min_points": 10,
+    "pick": "center",
+    "center_radius_mm": 60,
+    "poisson_depth": 9,
+    "density_trim_quantile": 0.03,
+    "target_triangles": 100000,
+    "size_percentile": 0.5,
+    "size_skip_bottom_frac": 0.2,
+    "render_px": 800,
+    "table_colour_sigma": 3.0,
+    "table_colour_max_drop": 0.6
+  },
+  "aruco": {
+    "dictionary": "DICT_ARUCO_MIP_36h12",
+    "marker_mm": 39.0,
+    "ids": [
+      2,
+      3,
+      4
+    ]
+  },
+  "provenance": "Retained full mouse benchmark parameters; marker side is historical operator measurement, not a current hardware calibration."
+}

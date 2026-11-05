@@ -9,7 +9,7 @@ from .scan3d.evidence import workspace, catalog, calibration_replay
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['audit', 'calibration-replay', 'orbit-replay'])
+    parser.add_argument('action', choices=['audit', 'calibration-replay', 'orbit-replay', 'mouse-postprocess'])
     parser.add_argument('--workspace')
     parser.add_argument('--output')
     args = parser.parse_args()
@@ -18,6 +18,12 @@ def main():
         result = catalog(root)
     elif args.action == 'calibration-replay':
         result = calibration_replay(root)
+    elif args.action == 'mouse-postprocess':
+        if not args.output: parser.error('--output must name a new output folder for mouse-postprocess')
+        from .scan3d.benchmark import replay
+        result = replay(args.output,root)
+        print(json.dumps(result,indent=2))
+        return
     else:
         from .scan3d.orbit_planner import recorded_context, plan_orbit
         retained,context=recorded_context(root)

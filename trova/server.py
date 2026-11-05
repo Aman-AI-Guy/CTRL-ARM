@@ -2465,6 +2465,20 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         except (KeyError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from None
 
+    @app.post('/api/reconstruction/replay/mouse')
+    def api_reconstruction_replay_mouse():
+        if not st.scans.last:
+            raise HTTPException(400,'Import the recorded mouse dataset first.')
+        session=st.scans._session(st.scans.last)
+        if session.get('recorded_benchmark')!='mouse-60':
+            raise HTTPException(400,'This replay requires the retained mouse dataset.')
+        if session['orientation']!='as_found':
+            raise HTTPException(400,'Recorded orientations must remain separate; select the original group.')
+        try:
+            return st.reconstruction.start(dict(session,postprocessing_replay=True))
+        except RuntimeError as exc:
+            raise HTTPException(409,str(exc)) from None
+
     @app.get("/api/reconstruction/{job_id}")
     def api_reconstruction_status(job_id: str):
         try:

@@ -64,3 +64,31 @@ Reorientation keeps separate groups. The orbit adapter requires valid active cal
 measured object size/TCP, telemetry/model agreement and operator model qualification.
 View ranking uses camera-angle novelty, measured-plane overlap and joint travel;
 newly visible mesh surface area is unknown.
+
+## D — real reconstruction and verified replay
+
+`TROVA_COLMAP` accepts an executable or installation directory; otherwise PATH is searched.
+Windows drive paths are translated to `/mnt/<drive>` on Linux/WSL and validated with `-h`.
+COLMAP 3 uses legacy Sift flags; 4 uses Feature flags. Sparse GPU use is optional through
+`TROVA_COLMAP_USE_GPU=1`; dense PatchMatch CUDA failures remain visible. No Windows
+installation path is baked into source. COLMAP is absent on this workstation.
+
+Original feature/matching/SfM/dense algorithms, triangulated ArUco scale, table removal,
+clustering, robust dimensions, Poisson, decimation, exports and software rendering are
+reused. The unsafe assumed-camera-distance metric fallback was removed.
+Jobs distinguish normal reconstruction from explicitly requested retained-data replay.
+Cancellation kills COLMAP processes; native Open3D stages finish before cancellation
+is acknowledged, and cancelled work is never reported as a completed reconstruction.
+
+Executed `python -m trova.integration_m5 mouse-postprocess --output data/m5/mouse-postprocessing`:
+60 retained registered camera poses, 10,246 sparse points, 839,668 retained dense points;
+recomputed marker scale 53.4097165 mm/unit, robust object size **96.3×55.6×37.4 mm**;
+new mesh bbox extent **104.3349×66.6040×38.6206 mm**. Runtime 10.35 s.
+New PLY/STL/GLB and four PNG renders were written under that new output directory.
+Historical robust size was 96.3×55.7×37.4 and historical mesh report 106.1×66.2×38.6;
+Poisson/RANSAC/version differences change bounding extents. Reported ruler size 98×58×35
+was not remeasured. Mesh vertex colours are not UV textures or parametric CAD.
+
+This validates loading the retained 60-image camera model, redetecting markers in the
+original JPEGs and actually rerunning dense-cloud postprocessing, not a new COLMAP
+feature/SfM/dense run. The latter cannot run until COLMAP is installed.
