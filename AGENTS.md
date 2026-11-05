@@ -32,7 +32,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Object proposals (empty-table difference, lighting normalisation, occlusion) | Done, tested | `proposals.py` | Tune `TROVA_BLOB_THRESH` on the real table |
 | Find by words / photo, clarifying question, direct-box fallback | Done, tested (mock + request format) | `finder.py` | Needs live key to verify accuracy |
 | What changed (match + 2-of-3 persistence + Grok verify + naive baseline) | Done, tested | `changes.py` | |
-| Line-clearance record + sign-off (HTML) | Done | `server.py` `/api/report` | |
+| Line-clearance record + sign-off (HTML) | Done | `server.py` `/api/report` | Sign-off requires the event id of the reviewed check and cannot replace a previous decision |
 | Cobot drivers UR / Elite (sockets), xArm (SDK), safety box, stop-and-hold | Done, tested vs fakes | `arm/`, `server.py`, `safety.py`, `tests/test_motion_safety.py`, `tests/test_safety_review.py` | **The team has the xArm 5 (XF1203, 700 mm reach, 3 kg).** Bring-up remains staff-guided. Every physical boot is disarmed; explicit authenticated rearming is required. xArm construction never enables/recovers the controller, STOP only requests stop state and checks SDK results. `TROVA_ARM_TCP_MM` sets pointer length. Software reset uses the current STOP nonce and never moves or clears a lift interlock. Central authorization guards home/camera/room/watch motion; Cartesian limits + home are required and unavailable FK refuses joint movement. `move=false` never repositions. Only explicit built-in simulators bypass hardware startup/authentication requirements. Bring-up reads the actual fence flag and tests the same checked STOP as the driver; Ctrl+C requests STOP. Move deadlines follow distance/speed; unreadable arrival poses fail closed. xArm STOP bypasses the SDK motion lock and each move uses the current yaw. No real hardware validation yet |
 | Calibration (ArUco, clicks, arm-tip clicks) | Done, tested | `calibration.py`, `server.py` | Real arm refuses to move until calibrated with the arm. Arm points (`st.arm_points`) are never mixed with table clicks; robot-frame fits require at least five points and report maximum per-point error; duplicate / collinear points and fits worse than 15 mm are rejected (the bad point is dropped); the image size is stored and an uploaded photo, recorded source, another resolution or survey pose blocks the arm. Camera/calibration changes discard pending targets; normal pending moves expire after 60 s. Corrupt taught poses fail loudly and saves are atomic |
 | Grok Voice (realtime, confirm-before-move, stop word) | Done; config/token tested | `voice.py`, `static/voice.js` | Not yet heard live |
@@ -71,7 +71,7 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 1. **Grok never moves the arm.** Grok returns structured JSON; plain code validates it, converts pixels to mm and
    calls the ArmDriver. Every move passes the safety box (`TROVA_ARM_LIMITS`). Physical taught-grid backends also require forward kinematics for their joint targets.
 2. **STOP never waits for a model**: UI button, space bar, Escape, and the stop word in the live voice transcript all
-   call `/api/arm/stop` directly. Stop = hold position, never torque off. The independent software STOP latch and
+   call `/api/arm/stop` directly. Its dedicated worker capacity remains available when model-bound HTTP workers are full. Stop = hold position, never torque off. The independent software STOP latch and
    request cancellation epoch are set before driver STOP, without waiting for arm/model locks. Only explicit
    operator `/api/arm/reset` calls `arm.ready()`; it checks quiescence, configuration and operator confirmations,
    performs no controller recovery/motion, and preserves interrupted lifts. Every physical boot is disarmed;
@@ -89,7 +89,7 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
    without a key. New Grok call = new schema + prompt + mock + test.
 4. **English and Italian**: prompts answer in the language of the request; reports follow `TROVA_LANG`.
 5. **Everything is logged** to `data/events.jsonl` with saved images in `data/runs/` (traceability for the jury).
-6. `data/` and `.env` are never committed. On the venue Wi-Fi set `TROVA_TOKEN` (the API then needs `?token=` once per device). Copy the final test set to `eval/data/` before the deadline.
+6. `data/` and `.env` are never committed. State-changing browser requests must have the same Origin/Referer as the server; CLI requests without browser headers remain supported. Uploads are capped at 10 MiB. On the venue Wi-Fi set `TROVA_TOKEN` (the API then needs `?token=` once per device). Copy the final test set to `eval/data/` before the deadline.
 7. **Request models (pydantic) live at module level in `server.py`**, never inside `create_app`: FastAPI cannot
    resolve them under postponed annotations (a test enforces this).
 
@@ -115,7 +115,7 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 
 `GET /` UI · `GET /api/state` · `GET /api/frame.jpg` · `GET /api/log`
 Find: `POST /api/find` (text, photo, move) · `POST /api/clarify` · `POST /api/arm/point_last`
-Changes: `POST /api/reference` · `POST /api/changes` · `POST /api/signoff` · `GET /api/report`
+Changes: `POST /api/reference` · `POST /api/changes` · `POST /api/signoff` (check_id, operator, decision, note; stale/repeated decisions 409) · `GET /api/report`
 Setup: `POST /api/background` · `/api/source` · `/api/source/step` · `/api/upload_scene` · `/api/upload_scene/clear` · `/api/tune`
 Calibration: `POST /api/calibration/aruco` · `/click` · `/arm_click` · `/marker_from_arm` · `/reset` · `/markers`
 Arm: `POST /api/arm/stop` · `/home` · `/point` · `/freedrive` · `/clear_errors` · `/teach` · `/teach_home` · `/compliant`
@@ -174,6 +174,8 @@ Dog: `POST /api/dog/search` · `/api/dog/stop` · Demo: `POST /api/demo/tamper` 
 - Change verification sends at most 12 candidates to Grok; more means "the camera probably moved" (not clear).
 
 ## Changelog (newest first)
+
+- 2026-11-05 Review A HTTP fixes: dedicated STOP capacity, finite numeric requests and targets, bounded frame width/jury counts/uploads, complete label coordinates and byte token comparisons; same-origin browser mutations; sign-off bound to the displayed check id and single-use; clarifying questions cannot be judged as completed finds or saved as absent eval cases. Offline regressions added.
 
 - 2026-11-05 Review A target/calibration fixes: bind pending finds/tours/lifts to view identity and expiry, clear targets on view changes, refuse first-run auto-homing and uploaded ArUco calibration; require five robot-frame points and maximum fit error, bind source/survey pose and atomically save taught poses; enforce grid safety/calibration/FK gates and validate tray paths before the durable marker. Offline regressions added.
 

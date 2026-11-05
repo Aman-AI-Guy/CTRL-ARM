@@ -343,7 +343,7 @@ def test_bad_requests_get_clean_answers(tmp_path, monkeypatch):
     c.post("/api/calibration/reset")
     assert c.post("/api/arm/point", json={"u": 100, "v": 100}).status_code == 200   # default calibration rebuilt
     c.post("/api/background", data={"mode": "capture"})
-    c.post("/api/find", data={"text": "the red one", "move": "false"})
+    c.post("/api/find", data={"text": f"the {_unique_color(c)} one", "move": "false"})
     assert c.post("/api/judge", json={"kind": "find", "correct": True}).status_code == 200
     assert c.post("/api/judge", json={"kind": "find", "correct": True}).status_code == 409   # double click
     assert c.get("/api/state").json()["metrics"]["find_judged"] == 1
@@ -579,7 +579,7 @@ def test_history_rows_csv_and_tamper_evidence(tmp_path, monkeypatch):
     c.post("/api/reference", data={"describe": "false"})
     st.source.table.tamper("add")
     c.post("/api/changes")
-    c.post("/api/signoff", data={"operator": "Ana Rossi", "decision": "reject"})
+    c.post("/api/signoff", data={"check_id": app.state.trova.last_check["event_id"], "operator": "Ana Rossi", "decision": "reject"})
     c.post("/api/arm/stop")
     assert c.get("/history").status_code == 200
     d = c.get("/api/history").json()
@@ -615,10 +615,11 @@ def test_approving_a_not_clear_line_needs_a_reason(tmp_path, monkeypatch):
     c.post("/api/reference", data={"describe": "false"})
     app.state.trova.source.table.tamper("add")
     assert not c.post("/api/changes").json()["result"]["line_clear"]
-    assert c.post("/api/signoff", data={"operator": "Ana", "decision": "approve"}).status_code == 400
-    assert c.post("/api/signoff", data={"operator": "Ana", "decision": "maybe"}).status_code == 400
-    assert c.post("/api/signoff", data={"operator": "Ana", "decision": "reject"}).status_code == 200
-    so = c.post("/api/signoff", data={"operator": "Ana", "decision": "approve", "note": "spare pen, QA informed"}).json()
+    assert c.post("/api/signoff", data={"check_id": app.state.trova.last_check["event_id"], "operator": "Ana", "decision": "approve"}).status_code == 400
+    assert c.post("/api/signoff", data={"check_id": app.state.trova.last_check["event_id"], "operator": "Ana", "decision": "maybe"}).status_code == 400
+    assert c.post("/api/signoff", data={"check_id": app.state.trova.last_check["event_id"], "operator": "Ana", "decision": "reject"}).status_code == 200
+    c.post("/api/changes")  # a signed decision cannot be overwritten; review a new check
+    so = c.post("/api/signoff", data={"check_id": app.state.trova.last_check["event_id"], "operator": "Ana", "decision": "approve", "note": "spare pen, QA informed"}).json()
     assert so["note"] == "spare pen, QA informed" and "spare pen" in c.get("/api/report").text
 
 

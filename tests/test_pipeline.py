@@ -184,7 +184,8 @@ def test_server_end_to_end(tmp_path, monkeypatch):
 
     from trova.config import load_settings
     from trova.server import create_app
-    c = TestClient(create_app(load_settings()))
+    app = create_app(load_settings())
+    c = TestClient(app)
     assert c.get("/").status_code == 200
     assert c.get("/api/frame.jpg").headers["content-type"] == "image/jpeg"
     assert c.post("/api/background", data={"mode": "capture"}).json()["background"]
@@ -201,7 +202,7 @@ def test_server_end_to_end(tmp_path, monkeypatch):
     c.post("/api/demo/tamper", data={"kind": "add"})
     chk = c.post("/api/changes").json()
     assert not chk["result"]["line_clear"] and chk["result"]["changes"][0]["kind"] == "added"
-    assert c.post("/api/signoff", data={"operator": "Test", "decision": "approve", "note": "known extra item"}).status_code == 200
+    assert c.post("/api/signoff", data={"check_id": app.state.trova.last_check["event_id"], "operator": "Test", "decision": "approve", "note": "known extra item"}).status_code == 200
     rep = c.get("/api/report").text
     assert "Line clearance record" in rep and "Signed off by Test" in rep
     assert c.post("/api/arm/stop").status_code == 200
@@ -509,7 +510,7 @@ def test_pdf_clearance_record(tmp_path, monkeypatch):
     c.post("/api/reference")
     c.post("/api/demo/tamper", data={"kind": "add"})
     chk = c.post("/api/changes").json()
-    c.post("/api/signoff", data={"operator": "M. Rossi", "decision": "reject"})
+    c.post("/api/signoff", data={"check_id": app.state.trova.last_check["event_id"], "operator": "M. Rossi", "decision": "reject"})
     r = c.get("/api/report.pdf")
     assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
     assert r.content[:4] == b"%PDF" and len(r.content) > 5000                # images embedded

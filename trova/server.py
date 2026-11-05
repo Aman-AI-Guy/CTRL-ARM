@@ -8,19 +8,23 @@ from __future__ import annotations
 import hmac
 import html
 import json
+import math
 import os
 import threading
 import time
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
+from urllib.parse import urlsplit
 
+import anyio
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, FiniteFloat
 
 from . import changes as chg
 from .arm import CartesianArm, FakeCartesian, FakeJointBackend, SimArm, TaughtGridArm, load_poses, make_arm, save_pose
@@ -65,6 +69,16 @@ class CameraError(RuntimeError):
     """No usable picture right now (camera unplugged or frozen): HTTP 503, the UI keeps polling."""
 
 
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def read_upload(photo: UploadFile) -> bytes:
+    data = photo.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "Photo exceeds the 10 MiB limit")
+    return data
+
+
 def decode_upload(data: bytes) -> np.ndarray:
     if not data:
         raise HTTPException(400, "The photo is empty")
@@ -83,49 +97,49 @@ def decode_upload(data: bytes) -> np.ndarray:
 
 # Request bodies (module level: FastAPI must resolve them under postponed annotations)
 class Tune(BaseModel):
-    thresh: float | None = None
-    min_area_frac: float | None = None
+    thresh: FiniteFloat | None = None
+    min_area_frac: FiniteFloat | None = None
 
 
 class UV(BaseModel):
-    u: float
-    v: float
+    u: FiniteFloat
+    v: FiniteFloat
 
 
 class ClickPoint(BaseModel):
-    u: float
-    v: float
-    x_mm: float
-    y_mm: float
+    u: FiniteFloat
+    v: FiniteFloat
+    x_mm: FiniteFloat
+    y_mm: FiniteFloat
 
 
 class Point(BaseModel):
-    x_mm: float | None = None
-    y_mm: float | None = None
-    u: float | None = None
-    v: float | None = None
+    x_mm: FiniteFloat | None = None
+    y_mm: FiniteFloat | None = None
+    u: FiniteFloat | None = None
+    v: FiniteFloat | None = None
 
 
 class Judge(BaseModel):
     kind: str = "find"
     correct: bool = True
     cause: str = ""          # e.g. "arm_missed": Grok was right but the arm pointed at the wrong spot
-    false_alarms: int = 0
-    missed: int = 0
+    false_alarms: int = Field(default=0, ge=0)
+    missed: int = Field(default=0, ge=0)
     note: str = ""
 
 
 class Label(BaseModel):
-    u: float | None = None
-    v: float | None = None
+    u: FiniteFloat | None = None
+    v: FiniteFloat | None = None
     absent: bool = False
 
 
 class LiftReq(BaseModel):
-    place_u: float
-    place_v: float
-    pick_u: float | None = None     # default: the object of the last find
-    pick_v: float | None = None
+    place_u: FiniteFloat
+    place_v: FiniteFloat
+    pick_u: FiniteFloat | None = None     # default: the object of the last find
+    pick_v: FiniteFloat | None = None
 
 
 class WatchReq(BaseModel):
@@ -142,9 +156,9 @@ class Approach(BaseModel):
     """First supervised run: confirm exactly the shown stage and target."""
     stage: int
     confirm: str
-    x_mm: float
-    y_mm: float
-    speed_mm_s: float | None = None
+    x_mm: FiniteFloat
+    y_mm: FiniteFloat
+    speed_mm_s: FiniteFloat | None = None
 
 
 class StopReset(BaseModel):
@@ -507,6 +521,16 @@ class State:
     def start_arm(self, fn, *args, since: float | None = None, job: str = "point",
                   pixels: bool = True, ticket=None, wait: bool = False, guard=None) -> bool:
         """Admit one guarded motion; blocked/cancelled commands raise ArmBusy (HTTP 409)."""
+        def finite(value):
+            if isinstance(value, (int, float)):
+                return math.isfinite(value)
+            if isinstance(value, (tuple, list)):
+                return all(finite(v) for v in value)
+            if isinstance(value, dict):
+                return all(finite(v) for v in value.values())
+            return True
+        if not finite(args):
+            raise ArmBusy("Motion coordinates must be finite")
         if self.first_run and job not in ("home", "approach"):
             raise ArmBusy("First supervised run mode: only the two-stage approach and Arm home may move the arm")
         ticket = self.motion_ticket(ticket)
@@ -739,8 +763,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     st = State(settings or load_settings())
     app = FastAPI(title="Trova")
     app.state.trova = st
+    stop_limiter = anyio.CapacityLimiter(1)
     app.mount("/files", StaticFiles(directory=str(st.s.data_dir)), name="files")
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+    @app.middleware("http")
+    async def _same_origin(request, call_next):
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin") or request.headers.get("referer")
+            def identity(url):
+                parsed = urlsplit(url)
+                if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+                    raise ValueError("Invalid browser origin")
+                return parsed.scheme, parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
+            try:
+                foreign = origin is not None and identity(origin) != identity(str(request.url))
+            except ValueError:
+                foreign = True
+            if foreign or request.headers.get("sec-fetch-site") == "cross-site":
+                return JSONResponse({"error": "Cross-origin state-changing request refused"}, 403)
+        return await call_next(request)
+
+    @app.exception_handler(RequestValidationError)
+    async def _invalid_request(request, exc):
+        # Validation inputs can contain NaN/Infinity; do not echo those into a JSON error response.
+        return JSONResponse({"detail": [{k: e[k] for k in ("loc", "msg", "type")} for e in exc.errors()]}, 422)
 
     @app.middleware("http")
     async def _motion_request_ticket(request, call_next):
@@ -757,7 +804,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             path = request.url.path
             given = (request.query_params.get("token") or request.headers.get("x-trova-token")
                      or request.cookies.get("trova_token") or "")
-            if path.startswith(("/api/", "/files/")) and not hmac.compare_digest(given, token):
+            if path.startswith(("/api/", "/files/")) and not hmac.compare_digest(given.encode(), token.encode()):
                 return JSONResponse({"error": "Open Trova with the link that ends in ?token=... (TROVA_TOKEN)"}, 401)
             resp = await call_next(request)
             if request.query_params.get("token") == token:
@@ -794,7 +841,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ live view
     @app.get("/api/frame.jpg")
-    def frame_jpg(boxes: int = 1, max_w: int = 1280):
+    def frame_jpg(boxes: int = 1, max_w: int = Query(1280, ge=1, le=4096)):
         f = st.frame()
         img = f.copy()
         survey = st.at_survey()
@@ -926,7 +973,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/find")
     def api_find(text: str = Form(""), photo: UploadFile | None = File(None), move: bool = Form(True)):
-        q = decode_upload(photo.file.read()) if photo is not None and photo.filename else None
+        q = decode_upload(read_upload(photo)) if photo is not None and photo.filename else None
         if not text.strip() and q is None:
             raise HTTPException(400, "Say what to find, or send a photo")
         try:
@@ -1069,19 +1116,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return st.last_check
 
     @app.post("/api/signoff")
-    def api_signoff(operator: str = Form(...), decision: str = Form("approve"), note: str = Form("")):
-        if not st.last_check:
-            raise HTTPException(400, "Run a check first")
-        if decision not in ("approve", "reject"):
-            raise HTTPException(400, "decision must be approve or reject")
-        if not operator.strip():
-            raise HTTPException(400, "Operator name first")
-        if decision == "approve" and not st.last_check["result"]["line_clear"] and not note.strip():
-            raise HTTPException(400, "The line is NOT clear: approving it anyway needs a written reason")
-        so = {"operator": operator.strip(), "decision": decision, "note": note.strip(), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
-        st.last_check["signoff"] = so
-        st.audit.event("signoff", check=st.last_check["event_id"], **so)
-        return so
+    def api_signoff(check_id: str = Form(...), operator: str = Form(...), decision: str = Form("approve"), note: str = Form("")):
+        with st.lock:
+            if not st.last_check:
+                raise HTTPException(400, "Run a check first")
+            if check_id != st.last_check["event_id"]:
+                raise HTTPException(409, "A different check is current: review it before signing")
+            if st.last_check.get("signoff"):
+                raise HTTPException(409, "This check has already been signed")
+            if decision not in ("approve", "reject"):
+                raise HTTPException(400, "decision must be approve or reject")
+            if not operator.strip():
+                raise HTTPException(400, "Operator name first")
+            if decision == "approve" and not st.last_check["result"]["line_clear"] and not note.strip():
+                raise HTTPException(400, "The line is NOT clear: approving it anyway needs a written reason")
+            so = {"operator": operator.strip(), "decision": decision, "note": note.strip(), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+            st.last_check["signoff"] = so
+            st.audit.event("signoff", check=st.last_check["event_id"], **so)
+            return so
 
     @app.get("/api/report", response_class=HTMLResponse)
     def api_report():
@@ -1193,7 +1245,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     def api_upload_scene(photo: UploadFile = File(...)):
         with st.lock:
             st.invalidate_targets()
-            st.override = decode_upload(photo.file.read())
+            st.override = decode_upload(read_upload(photo))
             st.background, st.background_path = None, None
             st.audit.event("upload_scene", size=list(st.override.shape[:2]))
             return {"override": True}
@@ -1384,13 +1436,20 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         if p.u is not None and p.v is not None:
             if st.calib is None:
                 st.frame()                 # right after a reset: rebuilds the default calibration
-            return st.calib.pixel_to_table(p.u, p.v)
-        if p.x_mm is None or p.y_mm is None:
+            xy = st.calib.pixel_to_table(p.u, p.v)
+        elif p.x_mm is None or p.y_mm is None:
             raise HTTPException(400, "Give x_mm,y_mm or u,v")
-        return p.x_mm, p.y_mm
+        else:
+            xy = (p.x_mm, p.y_mm)
+        if not all(math.isfinite(v) for v in xy):
+            raise HTTPException(400, "Coordinates must be finite")
+        return xy
 
     @app.post("/api/arm/stop")
-    def api_arm_stop():
+    async def api_arm_stop():
+        return await anyio.to_thread.run_sync(_stop_response, limiter=stop_limiter)
+
+    def _stop_response():
         try:
             st.stop_arm()
         except Exception as e:  # software latch/cancellation remain set even when the driver cannot acknowledge STOP
@@ -1442,6 +1501,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 raise HTTPException(400, f"Arm '{st.arm.name}' has no waypoint support")
             if st.arm_blocked():
                 return JSONResponse({"error": st.arm_blocked(), "blocked": True}, 409)
+            if (r.pick_u is None) != (r.pick_v is None):
+                raise HTTPException(400, "Give both pick_u and pick_v")
             if r.pick_u is None:
                 lf = st.pending_move
                 if not lf or not lf.get("table_mm"):
@@ -1497,6 +1558,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             lf = st.last_find
             if not lf:
                 raise HTTPException(400, "No find to judge")
+            if lf["result"]["status"] == "clarify":
+                raise HTTPException(409, "Answer the clarifying question, then judge the completed find")
             if lf.get("judged"):
                 raise HTTPException(409, "This find is already judged: ask for the next object")
             lf["judged"] = True
@@ -1533,6 +1596,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     def api_label(lb: Label):
         if not st.label_wait:
             raise HTTPException(400, "Nothing waiting for a label")
+        if not lb.absent and (lb.u is None or lb.v is None):
+            raise HTTPException(400, "Give u,v or absent=true")
         case = st.label_wait
         unboxed = False
         if lb.absent:
@@ -1649,7 +1714,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             raise ArmBusy(f"Speed {a.speed_mm_s} mm/s refused: the first-run cap is {st.first_run_speed} mm/s")
         with st.safety_lock:
             ap = pm.get("approach")
-            if not ap or ap["stage"] not in (0, 1, 2) or not ap["confirm"] or not hmac.compare_digest(a.confirm, ap["confirm"]):
+            if not ap or ap["stage"] not in (0, 1, 2) or not ap["confirm"] or not hmac.compare_digest(a.confirm.encode(), ap["confirm"].encode()):
                 raise ArmBusy(f"No valid stage-{a.stage} confirmation: use the one shown for the current stage")
             ap["confirm"] = None                    # single use, even if a check below refuses
             if a.stage != ap["stage"]:

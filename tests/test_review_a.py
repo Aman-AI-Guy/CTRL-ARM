@@ -281,3 +281,90 @@ def test_issue_45_grid_targets_obey_limits_and_calibration(tmp_path, monkeypatch
     grid.home_q = [0,0]
     grid.home()
     assert grid.state == 'refused' and 'kinematics' in grid.last_error
+
+
+def test_issue_21_stop_has_capacity_when_default_pool_is_full(tmp_path, monkeypatch):
+    import anyio
+    import httpx
+    from test_pipeline import _client
+    app, _ = _client(tmp_path, monkeypatch)
+    async def saturated():
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = 1
+        async with limiter:  # every shared worker token is occupied by a model-bound request
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://testserver') as c:
+                with anyio.fail_after(1):
+                    r = await c.post('/api/arm/stop')
+                assert r.status_code == 200 and app.state.trova.stop_latched.is_set()
+    anyio.run(saturated)
+
+
+def test_issue_22_nonfinite_http_coordinates_never_start_motion(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    from trova.server import ArmBusy
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    for value in ('NaN', 'Infinity', '-Infinity'):
+        for path, data in [('/api/arm/point', '{"x_mm":VALUE,"y_mm":100}'),
+                           ('/api/calibration/click', '{"u":VALUE,"v":1,"x_mm":2,"y_mm":3}'),
+                           ('/api/arm/lift_tray', '{"place_u":1,"place_v":VALUE}')]:
+            r = c.post(path, content=data.replace('VALUE', value), headers={'content-type': 'application/json'})
+            assert r.status_code == 422, (path, r.text)
+    with pytest.raises(ArmBusy, match='finite'):
+        st.start_arm(st.arm.point_at, float('nan'), 10)
+    assert st.arm_thread is None and c.get('/api/state').status_code == 200
+
+
+def test_issue_32_signoff_is_bound_and_single_use(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch)
+    st = app.state.trova
+    st.last_check = {'event_id': 'B', 'result': {'line_clear': True}}
+    assert c.post('/api/signoff', data={'check_id': 'A', 'operator': 'Ana'}).status_code == 409
+    assert not st.last_check.get('signoff')
+    assert c.post('/api/signoff', data={'check_id': 'B', 'operator': 'Ana', 'decision': 'reject'}).status_code == 200
+    assert c.post('/api/signoff', data={'check_id': 'B', 'operator': 'Ana', 'decision': 'approve'}).status_code == 409
+    assert st.last_check['signoff']['decision'] == 'reject'
+    assert c.post('/api/signoff', data={'operator': 'Ana'}).status_code == 422
+
+
+def test_issue_38_http_bad_inputs_have_client_errors(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    import trova.server as server
+    app, c = _client(tmp_path, monkeypatch)
+    for width in (0, -1):
+        assert c.get('/api/frame.jpg', params={'max_w': width}).status_code == 422
+    st = app.state.trova
+    st.label_wait = {'frame': 'example.jpg'}
+    assert c.post('/api/label', json={}).status_code == 400
+    assert c.post('/api/judge', json={'false_alarms': -1}).status_code == 422
+    assert c.post('/api/judge', json={'missed': -1}).status_code == 422
+    monkeypatch.setattr(server, 'MAX_UPLOAD_BYTES', 10)
+    assert c.post('/api/upload_scene', files={'photo': ('large.jpg', b'x'*11)}).status_code == 413
+    assert c.post('/api/find', files={'photo': ('large.jpg', b'x'*11)}).status_code == 413
+    _, secured = _client(tmp_path/'secured', monkeypatch, TROVA_TOKEN='secret')
+    assert secured.get('/api/state', params={'token': 'é'}).status_code == 401
+
+
+def test_issue_39_foreign_browser_requests_are_refused(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    app, c = _client(tmp_path, monkeypatch, TROVA_TOKEN='')
+    before = app.state.trova.stop_sequence
+    for headers in ({'origin': 'https://attacker.example'}, {'origin': 'null'},
+                    {'referer': 'http://attacker.example/page'}, {'sec-fetch-site': 'cross-site'}):
+        assert c.post('/api/arm/stop', headers=headers).status_code == 403
+    assert app.state.trova.stop_sequence == before
+    assert c.post('/api/arm/stop', headers={'origin': 'http://testserver'}).status_code == 200
+    assert c.post('/api/arm/stop').status_code == 200  # non-browser CLI
+
+
+def test_issue_55_clarification_is_not_an_absent_eval_case(tmp_path, monkeypatch):
+    from test_pipeline import _client
+    from trova.finder import FindResult
+    import trova.server as server
+    app, c = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, 'grok_find', lambda *a: FindResult(status='clarify', clarifying_question='Which pen?'))
+    assert c.post('/api/find', data={'text': 'a pen'}).json()['result']['status'] == 'clarify'
+    assert c.post('/api/judge', json={'correct': True}).status_code == 409
+    assert not (tmp_path/'cases'/'finds.jsonl').exists()
+    assert app.state.trova.metrics['find_ok'] == 0 and app.state.trova.metrics['find_wrong'] == 0
