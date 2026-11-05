@@ -176,7 +176,7 @@ def test_issue_50_bringup_stop_matches_driver():
 
 
 def test_issue_11_pending_targets_die_with_their_view(tmp_path, monkeypatch):
-    from test_motion_safety import cart_client
+    from test_motion_safety import cart_client, confirmation
     from test_features import _unique_color
     st, c = cart_client(tmp_path, monkeypatch)
     query = f'the {_unique_color(c)} one'
@@ -199,6 +199,10 @@ def test_issue_11_pending_targets_die_with_their_view(tmp_path, monkeypatch):
     find()
     st.pending_move['_issued'] = 0
     assert c.post('/api/arm/point_last').status_code == 409
+    find()
+    c.post("/api/arm/stop")
+    assert c.post("/api/arm/reset", json=confirmation(c)).status_code == 200
+    assert c.post("/api/arm/lift_tray", json={"place_u": 400, "place_v": 400}).status_code == 409
     assert st.arm.backend.history == []
 
 

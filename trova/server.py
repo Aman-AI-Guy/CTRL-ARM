@@ -321,11 +321,12 @@ class State:
 
     def target_valid(self, target: dict) -> bool:
         issued = (target.get("approach") or {}).get("issued", target.get("_issued", 0)) if self.first_run else target.get("_issued", 0)
-        return target.get("_view") == self.view_stamp() and 0 <= time.time() - issued <= CONFIRM_TTL_S
+        return (not target.get("_ticket", self.stop_epoch).is_set()
+                and target.get("_view") == self.view_stamp() and 0 <= time.time() - issued <= CONFIRM_TTL_S)
 
     def require_target(self, target: dict) -> None:
         if not self.target_valid(target):
-            raise ArmBusy("Stale target refused: camera, calibration or source changed, or older than 60 s; find again")
+            raise ArmBusy("Stale target refused: STOP, camera/calibration/source change, or older than 60 s; find again")
 
     def arm_blocked(self, pixels: bool = True, *, interlocks: bool = True) -> str | None:
         """Why the arm must not move right now (None = it may). pixels=False: the target is given in robot mm,
