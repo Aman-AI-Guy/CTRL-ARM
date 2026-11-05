@@ -688,11 +688,15 @@ class MotionGateway:
             return self._finish(ok=False, status='rejected', reason='Joint path contains non-finite values.',
                                 requested=requested, proposal={}, safety=safety, allow=False, speed=0)
         if geometry is not None:
+            if speed_deg_s > geometry.settings.joint_speed_deg_s:
+                return self._finish(ok=False, status='rejected', reason='Orbit exceeds its measured joint speed setting.',
+                                    requested=requested, proposal={}, safety=safety, allow=False, speed=0)
             if current is None or len(current) != 5 or len(target_q) != 5:
                 return self._finish(ok=False, status='rejected', reason='Orbit requires five current and target joints.',
                                     requested=requested, proposal={}, safety=safety, allow=False, speed=0)
             jump = max(abs(a-b) for a,b in zip(current,target_q))
-            if jump > geometry.settings.max_joint_step_deg or abs(target_q[4]-current[4]) > geometry.settings.cable_span_deg:
+            reference = geometry.cable_reference_deg if geometry.cable_reference_deg is not None else current[4]
+            if jump > geometry.settings.max_joint_step_deg or abs(target_q[4]-reference) > geometry.settings.cable_span_deg:
                 return self._finish(ok=False, status='rejected', reason='Orbit exceeds the joint jump or cable budget.',
                                     requested=requested, proposal={}, safety=safety, allow=False, speed=0)
             for pose in samples_q:

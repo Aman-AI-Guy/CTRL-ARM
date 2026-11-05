@@ -29,6 +29,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 
 | Feature | Status | Where | Notes |
 |---|---|---|---|
+| M5 E: Grok skills, bound orbit confirmations and integrated UI | Offline simulation + real recorded-data browser workflow tested | `agent.py`, `scan3d/skills.py`, `workflow.py`, `server.py`, `static/index.html` | Speech/typed scan goals share the existing agent, retain selection and use imported joint IK. Each next view needs its own proposal confirmation; post-move capture, coverage and fresh localization precede the next proposal. Receipts bind measured settings, geometry, target/joints and current pose. Cable origin persists per orientation group. UI exposes evidence, operator orbit settings, real orbit preview, recorded import, job history, generated mesh previews/downloads. Missing calibration/measurements block movement honestly. |
 | M5 D: real photogrammetry/Open3D integration | Postprocessing reproduced; full COLMAP unavailable here | `scan3d/photogrammetry.py`, `scan3d/benchmark.py`, `reconstruction.py` | Portable validated COLMAP discovery (TROVA_COLMAP/PATH/WSL); original sparse/dense/marker-scale and Open3D object isolation/meshing algorithms run through cancellable jobs. New retained-cloud replay: 60 registered inputs, robust size 96.3×55.6×37.4 mm, mesh bbox 104.3×66.6×38.6 mm. PLY/STL/GLB and four renders generated, vertex colours only. This did not rerun SfM/dense COLMAP or remeasure the ruler. |
 | M5 C: recorded replay and calibrated orbit adapter | Offline capture/protocol tested; live capture remains stationary | `scan3d/service.py`, `scan3d/receiver.py`, `pi_cam.py`, `acquire.py` | One PiCam client now supports the original scan protocol and resumable receiver. Mouse replay copies the 60 registered JPEGs, keeps SfM frames separate and never invents telemetry. Operator-owned measured orbit settings gate current-calibration planning; angle/plane overlap ranking is not surface coverage. |
 | M5 B: integrated joint-space orbit and robot geometry | Offline numerical and mesh coverage checks; no hardware run | `scan3d/orbit_math.py`, `scan3d/orbit_planner.py`, `scan3d/robot_geometry.py`, `motion.py` | Reused five-axis IK and CAD-derived link/head spheres. The retained 220-degree, 12-view sequence replans 12/12 through MotionGateway in offline mode. Joint paths are sampled at 2 degrees, with table/object, selected self pairs, link keep-outs and rotated head checks; no continuous collision proof. The geometry/model binding must be operator-qualified before execution. Sampled TCP speed and joint acceleration caps are enforced. No imported SDK executor is included. |
@@ -131,7 +132,7 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 
 ## HTTP API
 
-M5 reconstruction: `POST /api/reconstruction/replay/mouse` explicitly reruns Open3D/marker postprocessing on retained SfM/dense inputs; normal `/api/reconstruction/start` requires COLMAP to rerun the full recorded pipeline.
+M5 reconstruction: `GET /api/reconstruction/jobs` lists persisted jobs; `POST /api/reconstruction/replay/mouse` explicitly reruns Open3D/marker postprocessing on retained SfM/dense inputs; normal `/api/reconstruction/start` requires COLMAP to rerun the full recorded pipeline.
 
 M5: `GET /api/integration/evidence` · `GET/POST /api/orbit/settings` (operator confirm required) · `POST /api/orbit/plan` (read-only) · `POST /api/scan/replay/mouse` (copy historical registered JPEGs; no robot poses).
 
@@ -284,6 +285,8 @@ Operator-supervised first movement. This was not run. `trova/geom.py` `FIRST_MOV
 - Change verification sends at most 12 candidates to Grok; more means "the camera probably moved" (not clear).
 
 ## Changelog (newest first)
+
+- 2026-11-05 M5 E: connected imported orbit/capture/reconstruction capabilities to the existing Grok skill registry and speech/UI; bound confirmations to joint geometry/settings, retained cable origin per group, added calibrated camera sphere checks and recorded-data browser regression. Read-only live checks reached the 1600×900 rotated Pi camera and stationary xArm; no actuator commands or TCP changes. All 754 retained files remain unchanged. Final offline suite: 205 passed, 2 skipped; original suite 50 passed; both Chromium workflows passed.
 
 - 2026-11-05 M5 D: integrated original COLMAP/Open3D reconstruction and marker scale into existing jobs, portable executable validation and recorded dataset integrity checks. Recomputed real mesh/GLB/STL/renders from the retained dense cloud; full COLMAP rerun unavailable because the executable is absent.
 

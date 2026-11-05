@@ -28,9 +28,11 @@ SKILLS = (
     "inspect_scene", "list_objects", "select_object", "locate_object", "observe_object",
     "plan_approach", "move_towards_object", "move_above_object", "inspect_from_another_angle",
     "center_object_in_view", "capture_image", "evaluate_goal", "request_clarification",
-    "report_status",
+    "report_status", "start_scan", "plan_orbit", "observe_from_viewpoint", "capture_viewpoint",
+    "evaluate_coverage", "choose_next_view", "reconstruct_object", "inspect_reconstruction",
+    "request_object_reorientation", "finish_task",
 )
-MOVE_SKILLS = {"move_towards_object", "move_above_object"}
+MOVE_SKILLS = {"move_towards_object", "move_above_object", "observe_from_viewpoint"}
 SNAPSHOT_MAX_AGE_S = 1.5
 _COORD = re.compile(r"(?i)\b(x|y|z|xyz)\s*[:=]\s*-?\d")
 
@@ -59,6 +61,7 @@ Rules:
 - plan_approach, move_towards_object and move_above_object use a pose computed by local code. You do not supply that pose.
 - center_object_in_view and inspect_from_another_angle do not invent a distance and do not change a safety limit.
 - If motion lock is set, choose report_status. Do not ask for another direction, another angle, or another distance.
+- Scanning uses start_scan, plan_orbit, observe_from_viewpoint, capture_viewpoint, evaluate_coverage, choose_next_view, reconstruct_object and inspect_reconstruction. Local code supplies every viewpoint; never coordinates. Movement requires confirmation of a specific validated proposal. After a moved orbit, capture then evaluate coverage; never infer complete surfaces. Reorientation requires a separate group and reselection.
 - Do not repeat the same skill. After inspect_scene, choose select_object.
 - If the phase is clarify, choose request_clarification.
 - If the goal is achieved or the phase is held, blocked, evaluated or reported, choose report_status and set stop true.
@@ -183,9 +186,9 @@ def qualification_blockers(host, task) -> list[str]:
         reasons.append("the robot is still moving")
     if robot.get("error_code"):
         reasons.append(f"controller error code {robot.get('error_code')}")
-    if gateway is not None and gateway.mode == "hardware" and not task.get("ik_verified"):
+    if gateway is not None and gateway.mode == "hardware" and not task.get("planned_joints") and not task.get("ik_verified"):
         reasons.append("controller inverse kinematics has not confirmed the observation pose")
-    if gateway is not None and gateway.mode == 'hardware':
+    if gateway is not None and gateway.mode == 'hardware' and not task.get('planned_joints'):
         orientation = robot.get('cartesian_target_orientation_deg')
         pose = robot.get('pose6')
         if not orientation or not pose:
@@ -620,6 +623,9 @@ def skill_plan(host, task, argument: str) -> dict:
 
 
 def _move(host, task, skill: str) -> dict:
+    if task.get('planned_joints'):
+        from .scan3d.skills import observe
+        return observe(host,task,'')
     if getattr(host, "confirmation_required", False) and task.get("_confirmed"):
         invalid = receipt_error(host, task, task.get("_confirmed"))
         if invalid:
@@ -905,6 +911,9 @@ def skill_angle(host, task, argument: str) -> dict:
 
 
 def skill_scan_plan(host, task, argument):
+    if hasattr(host,'orbits'):
+        from .scan3d.skills import plan
+        return plan(host,task,argument)
     from .scanning import rank_views
     book = getattr(host, "scan_book", None)
     if book is None or not book.active:
@@ -946,7 +955,14 @@ def skill_report(host, task, argument: str) -> dict:
                    motion=task.get("proposal"), executed=False)
 
 
+from .scan3d import skills as scan_skills
+
 SKILL_FN = {
+    'start_scan':scan_skills.start_scan, 'plan_orbit':scan_skills.plan,
+    'observe_from_viewpoint':scan_skills.observe, 'capture_viewpoint':skill_capture,
+    'evaluate_coverage':scan_skills.coverage, 'choose_next_view':scan_skills.plan,
+    'reconstruct_object':scan_skills.reconstruct, 'inspect_reconstruction':scan_skills.inspect,
+    'request_object_reorientation':scan_skills.reorient, 'finish_task':scan_skills.finish,
     "plan_scan_view": skill_scan_plan,
     "inspect_scene": skill_inspect, "list_objects": skill_list, "select_object": skill_select,
     "locate_object": skill_locate, "observe_object": skill_observe, "plan_approach": skill_plan,
@@ -974,7 +990,8 @@ def _resume_task(task: dict) -> dict:
             "motion_lock", "evaluation", "question", "authoritative", "calibration_valid",
             "calibration", "last_reason", "steps", "replans", "grok_mode", "snapshot_pose",
             "snapshot_id", "ik_verified", "timings", "summary", "confirmation", "workflow_state", "workflow_events",
-            "scan_session", "scan_viewpoint", "scan_plan", "path_ik_verified")
+            "scan_session", "scan_viewpoint", "scan_plan", "path_ik_verified", "planned_joints",
+            "orbit_geometry", "orbit_speed", "orbit_reached", "reconstruction_job", "coverage", "orbit_anchor_joints")
     return {key: task.get(key) for key in keys}
 
 
@@ -1008,6 +1025,13 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
     if confirm_id:
         task["_confirmed"] = confirm_id
         task["phase"] = "planned"
+        if task.get('planned_joints') and skill_sequence is None:
+            # One accepted motion is followed by observation and another proposal,
+            # never by an unconfirmed actuator command. Re-localize from a new scene.
+            task['_scan_continuation'] = True
+            task['requested_track_id'] = (task.get('selected') or {}).get('track_id')
+            skill_sequence = ['observe_from_viewpoint','capture_viewpoint','evaluate_coverage',
+                              'inspect_scene','locate_object','plan_orbit','observe_from_viewpoint']
     _calibration_flag(host, task)
     task["workflow_events"] = list(task.get("workflow_events") or [])
     started = time.monotonic()
@@ -1022,12 +1046,14 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
             task["last_reason"] = "the task reached its time limit"
             break
         # Confirmation executes the bound proposal; the model cannot substitute another skill.
-        if skill_sequence and _step < len(skill_sequence):
+        if task.get('phase') == 'scan_ready_for_reconstruction':
+            choice = {'skill':'reconstruct_object','argument':'','ok':True}
+        elif skill_sequence and _step < len(skill_sequence):
             choice = {"skill": skill_sequence[_step], "argument": "", "ok": True}
         elif task.get("requested_track_id") is not None and task["phase"] == "start":
             choice = {"skill": "inspect_scene", "argument": "", "ok": True}
         elif task.get("_confirmed"):
-            choice = {"skill": "move_above_object", "argument": "", "ok": True}
+            choice = {"skill": "observe_from_viewpoint" if task.get("planned_joints") else "move_above_object", "argument": "", "ok": True}
         elif getattr(host, "confirmation_required", False) and task["phase"] in {"moved", "observed"}:
             choice = {"skill": "capture_image" if task["phase"] == "moved" else "evaluate_goal", "argument": ""}
         else:
@@ -1059,7 +1085,8 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
         began = time.perf_counter()
         try:
             result = SKILL_FN[name](host, task, choice.get("argument") or "")
-        except GrokError as exc:
+        except (GrokError, ValueError, KeyError, RuntimeError) as exc:
+            task['motion_lock'] = str(exc)
             result = _result(name, False, str(exc), task, terminal=True, rejection=str(exc))
             task["phase"] = "blocked"
         elapsed = round(time.perf_counter() - began, 3)
@@ -1149,7 +1176,7 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None,
         "workflow_events": task["workflow_events"],
         "execution_mode": getattr(getattr(host, "gateway", None), "mode", None),
         "scan_session": task.get("scan_session"), "scan_plan": task.get("scan_plan"),
-        "acquisition": task.get("acquisition"),
+        "acquisition": task.get("acquisition"), "reconstruction": (task["steps"][-1].get("reconstruction") if task["steps"] else None),
         "confirmation": {k: v for k, v in (task.get("confirmation") or {}).items()
                          if k in {"id", "expires_at", "target_mm", "object_id"}} or None,
         "motion_proposed": task.get("planned_target") is not None,

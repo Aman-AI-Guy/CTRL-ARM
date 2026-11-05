@@ -51,6 +51,8 @@ def prepare_dataset(session, destination, orientation):
             if hashlib.sha256(data).hexdigest()!=view['sha256']:raise ValueError('A recorded image changed since import.')
             frame=cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
             if frame is None:raise ValueError('Invalid recorded JPEG.')
+            sharpness=float(cv2.Laplacian(cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY),cv2.CV_64F).var())
+            if sharpness<20:raise ValueError('Recorded JPEG is too blurry for reconstruction.')
             name=view['source_name']
             if Path(name).name!=name:raise ValueError('Invalid recorded image name.')
             (images/name).write_bytes(data)

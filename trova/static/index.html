@@ -166,9 +166,27 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
       <button onclick="startScan()">Start scan</button><button onclick="captureView()">Capture view</button>
       <button onclick="finishScan()">Finish scan</button><button onclick="exportScan()">Export poses</button></div>
     <div class="row"><button onclick="nextScanView()">Plan next scan view</button><button onclick="markOrientation()">Object turned / flipped</button>
-      <button onclick="startReconstruction()">Reconstruct dataset</button><button onclick="cancelReconstruction()">Cancel reconstruction</button></div>
+      <button onclick="startReconstruction()">Reconstruct dataset</button><button onclick="cancelReconstruction()">Cancel reconstruction</button><button onclick="loadReconstructionJobs()">Saved reconstruction jobs</button></div>
     <div id="scanres" class="muted"></div>
+    <div id="reconstructionjobs"></div>
     <div id="reconstructionres" role="status" class="muted"></div>
+    <details id="m5panel"><summary>3D integration · calibration evidence, orbit and recorded benchmark</summary>
+      <div class="row"><button onclick="loadM5Evidence()">Calibration / retained evidence</button>
+        <button onclick="previewOrbit()">Preview calibrated joint orbit</button></div>
+      <div id="m5evidence" role="status" class="muted"></div>
+      <div id="orbitpreview" role="status"></div>
+      <details><summary>Operator measurements for orbit planning</summary>
+        <p>Load settings, enter measured object height/radius and flange-to-TCP offset, and review model mounting. Confirmation stores measurements; hardware unlock is independent.</p>
+        <button onclick="loadOrbitSettings()">Load orbit settings</button>
+        <textarea id="orbitsettings" rows="12" style="width:100%;font-family:monospace" aria-label="Operator orbit settings"></textarea>
+        <label><input id="orbitsettingsconfirm" type="checkbox"> I measured and reviewed these settings</label>
+        <button onclick="saveOrbitSettings()">Save measured orbit settings</button>
+        <div id="orbitsettingsstatus" role="status"></div>
+      </details>
+      <div class="row"><button onclick="importMouseRecording()">Import recorded mouse · 60 views</button>
+        <button onclick="replayMouseMesh()">Replay retained cloud → new mesh</button></div>
+      <p class="muted">Recorded replay uses historical camera poses and dense points. Full reconstruction uses COLMAP. Neither operation moves the robot.</p>
+    </details>
   </div>
 
   <div class="panel"><h2>Score</h2>
@@ -589,6 +607,64 @@ async function markOrientation() {
   $('scanres').textContent = d.reason || 'Select the object again in its new orientation.';
 }
 let reconstructionJob = null;
+async function loadM5Evidence() {
+  try {
+    const d = await call('/api/integration/evidence');
+    const c = d.current_compatibility || d.calibration || {};
+    $('m5evidence').textContent = 'Historical calibration · inactive for motion. ' +
+      (c.reasons || []).join(' ') + ' ' + (d.reason || '') + '\n' + JSON.stringify(d);
+    $('m5evidence').style.overflowWrap = 'anywhere';
+  } catch(e) { $('m5evidence').textContent = String(e); }
+}
+async function loadOrbitSettings() {
+  try { $('orbitsettings').value = JSON.stringify(await call('/api/orbit/settings'), null, 2); }
+  catch(e) { $('orbitsettingsstatus').textContent = String(e); }
+}
+async function saveOrbitSettings() {
+  try {
+    const d = await call('/api/orbit/settings', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({confirm:$('orbitsettingsconfirm').checked,settings:JSON.parse($('orbitsettings').value)})});
+    $('orbitsettingsstatus').textContent = 'Measurements saved. Hardware mode and unlock remain operator-owned.';
+  } catch(e) { $('orbitsettingsstatus').textContent = String(e); }
+}
+async function previewOrbit() {
+  try {
+    const d = await call('/api/orbit/plan', {method:'POST'});
+    const candidates = d.candidates || [];
+    const points = candidates.filter(c=>c.validated && c.camera_mm).map(c=>c.camera_mm);
+    let diagram = '';
+    if(points.length) {
+      const xmin=Math.min(...points.map(p=>p[0]))-20, xmax=Math.max(...points.map(p=>p[0]))+20;
+      const ymin=Math.min(...points.map(p=>p[1]))-20, ymax=Math.max(...points.map(p=>p[1]))+20;
+      diagram = `<svg viewBox="0 0 400 240" role="img" aria-label="Proposed camera positions in robot-base XY" style="width:100%;max-width:500px;background:#eee">` +
+        points.map(p=>`<circle cx="${20+360*(p[0]-xmin)/(xmax-xmin)}" cy="${220-200*(p[1]-ymin)/(ymax-ymin)}" r="4" fill="#168070"/>`).join('') + '</svg>';
+    }
+    $('orbitpreview').innerHTML = `<b>Proposals only · no motion</b> ${esc(d.reason || '')}<br>${diagram}<ul>` +
+      candidates.map(c=>`<li>${esc(c.id)}: ${c.validated?'validated':'rejected'} · ${esc(c.reason || '')}</li>`).join('') + '</ul>';
+  } catch(e) { $('orbitpreview').textContent = String(e); }
+}
+async function importMouseRecording() {
+  try { const d=await call('/api/scan/replay/mouse',{method:'POST'}); showScan(d); }
+  catch(e) { $('scanres').textContent=String(e); }
+}
+async function replayMouseMesh() {
+  try {
+    const d=await call('/api/reconstruction/replay/mouse',{method:'POST'});
+    reconstructionJob=d.id; showReconstruction(d); if(d.id)pollReconstruction();
+  } catch(e) { $('reconstructionres').textContent=String(e); }
+}
+async function loadReconstructionJobs() {
+  try {
+    const jobs=await call('/api/reconstruction/jobs');
+    $('reconstructionjobs').replaceChildren();
+    for(const job of jobs) {
+      const button=document.createElement('button');
+      button.textContent=job.id.slice(0,8)+' · '+job.status+' · '+(job.provenance || 'COLMAP job');
+      button.onclick=()=>{reconstructionJob=job.id;showReconstruction(job);pollReconstruction();};
+      $('reconstructionjobs').append(button);
+    }
+  } catch(e) { $('reconstructionjobs').textContent=String(e); }
+}
 async function startReconstruction() {
   const d = await json('/api/reconstruction/start', {});
   reconstructionJob = d.id;
@@ -599,7 +675,9 @@ function showReconstruction(d) {
   const links = Object.keys(d.artifacts || {}).map(name => `<a href="/api/reconstruction/${encodeURIComponent(d.id)}/artifacts/${encodeURIComponent(name)}" target="_blank">${esc(name)}</a>`).join(' · ');
   $('reconstructionres').innerHTML = `<b>${esc(d.status)} · ${esc(d.stage || '')}</b> ${esc(d.reason || '')}<br>` +
     `mesh ${d.reconstructed ? 'generated' : 'not generated'} · textured ${d.textured_mesh ? 'yes' : 'no'} · surface completeness unverified<br>` +
-    `<div style="overflow-wrap:anywhere">${esc(JSON.stringify(d.quality || {}))}</div>${links}`;
+    `<div>${esc(d.provenance || '')}${d.benchmark ? ' · full COLMAP rerun: ' + (d.benchmark.full_reconstruction_rerun ? 'yes':'no; retained SfM/dense inputs') : ''}</div>` +
+    `<div style="overflow-wrap:anywhere">${esc(JSON.stringify(d.quality || {}))}</div>${links}` +
+    Object.keys(d.artifacts || {}).filter(name=>name.endsWith('.png')).map(name=>`<img alt="Reconstructed mesh ${esc(name)}" loading="lazy" style="width:45%;max-width:320px" src="/api/reconstruction/${encodeURIComponent(d.id)}/artifacts/${encodeURIComponent(name)}">`).join('');
 }
 async function pollReconstruction() {
   if (!reconstructionJob) return;
@@ -743,8 +821,8 @@ async function exportScan() {
 function showScan(session) {
   if (!session) return;
   const views = session.views || [];
-  $('scanres').innerHTML = `${esc(session.id || '')} · ${esc(session.status || '')} · ${session.n_views || views.length} views · orientation ${esc(session.orientation || '')} · acquisition dataset; reconstruction results shown separately` +
-    (views.length ? '<ul class="changes">' + views.map(v => `<li>${esc(v.viewpoint_id)} ${v.accepted ? 'accepted' : 'rejected'} ${esc(v.reject_reason || '')} pose ${esc((v.robot_tcp_mm || []).join(', '))}</li>`).join('') + '</ul>' : '');
+  $('scanres').innerHTML = `${esc(session.id || '')} · ${esc(session.status || '')} · ${session.n_views || views.length} views · orientation ${esc(session.orientation || '')} · ${esc(session.provenance || '')} · ${session.n_reconstruction_accepted || 0} reconstruction inputs · acquisition dataset; reconstruction results shown separately` +
+    (views.length ? '<ul class="changes">' + views.map(v => `<li>${esc(v.viewpoint_id)} ${v.accepted ? 'metric capture accepted' : v.reconstruction_accepted ? 'recorded reconstruction input' : 'rejected'} ${esc(v.reject_reason || '')} ${v.quality ? esc(JSON.stringify(v.quality)) : ''} pose ${esc((v.robot_tcp_mm || []).join(', '))}</li>`).join('') + '</ul>' : '');
 }
 
 async function refresh() {

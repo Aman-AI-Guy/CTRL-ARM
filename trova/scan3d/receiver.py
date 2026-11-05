@@ -187,4 +187,3 @@ class Receiver:
             for r in self.received():
                 w.writerow(asdict(r))
         return path
-

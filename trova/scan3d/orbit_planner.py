@@ -97,11 +97,13 @@ class JointGeometry:
                                  floor, table_margin=settings.table_margin_mm, obj_margin=settings.object_margin_mm,
                                  geometry=self.geometry, head_turn=self.turn, self_margin=settings.self_margin_mm)
         self.qualified = bool(qualified and settings.geometry_confirmed)
+        self.cable_reference_deg = None
         self.model_sha256 = hashlib.sha256(MODEL.read_bytes()).hexdigest()
 
     def signature(self):
         return {'model': self.model_sha256, 'settings': asdict(self.settings),
                 'target_mm': self.target.tolist(), 'table_z_mm': self.scene.table_z,
+                'object_clearance_radius_mm': self.scene.obj_radius, 'cable_reference_deg': self.cable_reference_deg,
                 'T_flange_camera': self.flange_camera.tolist(), 'qualified': self.qualified}
 
     def check(self, joints):
@@ -114,6 +116,25 @@ class JointGeometry:
             hits.append('TCP workspace')
         if any(box.contains(tcp) for box in self.gateway.keepouts):
             hits.append('TCP keep-out')
+        body = self.gateway.camera
+        if body is not None:
+            # The old sphere offset is expressed in base axes for a downward tool.
+            # Orbit orientation varies: use the calibrated camera centre and retain
+            # the configured radius rather than rotating an undocumented offset.
+            center = (flange_pose(q) @ self.flange_camera)[:3,3]
+            radius = body.radius_mm
+            if center[2]-radius < self.scene.table_z+self.settings.table_margin_mm:
+                hits.append('configured camera sphere / table')
+            if (np.linalg.norm(center[:2]-self.foot[:2]) < self.scene.obj_radius+radius+self.settings.object_margin_mm
+                    and center[2]-radius < self.foot[2]+self.settings.object_height_mm):
+                hits.append('configured camera sphere / object')
+            if self.gateway.limits:
+                for axis,(lo,hi) in enumerate((self.gateway.limits.x,self.gateway.limits.y,self.gateway.limits.z)):
+                    if not lo+radius <= center[axis] <= hi-radius: hits.append('configured camera sphere / workspace')
+                if self.gateway.limits.radius_mm is not None and np.linalg.norm(center[:2])+radius>self.gateway.limits.radius_mm:
+                    hits.append('configured camera sphere / cylindrical workspace')
+            if any(box.expanded(radius).contains(center) for box in self.gateway.keepouts):
+                hits.append('configured camera sphere / keep-out')
         shapes = self.geometry.world(orbit.fk_frames(q), self.turn)
         # Keep-outs cover every supplied link, including static/base shapes.
         for name, (centers, radii) in shapes.items():
@@ -169,7 +190,7 @@ def plan_orbit(joints, context, *, start_azimuth=None, sequential=False, cancel=
             jump=float(np.max(np.abs(q-begin)))
             if jump > settings.max_joint_step_deg:
                 reasons.append('joint jump exceeds the configured 45-degree-or-smaller limit'); continue
-            if abs(q[4]-q0[4]) > settings.cable_span_deg:
+            if abs(q[4]-(context.cable_reference_deg if context.cable_reference_deg is not None else q0[4])) > settings.cable_span_deg:
                 reasons.append('camera cable / J5 travel exceeds its configured budget'); continue
             hits=context.path(begin,q)
             if hits:

@@ -85,6 +85,9 @@ Executed `python -m trova.integration_m5 mouse-postprocess --output data/m5/mous
 recomputed marker scale 53.4097165 mm/unit, robust object size **96.3×55.6×37.4 mm**;
 new mesh bbox extent **104.3349×66.6040×38.6206 mm**. Runtime 10.35 s.
 New PLY/STL/GLB and four PNG renders were written under that new output directory.
+A separate browser replay produced robust 96.3×55.6×37.2 mm and mesh bbox extent
+105.9592×66.2446×38.2922 mm; these are separately recorded runs. Native plane/mesh
+processing is not bitwise reproducible.
 Historical robust size was 96.3×55.7×37.4 and historical mesh report 106.1×66.2×38.6;
 Poisson/RANSAC/version differences change bounding extents. Reported ruler size 98×58×35
 was not remeasured. Mesh vertex colours are not UV textures or parametric CAD.
@@ -92,3 +95,151 @@ was not remeasured. Mesh vertex colours are not UV textures or parametric CAD.
 This validates loading the retained 60-image camera model, redetecting markers in the
 original JPEGs and actually rerunning dense-cloud postprocessing, not a new COLMAP
 feature/SfM/dense run. The latter cannot run until COLMAP is installed.
+
+## E — agent, confirmations and UI
+
+The existing skill registry now includes start_scan, plan_orbit, observe_from_viewpoint,
+capture_viewpoint, evaluate_coverage, choose_next_view, reconstruct_object,
+inspect_reconstruction, request_object_reorientation and finish_task. Speech and typed
+scan goals use this registry. Compound Italian/English selection-plus-model requests
+use scene/selection/localization before starting the scan. Grok still supplies no poses.
+The old Cartesian parallax helper remains for legacy isolated tests; the application
+uses the imported five-axis planner. A scan with missing measured orbit settings now
+blocks instead of offering a parallax confirmation.
+
+Each accepted joint proposal has its own expiring, single-use confirmation. The realtime
+voice adapter retains the next viewpoint proposal and demands another explicit spoken yes. The receipt
+binds calibration/safety/camera configuration, operator orbit settings, geometry, selected
+identity, exact joint/TCP target, stationary pose and joints. Revalidation happens after
+State.start_arm takes ownership and again in MotionGateway/the existing joint driver.
+The current calibrated camera-centre sphere retains the configured radius alongside
+CAD head spheres. Joint speed/acceleration and 2-degree path checks remain bounded.
+J5 cable reference persists for the whole orientation group, rather than resetting
+at each viewpoint. Changing settings, pose, calibration, target, STOP or cancellation
+invalidates confirmation. A simulated driver is reported as simulation.
+
+After a confirmed orbit move, the bounded skill loop settles, captures, evaluates
+viewpoint coverage, obtains a fresh tracked scene and localization, and proposes the
+next view. That next movement requires another confirmation. At the viewpoint budget
+(with at least three accepted images) it can finish acquisition and queue reconstruction;
+this budget is not a proof of complete surface coverage. Tracking/quality/localization
+failures stop continuation. If no useful safe view exists, the reason and human-assistance
+need are reported. Turning/flipping creates a new group and requires reselection;
+registration between object orientations is not implemented. Parking for human access
+requires its own validated operator action; no automatic unvalidated parking is added.
+
+The existing page now has a 3D integration disclosure with historical calibration
+compatibility, read-only orbit preview, operator measurements, recorded mouse import,
+explicit retained-cloud replay, persisted job history, actual orthographic mesh renders
+and downloadable GLB/PLY/STL/cloud files. No mock rendering is presented as reconstruction.
+Vertex colours remain distinct from UV textures, and meshes from parametric CAD.
+
+## Verification and practical limits
+
+- Imported original tests: **50 passed** from an isolated copy. The old 47-pass report
+  describes an earlier suite, not the currently retained one.
+- Trova offline suite after the main integration: **205 passed, 2 skipped** in the final run (125.06 s), including continuation,
+  quality and repeated voice-confirmation regressions.
+  Tests force simulated arm, telemetry off and hardware unlock empty.
+- Existing Chromium feature smoke: PASS. Dedicated M5 Chromium workflow: PASS for
+  60-image import, actual Open3D mesh generation, four renders, GLB download, persisted
+  job listing and 390 px mobile layout.
+- Preserved archive: **754/754 SHA-256 checks passed**, 323,516,988 bytes unchanged.
+- Read-only live camera: successful JPEG, status **1600×900, rotate 180, protection normal**,
+  no extra client rotation. Read-only xArm: five joints and actual TCP, stationary,
+  controller state 2, error 0. Logs are local `data/m5/live-readonly.json`.
+  No motor enable, actuator, TCP change, bring-up or physical motion occurred.
+
+Current resolution agrees with the retained calibration profile. Camera serial/mount
+continuity, current TCP offset, independent reference measurements and the historical
+6.148 px reprojection error still prevent promoting that calibration. The 1.5 px gate
+is unchanged. Offline IK success in a broad replay workspace does not qualify today's
+workspace. Model/controller FK agreement, measured tool/camera/keep-outs, current
+calibration and operator hardware authorization remain required before physical scanning.
+No continuous collision proof, complete self-pair set, controller interpolation proof,
+true surface coverage estimator, cross-orientation registration or parametric CAD is claimed.
+Full COLMAP reconstruction has **not** been rerun here because COLMAP is unavailable.
+Open3D replay uses retained sparse/dense inputs and labels this explicitly. The historical
+120 mm hover / roughly 8 mm lateral offset remains a recorded physical experiment,
+not a movement reproduced by this integration.
+
+Raw datasets/CAD remain local and unmodified. Package dependencies are optional via
+`.[reconstruction]`. For sharing the approximately 315 MB evidence use an artifact store
+or reviewed Git LFS rules; nothing was uploaded. Windows metadata, caches, archives
+and setup credentials are excluded. The compact derived link sphere data retains
+UFACTORY attribution; original team camera-head CAD is not redistributed as a raw mesh.
+
+## Reproduce and demonstrate
+
+Offline commands (no robot connection):
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/simostocco/hackathon/.venv/bin/python -m pytest -q
+OPENBLAS_NUM_THREADS=1 /home/simostocco/hackathon/.venv/bin/python -m trova.integration_m5 audit
+OPENBLAS_NUM_THREADS=1 /home/simostocco/hackathon/.venv/bin/python -m trova.integration_m5 calibration-replay --output data/m5/calibration-replay-new.json
+OPENBLAS_NUM_THREADS=1 /home/simostocco/hackathon/.venv/bin/python -m trova.integration_m5 orbit-replay --output data/m5/orbit-replay-new.json
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/simostocco/hackathon/.venv/bin/python -m trova.integration_m5 mouse-postprocess --output data/m5/mouse-replay-new
+PLAYWRIGHT_BROWSERS_PATH=/tmp/trova-playwright OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/simostocco/hackathon/.venv/bin/python tests/browser_m5_smoke.py
+```
+
+To rerun the original suite without writing caches/output into the archive, make an
+isolated copy (the destination must be a new directory):
+
+```bash
+/home/simostocco/hackathon/.venv/bin/python -c "from trova.scan3d.evidence import workspace; from shutil import copytree, ignore_patterns; copytree(workspace(), '/tmp/trova-m5-original-validation', ignore=ignore_patterns('data','runs','__pycache__','*.pyc','*:Zone.Identifier'))"
+cd /tmp/trova-m5-original-validation
+PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/simostocco/hackathon/.venv/bin/python -m pytest -q -o cache_dir=/tmp/trova-m5-original-pytest-cache tests
+```
+
+The already generated browser demonstration is retained in `data/m5/ui-demo`. To open
+it with the real Pi camera and read-only robot telemetry (use the current DHCP address
+if it changes):
+
+```bash
+TROVA_DATA="$PWD/data/m5/ui-demo" TROVA_HOST=127.0.0.1 TROVA_PORT=8010 \
+TROVA_CAMERA=pi:192.168.5.160 TROVA_CAMERA_ON_ARM=1 TROVA_CAM_EXTRA_ROTATE=0 \
+TROVA_ARM=sim TROVA_ARM_READ=xarm:192.168.1.111 \
+TROVA_MOTION_MODE=dry_run TROVA_HARDWARE_UNLOCK= \
+/home/simostocco/hackathon/.venv/bin/python -m trova
+```
+
+Open `http://localhost:8010`, then **Saved reconstruction jobs** to inspect the actual
+recorded-data replay. Preview orbit/calibration blockers without authorizing a move.
+Use a valid live xAI key for authoritative recognition; mock/offline selections cannot
+authorize physical motion. This demo's historical session is reconstruction-only.
+
+A **separate operator-supervised hardware validation**, only after the physical
+calibration/reference/model/workspace qualification, uses a separate station data
+directory containing that newly validated calibration and measurements. This command
+was **not run** during implementation. It opens the existing real driver; do not run
+it as a read-only demonstration and do not set TROVA_ARM_TCP_MM to invent/change a TCP.
+
+```bash
+TROVA_DATA="$PWD/data/qualified-station" TROVA_HOST=127.0.0.1 TROVA_PORT=8011 \
+TROVA_CAMERA=pi:192.168.5.160 TROVA_CAMERA_ON_ARM=1 TROVA_CAM_EXTRA_ROTATE=0 \
+TROVA_ARM=xarm:192.168.1.111 TROVA_ARM_READ=off \
+TROVA_MOTION_MODE=hardware TROVA_HARDWARE_UNLOCK=MOVE \
+/home/simostocco/hackathon/.venv/bin/python -m trova
+```
+
+The operator must load their measured workspace/clearances/keep-outs, actual TCP and
+qualified model settings; the command does not supply those measurements. Start with
+a single proposed view, inspect the trajectory and all blockers, then confirm that
+specific proposal with the physical emergency stop accessible. Every subsequent view
+has a new proposal. Missing qualifications must refuse; do not relax gates to pass.
+
+## Source changes
+
+New reusable modules: `scan3d/flange.py`, `marker_fit.py`, `evidence.py`, `orbit_math.py`,
+`robot_geometry.py`, `orbit_planner.py`, `service.py`, `streaming.py`, `receiver.py`,
+`sparse_model.py`, `photogrammetry.py`, `benchmark.py`, `executables.py`,
+`reconstruct_pipeline.py`, `skills.py`; curated `robot_model.json`, `mouse_profile.json`,
+`provenance.json` and UFACTORY BSD attribution.
+Changed primary modules: `geom.py`, `motion.py`, `arm/cartesian.py`, `arm/xarm.py`,
+`pi_cam.py`, `acquire.py`, `reconstruction.py`, `agent.py`, `workflow.py`, `server.py`,
+`voice.py`, `static/speech.js`, `static/index.html`, `integration_m5.py`,
+`pyproject.toml`, `.gitignore`, `AGENTS.md`. Tests: safety fixture, M5 calibration, orbit,
+capture, reconstruction, agent and recorded-data browser tests; updated the former
+parallax speech regression to expect missing measured joint-orbit settings.
+
+Existing unrelated workspace edits remain outside these integration commits.

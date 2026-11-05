@@ -138,6 +138,7 @@ const TrovaVoice = (() => {
       confirmationHeard = false;
       proposal = null;
       const d = await api('/api/agent/confirm', {proposal_id}, true);
+      proposal = d.confirmation || null;  // A new scan view still requires a new spoken yes.
       h.onAgent && h.onAgent(d);
       return d;
     },

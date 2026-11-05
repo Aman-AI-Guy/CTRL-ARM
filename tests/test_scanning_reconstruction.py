@@ -87,19 +87,21 @@ def test_scan_speech_plans_without_execution_and_flip_invalidates_context(tmp_pa
     c.post('/api/select', data={'text': 'oggetto 7'})
     before = list(st.arm.tcp_mm())
     planned = c.post('/api/agent/task', json={'text': 'Scansionalo.'}).json()
-    assert planned['confirmation'] and planned['scan_plan']['next']['validated']
+    assert planned['confirmation'] is None and planned['scan_plan']['next'] is None
+    assert 'Measure object_height_mm' in planned['reason']
     assert st.scans.active and list(st.arm.tcp_mm()) == before
     flipped = c.post('/api/scan/orientation', json={'orientation': 'upside_down'}).json()
     assert flipped['requires_reselection'] and not flipped['old_object_frame_valid']
     assert st.selected_context is None
-    denied = c.post('/api/agent/confirm', json={'proposal_id': planned['confirmation']['id']}).json()
+    denied = c.post('/api/agent/confirm', json={'proposal_id': 'absent-orbit-proposal'}).json()
     assert denied['status'] == 'refused' and list(st.arm.tcp_mm()) == before
     st.inventory['snapshot']['objects'][0]['track_id'] = 9
     c.post('/api/select', data={'text': 'oggetto 9'})
     assert st.scans._session(None)['orientation_track_id'] == '9'
     replanned = c.post('/api/scan/next').json()
     assert replanned['selected']['track_id'] == 9
-    assert replanned['confirmation'] and replanned['scan_session'] == st.scans.active
+    assert replanned['confirmation'] is None and replanned['scan_session'] == st.scans.active
+    assert 'Measure object_height_mm' in replanned['reason']
 
 
 def fake_colmap(tmp_path, mode='mesh'):

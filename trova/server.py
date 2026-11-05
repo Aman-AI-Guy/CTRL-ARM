@@ -803,6 +803,45 @@ class AgentHost:
                 'movement_status_unknown': holder.get('final') is None,
                 "reason": "moved" if holder["ok"] else (holder.get("error") or "the arm did not complete the approach")}
 
+    def execute_orbit(self, task, geometry):
+        gateway = self.gateway
+        start = self.robot()
+        current = start.get('joints')
+        if current is None or self.cancel.is_set():
+            return {'ok':False,'reason':'Stationary joints unavailable or task cancelled.'}
+        holder={}
+        deadline=time.monotonic()+30+max(abs(a-b) for a,b in zip(current,task['planned_joints']))/max(.1,task['orbit_speed'])
+        def go():
+            try:
+                # Revalidate after start_arm owns the driver, immediately before execution.
+                decision=gateway.authorize_joints(task['planned_joints'],task['orbit_speed'],source='scan_orbit',geometry=geometry)
+                if not decision.allow_motion:
+                    holder.update(ok=False,reason=decision.reason)
+                    return
+                self.publish(task)
+                holder.update(gateway.execute_joints(task['planned_joints'],task['orbit_speed'],geometry=geometry))
+            except Exception as exc:
+                holder.update(ok=False,reason=str(exc))
+        if not self.st.start_arm(go,job='approach',since=self.started_at):
+            return {'ok':False,'reason':'STOP, busy controller or cancelled command.'}
+        while self.st.arm_thread and self.st.arm_thread.is_alive():
+            if self.cancel.is_set() or time.monotonic()>deadline:
+                self.st.stop_arm()
+                holder.update(ok=False,reason='STOP/cancellation or orbit movement deadline exceeded.')
+                break
+            self.st.arm_thread.join(timeout=.1)
+        actual=self.robot()
+        final=actual.get('joints')
+        reached=bool(final and max(abs(a-b) for a,b in zip(final,task['planned_joints']))<=1 and
+                     not actual.get('moving') and not actual.get('error_code'))
+        tcp=actual.get('xyz_mm')
+        reached=reached and tcp is not None and np.linalg.norm(np.asarray(tcp)-task['planned_target'])<=2
+        observed=bool(final and max(abs(a-b) for a,b in zip(final,current))>.1)
+        return {'ok':bool(holder.get('ok') and reached),'motion_observed':observed,
+                'movement_status_unknown':final is None,
+                'reason':holder.get('reason') if not holder.get('ok') else
+                         'Joint/TCP target reached; fresh visual verification is still required.' if reached else 'Final telemetry did not verify the orbit pose.'}
+
     def record_capture(self, frame, meta, selected):
         if self.st.scans.active is None:
             return None
@@ -2217,7 +2256,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                 return _agent_result({"ok": True, "status": "awaiting_reselection", "workflow_state": "object_reoriented",
                                       "reason": changed['reason'], "hardware_moved": False, "confirmation": None,
                                       "spoken_message": "Ho aperto un nuovo gruppo di acquisizione. Ora seleziona di nuovo l'oggetto; la posizione precedente non è più valida."}, text)
-            if re.search(r"(?i)\b(scan\w*|scansion\w*|reconstruct\w*|ricostru\w*)\b", text):
+            if re.search(r"(?i)(\b(scan\w*|scansion\w*|reconstruct\w*|ricostru\w*)\b|modello\s*3d|3d\s*model)", text):
                 if re.search(r"(?i)\b(reconstruct\w*|ricostru\w*)\b", text):
                     if not st.scans.last:
                         return _refused("No scan dataset exists. Acquire overlapping views first.", text)
@@ -2228,8 +2267,10 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                                           "reason": "Reconstruction queued; no model is claimed yet.",
                                           "hardware_moved": False, "confirmation": None}, text)
                 context = st.selected_context
-                if not context or not context.get("selected"):
-                    return _refused("Select the object before starting a scan.", text)
+                needs_selection = not context or not context.get('selected') or bool(re.search(r'(?i)\b(seleziona|select)\b',text))
+                if needs_selection:
+                    result=agent_mod.run(host,text,skill_sequence=['inspect_scene','select_object','locate_object','start_scan','plan_orbit','observe_from_viewpoint'])
+                    return _agent_result(result,text)
                 object_id = str(context["selected"]["track_id"])
                 active = st.scans._session(st.scans.active) if st.scans.active else None
                 if active and str(active.get('orientation_track_id', active['object_id'])) != object_id:
@@ -2239,7 +2280,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                     if st.vision.intrinsics:
                         st.scans._session(session['id'])["intrinsics"] = st.vision.intrinsics
                 result = agent_mod.run(host, text, selected_context=context,
-                                       skill_sequence=["inspect_scene", "locate_object", "plan_scan_view", "move_above_object"])
+                                       skill_sequence=["inspect_scene", "locate_object", "start_scan", "plan_orbit", "observe_from_viewpoint"])
                 return _agent_result(result, text)
             context = st.selected_context if refers_to_selection(text) else None
             if context and context.get("snapshot_id") != ((st.inventory or {}).get("snapshot") or {}).get("id"):
@@ -2478,6 +2519,10 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             return st.reconstruction.start(dict(session,postprocessing_replay=True))
         except RuntimeError as exc:
             raise HTTPException(409,str(exc)) from None
+
+    @app.get('/api/reconstruction/jobs')
+    def api_reconstruction_jobs():
+        return [st.reconstruction.public(job) for job in st.reconstruction.jobs.values()]
 
     @app.get("/api/reconstruction/{job_id}")
     def api_reconstruction_status(job_id: str):

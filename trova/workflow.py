@@ -21,6 +21,7 @@ def fingerprint(host):
                "camera_kind": host.camera_kind, "image_size": host.image_size,
                "camera_body": repr(getattr(host.gateway, "camera", None)),
                "keepouts": repr(getattr(host.gateway, "keepouts", None)),
+               "orbit_settings": getattr(getattr(host,'orbits',None),'public',lambda:None)(),
                "accel": getattr(host.gateway, "max_accel_mm_s2", None)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -29,6 +30,8 @@ def receipt(host, task):
     return {"id": uuid.uuid4().hex, "expires_at": time.time() + PROPOSAL_TTL_S,
             "fingerprint": fingerprint(host), "robot": copy.deepcopy(host.robot()),
             "target_mm": list(task["planned_target"]),
+            "joints_deg": copy.deepcopy(task.get('planned_joints')),
+            "orbit_geometry": copy.deepcopy(task.get('orbit_geometry')),
             "object_id": (task.get("selected") or {}).get("track_id")}
 
 
@@ -72,6 +75,8 @@ def receipt_error(host, task, proposal_id):
     if (pending["target_mm"] != task.get("planned_target")
             or pending["object_id"] != (task.get("selected") or {}).get("track_id")):
         return "The selected object or target changed. Request a new plan."
+    if pending.get('joints_deg') != task.get('planned_joints') or pending.get('orbit_geometry') != task.get('orbit_geometry'):
+        return 'The orbit proposal changed. Request a new plan.'
     return None
 
 

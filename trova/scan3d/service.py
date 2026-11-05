@@ -56,6 +56,10 @@ class OrbitStore:
             raise ValueError('Localization uncertainty is invalid.')
         # Inflate object keep-clear cylinder instead of treating an uncertain point as exact.
         context.scene.obj_radius += uncertainty
+        anchor=task.get('orbit_anchor_joints')
+        if anchor is not None:
+            if len(anchor)!=5 or not np.isfinite(anchor).all():raise ValueError('Invalid scan cable reference.')
+            context.cable_reference_deg=float(anchor[4])
         return context
 
     def plan(self, host, task, views=()):
