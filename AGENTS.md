@@ -29,6 +29,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 
 | Feature | Status | Where | Notes |
 |---|---|---|---|
+| M5 A: retained calibration integration | Algorithms migrated; historical replay verified; no active import | `scan3d/flange.py`, `scan3d/marker_fit.py`, `scan3d/evidence.py`, `geom.py`, `integration_m5.py` | The original 1600×900 flange-frame calibration is not a 1640×1232 TCP calibration. No auto activation, rescale or double rotation. Original half-split evaluation replayed at median 1.8504 mm / p95 4.6725 mm; it uses full-fit marker planes and is not independent ruler validation. Historical 6.148 px reprojection exceeds the active 1.5 px gate. See `docs/M5_INTEGRATION.md`. |
 | Object proposals (empty-table difference, lighting normalisation, occlusion) | Done, tested | `proposals.py` | Tune `TROVA_BLOB_THRESH` on the real table |
 | Find by words / photo, clarifying question, direct-box fallback | Done, tested (mock + request format) | `finder.py` | Needs live key to verify accuracy |
 | What changed (match + 2-of-3 persistence + Grok verify + naive baseline) | Done, tested | `changes.py` | |
@@ -276,6 +277,8 @@ Operator-supervised first movement. This was not run. `trova/geom.py` `FIRST_MOV
 - Change verification sends at most 12 candidates to Grok; more means "the camera probably moved" (not clear).
 
 ## Changelog (newest first)
+
+- 2026-11-05 M5 A: migrated flange-coordinate and marker bundle-calibration algorithms, added historical provenance/profile compatibility and read-only replay tools, preserved the imported archive, and forced automated tests to simulated/no-telemetry defaults. No physical arm commands or historical calibration activation.
 
 - 2026-11-05 Continued M4 with guarded scan-view planning, strict capture-quality metadata, human reorientation/reselection groups, persistent datasets, and optional cancellable COLMAP reconstruction jobs with artifact/quality reporting. Added guarded IK queries on the existing operate-driver connection and sampled-path/orientation checks. Verified offline and in Chromium; no physical motion or real reconstruction was performed.
 

@@ -1,6 +1,10 @@
 .venv/
 __pycache__/
 *.pyc
+# Retained experiment archive: keep raw evidence local; migrate reviewed source explicitly.
+/Test_3d_live_video/
+*:Zone.Identifier
+*.part
 .env
 .pytest_cache/
 data/*

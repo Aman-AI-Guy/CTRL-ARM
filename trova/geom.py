@@ -20,6 +20,10 @@ One RGB image does not measure the object's height, so that point is not a verif
 
 from __future__ import annotations
 
+# Shared flange kinematics and marker fitting migrated from the retained 3D workspace.
+# Importing these algorithms never installs or activates a historical calibration.
+from .scan3d.flange import flange_pose
+
 import json
 import time
 from pathlib import Path
@@ -379,6 +383,22 @@ def fit_plane(points) -> tuple[np.ndarray, np.ndarray, float] | None:
 
 
 class VisionStore:
+    def historical_compatibility(self, image_size=None, rotation=180):
+        from .scan3d.evidence import calibration_report
+        try:
+            return calibration_report(image_size, rotation)
+        except FileNotFoundError as exc:
+            return {'available': False, 'active': False, 'valid_for_motion': False, 'reasons': [str(exc)]}
+
+    @staticmethod
+    def fit_marker_observations(images, observations, image_size, marker_mm):
+        """Return a flange-frame fit candidate, never change the active geometry implicitly."""
+        from .scan3d.marker_fit import solve_all
+        problem, fitted, info = solve_all(images, observations, image_size, marker_mm, say=lambda *_: None)
+        k, dist, transform, markers = problem.unpack(fitted)
+        return {'K': k.tolist(), 'dist': dist.tolist(), 'T_flange_camera': transform.tolist(),
+                'markers': {str(key): value.tolist() for key, value in markers.items()},
+                'frame': 'flange', 'units': 'mm', 'active': False, 'valid_for_motion': False, 'fit': info}
     """Observations plus the matrices solved from them. Starts empty."""
 
     def __init__(self, path: Path | None = None):

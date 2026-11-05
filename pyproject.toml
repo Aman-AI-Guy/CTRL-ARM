@@ -18,6 +18,7 @@ dependencies = [
 dev = ["pytest", "httpx"]
 robots = ["xarm-python-sdk", "pyserial"]   # UR and Elite need nothing: plain sockets; pyserial for the LED ring
 ui = ["playwright"]            # tests/browser_smoke.py (uses the installed Google Chrome)
+reconstruction = ["open3d>=0.18", "scipy>=1.10", "matplotlib>=3.7"]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "tests"]
@@ -28,7 +29,8 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["trova", "trova.arm"]
+packages = ["trova", "trova.arm", "trova.scan3d"]
 
 [tool.setuptools.package-data]
 trova = ["static/*"]
+"trova.scan3d" = ["*.json", "LICENSE*"]
