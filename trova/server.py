@@ -42,6 +42,7 @@ from .motion import apply_operator_safety, safety_report
 from .arm.telemetry import observation_record, open_reader
 from .acquire import ScanBook
 from . import agent as agent_mod
+from .workflow import feedback, receipt_error, refers_to_selection
 from . import failures as fail_log
 from .record_pdf import build as build_record_pdf
 from . import history, preflight
@@ -170,6 +171,11 @@ class AgentReq(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str
     step: bool = False
+
+
+class ConfirmReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    proposal_id: str
 
 
 class DropReq(BaseModel):
@@ -301,6 +307,9 @@ class State:
         self.observe_clearance_mm = _observe_clearance()
         self.stage_samples: list[dict] = []
         self.task_cancel = threading.Event()
+        self.agent_lock = threading.Lock()
+        self.selected_context: dict | None = None
+        self.pending_motion: dict | None = None
 
     def note_stage(self, stage: str, seconds: float) -> None:
         self.stage_samples.append({"stage": stage, "seconds": round(float(seconds), 3), "at": time.time()})
@@ -358,8 +367,14 @@ class State:
         self.stop_ts = time.time()
         self.cancel.set()
         self.task_cancel.set()
+        self.pending_motion = None
+        self.task_resume = None
         self.arm.stop()
         self.light.show("stop")
+        if self.last_agent:
+            self.last_agent.update(status="stopped", workflow_state="movement_refused_or_failed",
+                                   reason="STOP requested", confirmation=None)
+            feedback(self.last_agent, self.last_agent.get("goal", ""))
 
     def _take_arm(self, job: str) -> threading.Event:
         """Caller holds arm_lock. End the running command (unless it must not be cut), then arm a fresh cancel."""
@@ -638,6 +653,13 @@ class AgentHost:
         self.frame = st.scene_frame
         self.boxes = st.scene_boxes
         self._jpeg: bytes | None = None
+        self.confirmation_required = True
+        self.started_at = time.time()
+
+    def publish(self, task):
+        self.st.last_agent = feedback({"status": "executing", "workflow_state": "movement_executing",
+                                       "selected": task.get("selected"), "hardware_moved": False,
+                                       "execution_mode": self.gateway.mode}, task["goal"])
 
     def snapshot(self) -> dict:
         out = self.st.snapshot_scene(home=False)
@@ -714,11 +736,14 @@ class AgentHost:
             holder["final"] = gateway.current_pose()
             holder["error"] = getattr(self.st.arm, "last_error", None)
 
-        if not self.st.start_arm(go, job="approach"):
+        if self.cancel.is_set() or not self.st.start_arm(go, job="approach", since=self.started_at):
             return {"ok": False, "reason": "STOP is latched. The approach was not started."}
         if self.st.arm_thread is not None:
-            self.st.arm_thread.join(timeout=30)
+            target_distance = np.linalg.norm(np.asarray(target) - np.asarray(gateway.current_pose()))
+            deadline = 30 + float(target_distance) / max(1.0, gateway.max_speed_mm_s)
+            self.st.arm_thread.join(timeout=deadline)
         if "ok" not in holder:
+            self.st.stop_arm()
             return {"ok": False, "reason": holder.get("error") or "the approach did not finish"}
         return {"ok": bool(holder["ok"]), "final_mm": holder.get("final"),
                 "reason": "moved" if holder["ok"] else (holder.get("error") or "the arm did not complete the approach")}
@@ -1577,6 +1602,14 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
             else:
                 st.select_history = []
             out = pack(decision, objects, authoritative, snap["id"])
+            st.pending_motion = None
+            st.task_resume = None
+            st.selected_context = ({"selected": out["object"], "snapshot_id": snap["id"],
+                                    "snapshot_pose": snap.get("pose"), "objects": objects,
+                                    "authoritative": out["authoritative"], "grok_mode": snap.get("grok_mode"),
+                                    "phase": "selected"} if out.get("object") else None)
+            out["spoken_message"] = feedback({"workflow_state": "object_selected", "selected": out.get("object"),
+                                               "question": out.get("question"), "reason": out.get("reason")}, text)["spoken_message"]
             st.audit.event("select", status=out["status"], snapshot_id=snap["id"],
                            track_id=None if not out["object"] else out["object"]["track_id"],
                            authoritative=out["authoritative"], motion_allowed=False)
@@ -2025,19 +2058,17 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         summary["n"] = len(st.stage_samples)
         return summary
 
-    @app.post("/api/agent/task")
-    def api_agent_task(body: AgentReq):
-        if not body.text.strip():
-            raise HTTPException(400, "Say what to do")
-        st.task_cancel = threading.Event()
-        host = AgentHost(st)
-        continued = st.task_resume if body.step else None
-        try:
-            result = agent_mod.run(host, body.text.strip(), step=body.step, continued=continued)
-        except GrokError as exc:
-            return fail(exc, "agent")
-        st.task_resume = result.pop("resume", None) if body.step else None
-        result.pop("resume", None)
+    def _agent_result(result, text):
+        resumed = result.pop("resume", None)
+        st.task_resume = resumed
+        st.pending_motion = resumed if result.get("confirmation") else None
+        if result.get("status") == "clarify" and result.get("question"):
+            st.select_history = [(result["question"], "")]
+        if result.get("selected") and resumed:
+            st.selected_context = {k: resumed.get(k) for k in
+                                   ("selected", "objects", "snapshot_pose", "snapshot_id", "authoritative", "grok_mode")}
+            st.selected_context["phase"] = "selected"
+        feedback(result, text)
         st.last_agent = result
         st.audit.event("vision_task", goal=result.get("goal"), status=result.get("status"),
                        phase=result.get("phase"), hardware_moved=result.get("hardware_moved"),
@@ -2046,10 +2077,78 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
                        verified_tool_position=False, reason=result.get("reason"))
         return result
 
+    def _refused(reason, text=""):
+        return _agent_result({"ok": False, "status": "refused", "workflow_state": "movement_refused_or_failed",
+                              "reason": reason, "hardware_moved": False, "simulation_moved": False,
+                              "selected": (st.selected_context or {}).get("selected"),
+                              "confirmation": None, "verified_tool_position": False}, text)
+
+    @app.post("/api/agent/task")
+    def api_agent_task(body: AgentReq):
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(400, "Say what to do")
+        # A conversational yes can never create or authorize a new trajectory.
+        import re
+        if re.fullmatch(r"(?i)(s[iì]|yes|ok|procedi|proceed|go ahead)([,! .]+(procedi|proceed))?[.! ]*", text):
+            return _refused("Confirm the specific validated proposal using its proposal_id.", text)
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409, "Another agent task is running")
+        try:
+            st.pending_motion = None
+            st.task_cancel = threading.Event()
+            host = AgentHost(st)
+            if re.search(r"(?i)\b(scan\w*|scansion\w*|reconstruct\w*|ricostru\w*)\b", text):
+                # Scanning is a separate intent, never a generic permission to approach.
+                report = st.vision.assess(host.image_size)
+                return _agent_result({"ok": False, "status": "held", "workflow_state": "localization_blocked",
+                                      "selected": (st.selected_context or {}).get("selected"),
+                                      "calibration_valid": report["valid"], "calibration": report,
+                                      "reason": "Scanning requires validated localization and separately planned viewpoints. "
+                                                + "; ".join(report.get("reasons") or []),
+                                      "hardware_moved": False, "motion_proposed": False,
+                                      "confirmation": None}, text)
+            context = st.selected_context if refers_to_selection(text) else None
+            if context and context.get("snapshot_id") != ((st.inventory or {}).get("snapshot") or {}).get("id"):
+                return _refused("The scene changed. Select the object in the current snapshot.", text)
+            result = agent_mod.run(host, text, step=body.step,
+                                   continued=st.task_resume if body.step else None, selected_context=context)
+            return _agent_result(result, text)
+        except GrokError as exc:
+            return _refused(str(exc), text)
+        finally:
+            st.agent_lock.release()
+
+    @app.post("/api/agent/confirm")
+    def api_agent_confirm(body: ConfirmReq):
+        if not st.agent_lock.acquire(blocking=False):
+            raise HTTPException(409, "Another agent task is running")
+        try:
+            pending = st.pending_motion
+            st.pending_motion = None  # Single use, including rejected confirmations.
+            if not pending:
+                return _refused("No validated motion proposal is awaiting confirmation.", "procedi")
+            if pending.get("snapshot_id") != ((st.inventory or {}).get("snapshot") or {}).get("id"):
+                return _refused("The scene changed. Select the object and request a new plan.", pending["goal"])
+            host = AgentHost(st)
+            error = receipt_error(host, pending, body.proposal_id)
+            if error:
+                return _refused(error, pending["goal"])
+            if host.cancel.is_set():
+                return _refused("STOP or cancellation requested", pending["goal"])
+            result = agent_mod.run(host, pending["goal"], continued=pending, confirm_id=body.proposal_id)
+            return _agent_result(result, pending["goal"])
+        finally:
+            st.agent_lock.release()
+
     @app.post("/api/agent/cancel")
     def api_agent_cancel():
         st.task_cancel.set()
+        st.pending_motion = None
         st.task_resume = None
+        if st.arm_job == "approach" and st.arm_thread and st.arm_thread.is_alive():
+            st.stop_arm()
+        _refused("Task cancelled. Previous motion confirmations are invalid.", "annulla")
         st.audit.event("vision_task", status="cancel_requested")
         return {"cancelled": True}
 

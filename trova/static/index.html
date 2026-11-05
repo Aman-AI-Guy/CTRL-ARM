@@ -115,7 +115,7 @@ label.file{padding:9px 14px;border-radius:8px;border:1px solid var(--line);backg
     <h2>Vision task</h2>
     <div class="muted">Grok picks a skill. A move is a proposal until the motion gateway accepts it and calibration, clearance, and the operator unlock are all in place. A synthetic picture cannot authorize motion.</div>
     <div class="row" style="margin-top:8px"><input type="text" id="agentq" placeholder="trova l'evidenziatore rosa e posizionati sopra" onkeydown="if(event.key==='Enter')runAgent()">
-      <button onclick="runAgent(true)">Step</button><button onclick="runAgent()">Run task</button><button onclick="post('/api/agent/cancel')">Cancel task</button></div>
+      <button onclick="runAgent(true)">Step</button><button onclick="runAgent()">Run task</button><button onclick="cancelAgent()">Cancel task</button></div>
     <div id="agentres" class="result"></div>
     <div class="muted" id="motioninfo"></div>
     <div class="muted" id="visioninfo"></div>
@@ -296,6 +296,8 @@ async function runSpoken(text) {
     return TrovaSpeech.say(it ? 'Fermo.' : 'Stopped.', $('pttlang').value);
   }
   if (p.cmd === 'inventory') { if (S) S.pending_select = null; return doInventory(); }
+  if (p.cmd === 'confirm') return confirmAgent();
+  if (p.cmd === 'cancel') return cancelAgent();
   if (S && S.pending_select && (p.cmd === 'find' || p.cmd === 'select')) return selectSpoken(p.text || text);
   if (p.cmd === 'find' && S && S.pending_question) return answer(text);   // the answer to Trova's question
   if (p.cmd === 'select') return selectSpoken(p.text);
@@ -555,10 +557,25 @@ async function runAgent(step) {
   const el = $('agentres'); el.className = 'result show'; el.innerHTML = step === true ? 'One skill…' : 'Running the task…';
   const body = {text};
   if (step === true) body.step = true;
-  try { showAgent(await json('/api/agent/task', body)); } catch (e) {}
+  try { const d = await json('/api/agent/task', body); showAgent(d);
+    if (speakOn()) TrovaSpeech.say(d.spoken_message || d.reason, sayLang(text)); } catch (e) {}
+}
+let agentProposal = null;
+async function confirmAgent() {
+  const proposal_id = agentProposal && agentProposal.id;
+  agentProposal = null;
+  const d = await json('/api/agent/confirm', {proposal_id: proposal_id || ''});
+  showAgent(d);
+  if (speakOn()) TrovaSpeech.say(d.spoken_message || d.reason, $('pttlang').value);
+}
+async function cancelAgent() {
+  agentProposal = null;
+  await post('/api/agent/cancel');
+  await refresh();
 }
 function showAgent(d) {
   if (!d || !d.status) return;
+  agentProposal = d.confirmation || null;
   const el = $('agentres');
   el.className = 'result show st-' + (d.goal_achieved ? 'found' : d.status === 'clarify' ? 'clarify' : 'not_found');
   const steps = (d.steps || []).map(s => `<li><b>${esc(s.skill)}</b> ${esc(s.reason || '')}</li>`).join('');
@@ -568,6 +585,8 @@ function showAgent(d) {
   const safety = d.proposal && d.proposal.safety;
   const camState = (typeof S !== 'undefined' && S && S.source) ? (S.source.online ? 'camera online' : (S.source.kind === 'pi' ? 'camera offline' : 'camera ' + S.source.kind)) : 'camera';
   el.innerHTML = `<div class="big">${esc(d.status)} · ${esc(d.phase || '')}</div><div>${esc(d.reason || '')}</div>` +
+    `<div id="agentblocker" role="status"><b>${esc(d.workflow_state || '')}</b> ${esc(d.spoken_message || '')}</div>` +
+    (agentProposal ? `<div>Proposal ${esc(agentProposal.id)} · expires ${esc(new Date(agentProposal.expires_at * 1000).toLocaleTimeString())}</div><button onclick="confirmAgent()">Confirm validated motion</button><button onclick="cancelAgent()">Cancel proposal</button>` : '') +
     (d.question ? `<div class="big">${esc(d.question)}</div>` : '') +
     `<div class="muted">${esc(camState)} · Grok ${esc(d.grok_mode || (d.authoritative ? 'live' : 'not live'))} · calibration ${d.calibration_valid ? 'valid' : 'not valid'} · motion ${prop ? 'proposed' : 'not proposed'} · movement ${d.hardware_moved ? 'executed' : 'not executed'}</div>` +
     (d.motion_lock ? `<div style="color:var(--warn)">${esc(d.motion_lock)}</div>` : '') +

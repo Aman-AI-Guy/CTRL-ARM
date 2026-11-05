@@ -19,6 +19,7 @@ from .geom import VisionStore, pose_changed
 from .grok import GrokError, register_mock
 from .motion import sample_segment
 from .scene import decide_text, from_finder, question_for
+from .workflow import receipt, receipt_error
 
 MAX_STEPS = 8
 APPROACH_SPEED_MM_S = 50.0
@@ -380,6 +381,14 @@ def skill_inspect(host, task, argument: str) -> dict:
     host.image_size = [snap.get("width") or host.image_size[0], snap.get("height") or host.image_size[1]]
     _calibration_flag(host, task)
     task["phase"] = "inspected"
+    if task.get("requested_track_id") is not None:
+        chosen = next((obj for obj in task["objects"] if obj.get("track_id") == task["requested_track_id"]), None)
+        if not chosen or chosen.get("identity_uncertain") or chosen.get("association") == "uncertain":
+            task["motion_lock"] = "The selected object's identity is no longer reliable in the fresh image. Select it again."
+            task["phase"] = "blocked"
+            return _result("inspect_scene", False, task["motion_lock"], task, terminal=True, executed=False)
+        task["selected"] = chosen
+        task["phase"] = "selected"
     return _result("inspect_scene", True, snap.get("summary") or f"{len(task['objects'])} objects", task,
                    grok_mode=snap.get("grok_mode"), n_objects=len(task["objects"]),
                    authoritative=task["authoritative"], snapshot_reused=reused)
@@ -572,6 +581,16 @@ def skill_plan(host, task, argument: str) -> dict:
 
 
 def _move(host, task, skill: str) -> dict:
+    if getattr(host, "confirmation_required", False) and task.get("_confirmed"):
+        invalid = receipt_error(host, task, task.get("_confirmed"))
+        if invalid:
+            task["motion_lock"] = invalid
+            task["phase"] = "blocked"
+            return _result(skill, False, invalid, task, terminal=True, executed=False)
+    if getattr(host, "confirmation_required", False) and not task.get("planned_target"):
+        planned = skill_plan(host, task, "")
+        if not planned.get("ok"):
+            return planned
     locked = _refuse_locked(task, skill)
     if locked:
         return locked
@@ -589,7 +608,7 @@ def _move(host, task, skill: str) -> dict:
         return _result(skill, False, err, task, rejection=err, executed=False)
     target = list(task["planned_target"]) if task.get("planned_target") else list(goal["target_mm"])
     # Keep the already planned point. A new number from the caller is not applied.
-    robot = task.get("_robot") or _robot(host)
+    robot = _robot(host)
     start = None
     if robot.get("source") == "telemetry" and robot.get("xyz_mm") and len(robot["xyz_mm"]) >= 3:
         start = tuple(float(v) for v in robot["xyz_mm"][:3])
@@ -618,7 +637,21 @@ def _move(host, task, skill: str) -> dict:
         return _result(skill, False, reason, task, rejection=reason, motion=task["proposal"],
                        executed=False, target={"target_mm": target, "verified_tool_position": False,
                                                "approximate_observation_goal": True})
+    if getattr(host, "confirmation_required", False) and not task.get("_confirmed"):
+        task["confirmation"] = receipt(host, task)
+        task["phase"] = "awaiting_confirmation"
+        return _result(skill, True, "A validated proposal is awaiting operator confirmation", task,
+                       terminal=True, executed=False)
+    if host.cancel.is_set():
+        task["phase"] = "blocked"
+        return _result(skill, False, "STOP or cancellation requested", task, terminal=True, executed=False)
+    task["workflow_state"] = "movement_executing"
+    publish = getattr(host, "publish", None)
+    if publish:
+        publish(task)
     outcome = host.execute(target)
+    task.pop("_confirmed", None)
+    task.pop("confirmation", None)
     moved = bool(outcome.get("ok"))
     task["phase"] = "moved" if moved else "blocked"
     if not moved:
@@ -673,7 +706,8 @@ def skill_evaluate(host, task, argument: str) -> dict:
     loc_valid = bool((task.get("location") or {}).get("ok") and task.get("calibration_valid"))
     association = None if not hit else hit.get("association")
     identity_ok = association in ("same_view", "geometric")
-    achieved = bool(reached and visible and loc_valid and identity_ok)
+    achieved = bool(err is None and not robot.get("moving") and not robot.get("error_code")
+                    and reached and visible and loc_valid and identity_ok and not (hit or {}).get("identity_uncertain"))
     if near and not reached:
         achieved = False
     checks = {
@@ -859,17 +893,18 @@ def _resume_task(task: dict) -> dict:
     keys = ("goal", "phase", "selected", "objects", "location", "planned_target", "proposal",
             "motion_lock", "evaluation", "question", "authoritative", "calibration_valid",
             "calibration", "last_reason", "steps", "replans", "grok_mode", "snapshot_pose",
-            "snapshot_id", "ik_verified", "timings", "summary")
+            "snapshot_id", "ik_verified", "timings", "summary", "confirmation", "workflow_state", "workflow_events")
     return {key: task.get(key) for key in keys}
 
 
-def run(host, text: str, *, step: bool = False, continued: dict | None = None) -> dict:
+def run(host, text: str, *, step: bool = False, continued: dict | None = None,
+        confirm_id: str | None = None, selected_context: dict | None = None) -> dict:
     """Bounded observe-plan-act-observe loop. Hardware moves only when every qualification passes.
 
     step=True runs one skill and returns. The caller may pass the previous resume dict.
     """
     goal = text.strip()
-    reusable = (step and isinstance(continued, dict) and continued.get("goal") == goal
+    reusable = ((step or confirm_id) and isinstance(continued, dict) and continued.get("goal") == goal
                 and continued.get("phase") not in {"reported", "blocked", None})
     if reusable:
         task = dict(continued)
@@ -884,7 +919,15 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None) -
             "question": None, "authoritative": False, "calibration_valid": False, "last_reason": "",
             "steps": [], "timings": [], "replans": 0,
         }
+        if selected_context:
+            task.update(selected_context)
+            task["requested_track_id"] = (task.get("selected") or {}).get("track_id")
+            task["phase"] = "start"
+    if confirm_id:
+        task["_confirmed"] = confirm_id
+        task["phase"] = "planned"
     _calibration_flag(host, task)
+    task["workflow_events"] = list(task.get("workflow_events") or [])
     started = time.monotonic()
     status = "completed"
     limit = 1 if step else MAX_STEPS
@@ -896,7 +939,15 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None) -
             status = "timeout"
             task["last_reason"] = "the task reached its time limit"
             break
-        choice = choose_skill(host.grok, task)
+        # Confirmation executes the bound proposal; the model cannot substitute another skill.
+        if task.get("requested_track_id") is not None and task["phase"] == "start":
+            choice = {"skill": "inspect_scene", "argument": "", "ok": True}
+        elif task.get("_confirmed"):
+            choice = {"skill": "move_above_object", "argument": "", "ok": True}
+        elif getattr(host, "confirmation_required", False) and task["phase"] in {"moved", "observed"}:
+            choice = {"skill": "capture_image" if task["phase"] == "moved" else "evaluate_goal", "argument": ""}
+        else:
+            choice = choose_skill(host.grok, task)
         if not choice.get("ok", True):
             task["steps"].append(_result(choice.get("skill") or "report_status", False, choice.get("reason", ""), task,
                                          terminal=True, rejection=choice.get("reason")))
@@ -904,6 +955,13 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None) -
             status = "blocked"
             break
         name = choice["skill"]
+        if host.cancel.is_set():
+            status = "stopped"
+            break
+        if time.monotonic() - started > float(getattr(host, "timeout_s", 90)):
+            status = "timeout"
+            task["last_reason"] = "the task reached its time limit before executing the skill"
+            break
         if name in MOVE_SKILLS and task.get("motion_lock"):
             reason = "a rejected movement cannot be retried by changing the distance or the direction: " + task["motion_lock"]
             task["steps"].append(_result(name, False, reason, task, terminal=True, rejection=reason, executed=False))
@@ -911,6 +969,9 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None) -
             status = "blocked"
             break
         phase_before = task["phase"]
+        if name == "locate_object":
+            task["workflow_state"] = "localization_requested"
+            task["workflow_events"].append({"state": "localization_requested", "at": time.time()})
         began = time.perf_counter()
         try:
             result = SKILL_FN[name](host, task, choice.get("argument") or "")
@@ -925,6 +986,11 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None) -
             note(name, elapsed)
         task["last_reason"] = result.get("reason")
         task["steps"].append(result)
+        event_state = {"select_object": "object_selected", "plan_approach": "trajectory_proposed"}.get(name)
+        if event_state and result.get("ok"):
+            task["workflow_events"].append({"state": event_state, "at": time.time()})
+            if name == "plan_approach":
+                task["workflow_events"].append({"state": "trajectory_safety_validated", "at": time.time()})
         aliases = {"select_object": "target_selection", "report_status": "result_reporting",
                    "capture_image": "camera_acquisition"}
         if name in aliases:
@@ -958,6 +1024,29 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None) -
         elif task["phase"] == "blocked" or task.get("motion_lock"):
             status = "blocked"
     evaluation = task.get("evaluation") or {}
+    moved = any(row.get("executed") for row in task["steps"])
+    simulated = bool(getattr(getattr(host, "gateway", None), "simulated", True))
+    proposal = task.get("proposal") or {}
+    if status == "stopped":
+        state = "movement_refused_or_failed"
+        task["last_reason"] = "STOP or cancellation requested"
+    elif task["phase"] == "awaiting_confirmation":
+        state = "awaiting_operator_confirmation"
+        status = "awaiting_confirmation"
+    elif moved:
+        state = "movement_completed_verified" if evaluation.get("goal_achieved") and not simulated else "movement_unverified"
+    elif task.get("motion_lock"):
+        state = ("localization_blocked" if not (task.get("location") or {}).get("ok") else
+                 "hardware_authorization_missing" if proposal.get("status") == "dry_run" else
+                 "movement_refused_or_failed")
+    elif task.get("planned_target"):
+        state = "trajectory_safety_validated" if proposal.get("ok") else "trajectory_proposed"
+    elif task.get("location"):
+        state = "localization_requested"
+    else:
+        state = "object_selected" if task.get("selected") else "localization_requested"
+    task["workflow_state"] = state
+    task["workflow_events"].append({"state": state, "at": time.time()})
     return {
         "ok": status in ("completed", "clarify", "held", "step") and not (
             status == "held" and task["phase"] == "blocked") and (
@@ -969,7 +1058,13 @@ def run(host, text: str, *, step: bool = False, continued: dict | None = None) -
         "evaluation": evaluation, "goal_achieved": bool(evaluation.get("goal_achieved")),
         "motion_lock": task.get("motion_lock"), "steps": task["steps"],
         "authoritative": task.get("authoritative"), "grok_mode": task.get("grok_mode"),
-        "hardware_moved": any(step.get("executed") for step in task["steps"]),
+        "hardware_moved": moved and not simulated,
+        "simulation_moved": moved and simulated,
+        "workflow_state": state,
+        "workflow_events": task["workflow_events"],
+        "execution_mode": getattr(getattr(host, "gateway", None), "mode", None),
+        "confirmation": {k: v for k, v in (task.get("confirmation") or {}).items()
+                         if k in {"id", "expires_at", "target_mm", "object_id"}} or None,
         "motion_proposed": task.get("planned_target") is not None,
         "planned_target": task.get("planned_target"),
         "blockers": qualification_blockers(host, task),

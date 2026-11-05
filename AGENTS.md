@@ -36,6 +36,7 @@ cp .env.example .env            # XAI_API_KEY empty = MOCK mode (Grok simulated)
 | Cobot drivers UR / Elite (sockets), xArm (SDK), safety box, stop-and-hold | Done, tested vs fakes | `arm/` | **The team has the xArm 5 (XF1203, 700 mm reach, 3 kg).** First connection: `python -m trova.arm.bringup <ip>` (`arm/bringup.py`: reads state and errors, hand-guided ready / park / corner poses, 30 mm test move, STOP test, prints the .env lines). `TROVA_ARM_TCP_MM` sets the pointer length; UI "Clear arm errors" after a collision stop. Not yet run on real hardware. STOP latches (drivers refuse until the server calls `ready()` for a new command); one motion at a time (`State.start_arm` under `arm_lock`); STOP during a find cancels its move; a real arm needs `TROVA_ARM_LIMITS` and `TROVA_ARM_HOME_MM` or it refuses to move |
 | Calibration (ArUco, clicks, arm-tip clicks) | Done, tested | `calibration.py`, `server.py` | Real arm refuses to move until calibrated with the arm. Arm points (`st.arm_points`) are never mixed with table clicks; duplicate / collinear points and fits worse than 15 mm are rejected (the bad point is dropped); the image size is stored and an uploaded photo or another resolution blocks the arm |
 | Grok Voice (realtime, confirm-before-move, stop word) | Done; config/token tested | `voice.py`, `static/voice.js` | Not yet heard live |
+| Voice-to-agent proposal confirmation | Offline integration tested; hardware untested | `workflow.py`, `agent.py`, `server.py`, voice and speech clients | Selection persists for follow-up instructions. Spoken and typed autonomous tasks use `/api/agent/task`; confirmation is mandatory for an executable object approach, independent of the legacy checkbox. A single-use 60 s receipt binds the object, target, pose, calibration and safety settings. STOP, cancellation, selection or scene changes invalidate it. `/api/agent/confirm` rechecks the receipt and gateway. Backend `spoken_message` is spoken with browser synthesis; speculative realtime model audio is discarded. Simulation is reported separately from physical execution. See `docs/VOICE_WORKFLOW.md`. |
 | Optional dog room search (sim) | Done, tested | `dog.py` | Go2 driver is a template |
 | Jury mode + eval script | Done, tested | `server.py`, `eval/run_eval.py` | |
 | 1. Table inventory map ("what's on the table?") | Done, tested (mock) | `inventory.py`, `/api/inventory`, UI button, voice tool `describe_table` | Saving a reference now also names its objects (one extra Grok call; `describe=false` to skip), so changes say which object moved |
@@ -124,6 +125,8 @@ server.py (FastAPI) + static/index.html (UI) + static/voice.js (Grok Voice) + au
 | `tests/` | all | Offline tests (`fake_robot.py` = fake UR/Elite controller) |
 
 ## HTTP API
+
+Autonomous task confirmation: `POST /api/agent/confirm` (`proposal_id`, no coordinates or mode). `/api/agent/task` retains selected-object context and returns `workflow_state`, `spoken_message`, `blocker`, and an optional expiring `confirmation`. `/api/agent/cancel` invalidates pending confirmation and stops an active approach. `/api/state.agent` exposes the current result.
 
 `GET /` UI · `GET /api/state` · `GET /api/frame.jpg` · `GET /api/log`
 Find: `POST /api/find` (text, photo, move) · `POST /api/clarify` · `POST /api/arm/point_last`
@@ -271,6 +274,8 @@ Operator-supervised first movement. This was not run. `trova/geom.py` `FIRST_MOV
 - Change verification sends at most 12 candidates to Grok; more means "the camera probably moved" (not clear).
 
 ## Changelog (newest first)
+
+- 2026-11-05 Fixed voice-to-agent context, plan-before-confirm, proposal expiry/revalidation, STOP/cancel invalidation, honest simulated/physical status, and backend-derived spoken/UI blockers. Offline workflow regressions and Chromium smoke exercised; no physical controller commands. Existing unrelated workspace edits remain separate from this fix.
 
 - 2026-11-04 Operator calibration panel, measured-point comparison, a bounded step or auto task loop, and a safety form the model cannot use to enable hardware. Uncertainty outside the workspace blocks the approach. A read-only Pi check did not select the highlighter and did not move the arm. The robot port did not answer, so no new telemetry was read.
 - 2026-11-04 Empty or omitted model names are stored as unknown and are not authoritative. A calibration sample can be rejected or removed without relaxing the gates. Scan records keep the camera-pose formula and a wall-clock gap, and they do not claim synchronisation.

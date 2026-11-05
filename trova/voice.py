@@ -21,9 +21,11 @@ KEYTERMS = ["Trova", "stop", "fermo", "basta", "blister", "forbici", "penna", "p
 
 
 def instructions(confirm_moves: bool, dog: bool) -> str:
-    move = ("Before the arm moves, ask one short yes/no question to confirm, and call point_at_found only after a "
-            "clear yes (si, yes, ok, vai, go). If the person already said 'point at it' or 'show me', that counts as yes."
-            if confirm_moves else "When an object is found, call point_at_found straight away.")
+    move = ("Object selection never authorizes movement. For object-directed motion always call run_vision_task "
+            "to plan first, even when confirmation is unchecked. Never announce an impending move before a tool "
+            "reports movement_executing. Ask for confirmation only for awaiting_operator_confirmation, quoting "
+            "its proposal id internally. On an explicit yes call confirm_motion with that exact proposal_id. "
+            "A request to move is not confirmation of a future proposal. Never fabricate a proposal id.")
     dog_line = ("If find_object returns not_found, offer to send the robot dog to look in the other rooms and, on a yes, "
                 "call search_other_rooms." if dog else "There is no robot dog in this setup; never offer one.")
     return f"""# Role
@@ -49,11 +51,14 @@ Short and plain: one or two sentences. No coordinates or numbers unless asked. N
 - stop_arm: whenever they say stop, wait, fermo, basta. The app also stops the arm on its own when it hears these words.
 - arm_home: "park", "go home", "torna a casa".
 - jog_relative: a short relative move such as "move backward 3 mm" or "sposta a sinistra di 2 cm". Pass the direction and the distance in millimetres exactly as heard. You cannot set the motion mode, the speed, or the workspace. Say the tool's reason, including when the move was rejected.
-- run_vision_task: "find the blue pen and move above it", "trova la penna blu e posizionati sopra". Pass the person's words as text. The tool chooses a skill and may ask a clarifying question. If it returns held, blocked, or rejected, say the reason. Do not retry a rejected move with a different distance or direction. This tool cannot set the motion mode or a safety limit.
+- run_vision_task: "find the blue pen and move above it", "trova la penna blu e posizionati sopra", "ora posizionati sopra". Pass the person's words as text. The backend retains the selected object. Pass "scansionalo" here too: it must report scan readiness honestly. If it returns held, blocked, or rejected, use spoken_message. Do not retry a rejected move with a different distance or direction. This tool cannot set the motion mode or a safety limit.
+- confirm_motion: only after the user explicitly confirms a specific pending validated proposal. Missing authorization, expiration, changed pose or invalid calibration refuse execution. A conversational yes cannot enable hardware.
+- cancel_task: cancel autonomous progression and invalidate confirmation. stop_arm is independent and immediate.
+- task_status: read actual task state. Use spoken_message verbatim. Simulation is never physical movement; task completion is never proof of a reached physical goal. The browser speaks backend messages, not speculative model audio.
 - {dog_line}
 
 # Safety
-The arm only points; it never grabs. describe_table and select_object never move it. Pointing happens only when you call point_at_found after find_object. jog_relative and run_vision_task are checked by the motion gateway and may be refused. You cannot turn on hardware or change a safety limit. stop_arm holds position in software; it is not the physical emergency stop. If a tool returns an error, "rejected", "held", or "blocked", say the reason and do not retry by yourself."""
+The arm only observes and points; it never grabs. describe_table and select_object never move it. point_at_found also routes to the task planner; it cannot bypass proposal confirmation. jog_relative and run_vision_task are checked by the motion gateway and may be refused. You cannot turn on hardware or change a safety limit. stop_arm holds position in software; it is not the physical emergency stop. If a tool returns an error, "rejected", "held", or "blocked", say the reason and do not retry by yourself. Never infer success from ok alone; read workflow_state, hardware_moved, simulation_moved, goal_achieved and spoken_message."""
 
 
 def tools(dog: bool) -> list[dict]:
@@ -96,6 +101,13 @@ def tools(dog: bool) -> list[dict]:
          "description": "Run an object-directed task from the person's words, such as finding an object and moving above it. "
                         "A rejected move is not retried. You cannot pass a mode, a speed, or a limit.",
          "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+        {"type": "function", "name": "confirm_motion",
+         "description": "Confirm the exact validated proposal only after the operator explicitly says yes.",
+         "parameters": {"type": "object", "properties": {"proposal_id": {"type": "string"}}, "required": ["proposal_id"]}},
+        {"type": "function", "name": "cancel_task", "description": "Cancel the autonomous task and its pending confirmation.",
+         "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "task_status", "description": "Read backend task state and its spoken_message; never assume motion success.",
+         "parameters": {"type": "object", "properties": {}}},
         {"type": "function", "name": "jog_relative",
          "description": "Request a short relative move in the robot base frame. The gateway may reject it. "
                         "You cannot pass a mode, a speed, or a limit. Say the returned reason.",
