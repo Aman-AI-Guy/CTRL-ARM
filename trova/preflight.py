@@ -14,7 +14,7 @@ import time
 import cv2
 import numpy as np
 
-from .arm import CartesianArm, SimArm
+from .arm import CartesianArm, SimArm, TaughtGridArm
 from .arm.skills import lift_allowed
 from .camera import DemoSource
 from .grok import GrokError, register_mock
@@ -86,16 +86,31 @@ def _arm(st) -> list[dict]:
     out = []
     c = st.calib
     cal = f"{c.source}, error {c.as_dict()['error_mm']} mm" if c and c.ok else "none"
-    if isinstance(st.arm, CartesianArm):
-        if st.arm_blocked():
-            out.append(_item("Calibration", "fail", cal + ": the real arm will refuse to move",
-                             "Setup: Calibrate with arm (4-6 clicks on the tip), or ArUco with markers recorded by the arm"))
+    if isinstance(st.arm, (CartesianArm, TaughtGridArm)):
+        if st.arm_blocked(interlocks=False):
+            out.append(_item("Calibration", "fail", cal + ": " + st.arm_blocked(interlocks=False),
+                             "Setup: Calibrate with arm (at least 5 clicks on the tip), or ArUco with markers recorded by the arm"))
         elif c.error_mm() > 8:
             out.append(_item("Calibration", "warn", cal, "Error above 8 mm: redo with points spread over the whole table"))
         else:
             out.append(_item("Calibration", "ok", cal))
     else:
         out.append(_item("Calibration", "ok" if c and c.ok else "warn", cal))
+    interlock = st.arm_interlock()
+    if interlock:
+        fix = ("Leave Freedrive / compliant mode" if st.manual_mode else
+               "Wait for the running lift, or STOP" if st.arm_job == "lift" and st.arm_thread and st.arm_thread.is_alive() else
+               "Repair safety storage with staff, then recover the fork" if st.persistence_error else
+               "Staff: free the fork, confirm /api/arm/recover_lift with the current STOP nonce; then reset" if st.lift_interrupted else
+               "Arm home" if not st.stop_latched.is_set() else
+               "Staff: check the area and controller, then /api/arm/reset with the current STOP nonce")
+        out.append(_item("Arm interlocks", "fail", interlock, fix))
+    else:
+        out.append(_item("Arm interlocks", "ok", "no active interlock"))
+    if st.lift_interrupted:
+        out.append(_item("Lift recovery", "fail", "Previous lift state is interrupted or unknown, including a fresh data directory",
+                         "Staff: verify the fork is free, STOP, then authenticated /api/arm/recover_lift with fork_freed=true, "
+                         "a written note and the current stop_nonce; no motion. Reset separately afterwards"))
     s = st.arm.status()
     if s.get("state") == "error" or s.get("error"):
         out.append(_item("Arm", "fail", f"{s['name']}: {s.get('error') or s['state']}",
@@ -132,11 +147,13 @@ def _arm(st) -> list[dict]:
                   "calibrated at this survey pose")]
     if lift_allowed():
         out.append(_item("Tray lift", "warn", "enabled", "Only with measured TROVA_TRAY_* values, agreed with staff"))
-    if not os.getenv("TROVA_TOKEN", "").strip() and st.s.host not in ("127.0.0.1", "localhost"):
-        out.append(_item("Wi-Fi access", "warn" if isinstance(st.arm, CartesianArm) else "ok",
-                         "open to anyone on this network" if isinstance(st.arm, CartesianArm) else "open (simulated arm)",
-                         "Set TROVA_TOKEN=<secret> and open the printed ?token= link on each device"
-                         if isinstance(st.arm, CartesianArm) else ""))
+    if not os.getenv("TROVA_TOKEN", "").strip():
+        exposed = st.s.host not in ("127.0.0.1", "localhost", "::1")
+        status = "fail" if st.physical else "warn" if st.s.xai_api_key and exposed else "ok"
+        out.append(_item("Wi-Fi access", status, "TROVA_TOKEN is unset; " +
+                         ("physical arm requires API authentication" if st.physical else
+                          "live API key exposed on the network" if st.s.xai_api_key and exposed else "simulated arm"),
+                         "Set TROVA_TOKEN=<secret> and open the printed ?token= link on each device" if status != "ok" else ""))
     return out
 
 
@@ -189,6 +206,8 @@ def run(st, ping_grok: bool = True) -> dict:
     if st.reference:
         items.append(_item("Reference", "ok", f"saved at {st.reference['time']}, {st.reference['n_objects']} objects"))
     items.append(_item("Zones", "ok", ", ".join(z.name for z in st.zones) or "none drawn"))
+    items += [_item("Saved configuration", "fail", e, "Restore the saved settings with staff and restart")
+              for e in st.configuration_errors]
     n = {k: sum(i["status"] == k for i in items) for k in ("ok", "warn", "fail")}
     return {"ok": n["fail"] == 0, "counts": n, "items": items, "time": time.strftime("%H:%M:%S"),
             "summary": f"{n['ok']} ok, {n['warn']} warnings, {n['fail']} failures",
@@ -207,8 +226,21 @@ def register(app, st) -> None:
 def main() -> None:
     """python -m trova.preflight [http://localhost:8000] : print the checklist of a running Trova; exit 1 on failure."""
     import requests
+    from pathlib import Path
+    from .config import _load_dotenv
+    _load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     base = (sys.argv[1] if len(sys.argv) > 1 else f"http://localhost:{os.getenv('TROVA_PORT', '8000')}").rstrip("/")
-    d = requests.get(base + "/api/preflight", timeout=120, headers={"x-trova-token": os.getenv("TROVA_TOKEN", "")}).json()
+    try:
+        response = requests.get(base + "/api/preflight", timeout=120, headers={"x-trova-token": os.getenv("TROVA_TOKEN", "")})
+        if response.status_code != 200:
+            print(f"Preflight request failed: HTTP {response.status_code}. Check the server URL and TROVA_TOKEN in .env.")
+            sys.exit(1)
+        d = response.json()
+        if not isinstance(d, dict) or "items" not in d or "ok" not in d:
+            raise ValueError("server did not return a preflight checklist")
+    except (requests.RequestException, ValueError) as e:
+        print(f"Preflight request failed: {e}")
+        sys.exit(1)
     mark = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
     for i in d["items"]:
         print(f"{mark[i['status']]}  {i['name']:<12} {i['detail']}" + (f"\n{'':18}-> {i['fix']}" if i["fix"] and i["status"] != "ok" else ""))

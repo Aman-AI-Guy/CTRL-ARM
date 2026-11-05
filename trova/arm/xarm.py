@@ -39,7 +39,6 @@ class XArmBackend(CartesianBackend):
         self._check(code, "get_position")
         if not pose or len(pose) < 6:
             raise RuntimeError("xArm get_position returned no complete pose")
-        self.yaw = pose[5]
 
     @staticmethod
     def _check(code, operation):
@@ -48,8 +47,7 @@ class XArmBackend(CartesianBackend):
 
     def move_linear(self, x, y, z, speed_mm_s):
         with self.lock:
-            if self._moving() or self.arm.get_state()[1] in (3, 4, 5, 6):                  # never recover/re-enable a moving controller implicitly
-                raise RuntimeError("xArm controller is still moving: STOP and explicit staff recovery required")
+            self._require_motion_state()
             # xArm 5 moves in straight lines only with the flange parallel to the base (roll +-180, pitch 0). Coming
             # from a taught pose that is not (e.g. a camera survey pose), plan this one move in joint space via IK.
             code, pose = self.arm.get_position()
@@ -83,8 +81,7 @@ class XArmBackend(CartesianBackend):
 
     def move_joints(self, q, speed_deg_s):
         with self.lock:
-            if self._moving() or self.arm.get_state()[1] in (3, 4, 5, 6):
-                raise RuntimeError("xArm controller is still moving: STOP and explicit staff recovery required")
+            self._require_motion_state()
             code = self.arm.set_servo_angle(angle=list(q), speed=speed_deg_s, mvacc=speed_deg_s * 5, wait=False)
         if code != 0:
             raise RuntimeError(f"xArm set_servo_angle returned code {code} (error {self.arm.error_code})")
@@ -106,6 +103,12 @@ class XArmBackend(CartesianBackend):
     def is_moving(self) -> bool:
         with self.lock:
             return self._moving()
+
+    def _require_motion_state(self):
+        code, state = self.arm.get_state()
+        self._check(code, "get_state")
+        if state not in (0, 2):
+            raise RuntimeError(f"xArm controller is not ready (state {state}): STOP and explicit staff recovery required")
 
     def _moving(self) -> bool:
         # SDK get_is_moving() discards get_state()'s error code and may return cached state.

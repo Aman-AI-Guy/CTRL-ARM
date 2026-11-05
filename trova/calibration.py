@@ -1,9 +1,9 @@
 """Camera pixels <-> table millimetres, via a homography of the table plane.
 
 Two ways to calibrate, both a few seconds per arm slot (the mount may move between slots):
-- ArUco: tape 4 printed markers (ids 0-3) on the table, measure where their centres are in mm,
+- ArUco: tape 5 printed markers (ids 0-4) on the table, measure where their centres are in mm,
   put those in data/markers.json, press "Calibrate (ArUco)".
-- Clicks: click 4+ points in the live view and type their table coordinates in mm.
+- Clicks: use 5+ points for robot coordinates, or 4+ for table coordinates, in the live view.
 
 Until calibrated, a default maps the image rectangle onto a table_w x table_h mm rectangle, so the
 simulated arm works out of the box.
@@ -12,6 +12,7 @@ simulated arm works out of the box.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -105,13 +106,20 @@ class Calibration:
 
     @classmethod
     def load(cls, path: Path) -> "Calibration | None":
-        if not path.exists():
-            return None
         try:
+            if not path.exists():
+                return None
             d = json.loads(path.read_text())
             c = cls(points=d["points"], source=d.get("source", "clicks"), size=d.get("size"), pose=d.get("pose"), camera=d.get("camera"))
+            if c.size is not None and (not isinstance(c.size, list) or len(c.size) != 2
+                    or not all(type(v) is int and v > 0 for v in c.size)):
+                raise ValueError("invalid calibration image size")
+            if c.pose is not None and (not isinstance(c.pose, list) or not c.pose
+                    or not all(math.isfinite(v) for v in c.pose)):
+                raise ValueError("invalid calibration survey pose")
             c.fit()
-        except (ValueError, KeyError, TypeError):   # a bad saved file must not stop the app from starting
+        except (ValueError, KeyError, TypeError, IndexError, OSError, cv2.error) as e:
+            logging.getLogger(__name__).warning("Ignoring invalid calibration %s: %s", path, e)
             return None
         return c
 

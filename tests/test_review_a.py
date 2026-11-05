@@ -150,6 +150,9 @@ def test_issue_48_stop_does_not_wait_for_sdk_lock():
     finally:
         b.lock.release()
         th.join(1)
+    b.arm = types.SimpleNamespace(get_state=lambda: (0, 3), set_servo_angle=lambda **kw: pytest.fail("sent while paused"))
+    with pytest.raises(RuntimeError, match="not ready"):
+        b.move_joints([0]*5, 5)
 
 
 def test_issue_49_each_move_uses_current_yaw():
@@ -334,6 +337,7 @@ def test_issue_38_http_bad_inputs_have_client_errors(tmp_path, monkeypatch):
     app, c = _client(tmp_path, monkeypatch)
     for width in (0, -1):
         assert c.get('/api/frame.jpg', params={'max_w': width}).status_code == 422
+    assert c.get("/api/frame.jpg", params={"max_w": 1}).status_code == 200
     st = app.state.trova
     st.label_wait = {'frame': 'example.jpg'}
     assert c.post('/api/label', json={}).status_code == 400
@@ -368,3 +372,114 @@ def test_issue_55_clarification_is_not_an_absent_eval_case(tmp_path, monkeypatch
     assert c.post('/api/judge', json={'correct': True}).status_code == 409
     assert not (tmp_path/'cases'/'finds.jsonl').exists()
     assert app.state.trova.metrics['find_ok'] == 0 and app.state.trova.metrics['find_wrong'] == 0
+
+
+def test_issue_20_fresh_hardware_interlock_is_visible(tmp_path, monkeypatch):
+    from test_safety_review import physical_client
+    from trova import preflight
+    st, c = physical_client(tmp_path, monkeypatch, TROVA_FIRST_RUN='1')
+    assert st.lift_interrupted
+    assert any('/api/arm/recover_lift' in p for p in st.first_run_problems())
+    items = preflight._arm(st)
+    assert any(i['name'] == 'Lift recovery' and i['status'] == 'fail' and 'recover_lift' in i['fix'] for i in items)
+    from pathlib import Path
+    assert '/api/arm/recover_lift' in Path('docs/first-supervised-run.md').read_text()
+
+
+def test_issue_37_corrupt_configuration_starts_and_writes_are_atomic(tmp_path, monkeypatch):
+    import json
+    from test_pipeline import _client
+    from trova import config
+    from trova.calibration import Calibration
+    from trova.zones import save_zones
+    (tmp_path/'zones.json').write_text('')
+    (tmp_path/'batch.json').write_text('')
+    (tmp_path/'calibration.json').write_text(json.dumps({'points': [[0,0,0]]*4}))
+    app, c = _client(tmp_path, monkeypatch)
+    assert c.get('/api/state').status_code == 200
+    st = app.state.trova
+    assert st.zones == [] and st.batch.get('lot', '') == ''
+    assert st.configuration_errors and c.post('/api/reference').status_code == 409
+    calibration = Calibration.default(1280, 800, 600, 400)
+    writers = [(tmp_path/'calibration.json', lambda: calibration.save(tmp_path/'calibration.json')),
+               (tmp_path/'zones.json', lambda: save_zones(tmp_path/'zones.json', [])),
+               (tmp_path/'batch.json', lambda: next(r.endpoint for r in app.routes if getattr(r, 'path', '') == '/api/batch')('LOT1', 'box'))]
+    for path, write in writers:
+        before = path.read_text()
+        with monkeypatch.context() as patch:
+            def interrupted(*args):
+                raise OSError('interrupted replace')
+            patch.setattr(config.os, 'replace', interrupted)
+            with pytest.raises(OSError, match='interrupted replace'):
+                write()
+        assert path.read_text() == before
+    assert not list(tmp_path.glob('.*.json-*'))
+
+
+def test_issue_40_physical_arm_requires_api_token(tmp_path, monkeypatch):
+    from test_safety_review import physical_client
+    from trova import preflight
+    st, _ = physical_client(tmp_path, monkeypatch, TROVA_TOKEN='')
+    access = next(i for i in preflight._arm(st) if i['name'] == 'Wi-Fi access')
+    assert access['status'] == 'fail' and 'TROVA_TOKEN' in access['fix']
+    st.physical = False
+    st.s.xai_api_key = 'offline-test-key'
+    st.s.host = '0.0.0.0'
+    assert next(i for i in preflight._arm(st) if i['name'] == 'Wi-Fi access')['status'] == 'warn'
+
+
+def test_issue_41_preflight_cli_loads_dotenv_and_handles_401(tmp_path, monkeypatch, capsys):
+    from trova import config, preflight
+    import requests
+    env = tmp_path/'.env-cli-test'
+    env.write_text('TROVA_TOKEN=cli-secret\nTROVA_PORT=9876\n')
+    load = config._load_dotenv
+    monkeypatch.setattr(config, '_load_dotenv', lambda path: load(env))
+    monkeypatch.setenv('TROVA_TOKEN', '')  # track dotenv's writes so teardown restores the environment
+    monkeypatch.setenv('TROVA_PORT', '')
+    monkeypatch.delenv('TROVA_TOKEN')
+    monkeypatch.delenv('TROVA_PORT')
+    monkeypatch.setattr(sys, 'argv', ['preflight'])
+    seen = []
+    status = [200]
+    def response(url, **kwargs):
+        seen.append((url, kwargs))
+        return types.SimpleNamespace(status_code=status[0], json=lambda: {'items': [], 'ok': True, 'summary': 'ready', 'seconds': 0})
+    monkeypatch.setattr(requests, 'get', response)
+    with pytest.raises(SystemExit) as ok:
+        preflight.main()
+    assert ok.value.code == 0 and seen[0][0] == 'http://localhost:9876/api/preflight'
+    assert seen[0][1]['headers']['x-trova-token'] == 'cli-secret'
+    status[0] = 401
+    with pytest.raises(SystemExit) as denied:
+        preflight.main()
+    assert denied.value.code == 1 and 'HTTP 401' in capsys.readouterr().out
+
+
+def test_issue_42_room_camera_failure_finishes_with_error(tmp_path, monkeypatch):
+    import json
+    from test_motion_safety import cart_client
+    from test_features import _wait
+    from trova.server import CameraError
+    st, c = cart_client(tmp_path, monkeypatch)
+    def failed():
+        raise CameraError('stream stale')
+    monkeypatch.setattr(st, 'frame', failed)
+    assert c.post('/api/room/find', data={'text': 'lamp'}).status_code == 200
+    assert _wait(lambda: st.room and st.room['status'] == 'error')
+    st.arm_thread.join(2)
+    assert not st.arm_thread.is_alive() and st.stop_latched.is_set()
+    assert 'stream stale' in st.room['error']
+    events = [json.loads(line) for line in (tmp_path/'events.jsonl').read_text().splitlines()]
+    assert any(e['kind'] == 'room_scan' and e.get('status') == 'error' for e in events)
+
+
+def test_issue_68_stop_is_an_interlock_not_a_calibration_failure(tmp_path, monkeypatch):
+    from test_motion_safety import cart_client
+    from trova import preflight
+    st, c = cart_client(tmp_path, monkeypatch)
+    assert c.post('/api/arm/stop').status_code == 200
+    items = preflight._arm(st)
+    assert next(i for i in items if i['name'] == 'Calibration')['status'] == 'ok'
+    interlocks = next(i for i in items if i['name'] == 'Arm interlocks')
+    assert interlocks['status'] == 'fail' and 'STOP' in interlocks['detail'] and '/api/arm/reset' in interlocks['fix']

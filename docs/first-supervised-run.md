@@ -130,7 +130,21 @@ TROVA_FIRST_RUN=1
 - [ ] Check that `zmax ≥ TROVA_ARM_Z_MM + 100`. The bring-up sets `zmax` to the higher of (home z, Z) + 80 mm, so the
       default hover can fall **outside** the box. The UI then shows "Safety box: … outside" and refuses. Either raise
       `zmax` (only if the space above is clear, with staff) or set `TROVA_FIRST_RUN_HOVER_MM` lower (e.g. 60).
-- [ ] Start Trova. Every physical boot is disarmed. Rearm only after you check that the area is clear:
+- [ ] Start Trova. Every physical boot is disarmed. Check `/api/state` for `lift_interrupted` first. A fresh
+      data directory has no lift record, so its state is unknown even when tray lifting is disabled. **Arm home and
+      reset cannot clear this interlock.** Staff must physically check that the fork is free and there is no load.
+      While STOP remains latched, recover it with the current nonce, authenticated operator token, both safety
+      confirmations, `fork_freed=true` and a written note:
+
+```bash
+NONCE=$(curl -s "localhost:8000/api/state?token=$TROVA_TOKEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["stop_nonce"])')
+curl -s -X POST "localhost:8000/api/arm/recover_lift?token=$TROVA_TOKEN" -H "x-trova-operator-token: $TROVA_OPERATOR_TOKEN" \
+  -H 'content-type: application/json' \
+  -d "{\"operator\":\"$TROVA_OPERATOR_NAME\",\"stop_nonce\":\"$NONCE\",\"area_clear\":true,\"controller_ready\":true,\"fork_freed\":true,\"note\":\"Staff verified fork free and no load\"}"
+```
+
+Recovery never moves the arm and keeps STOP latched. It rotates the nonce. Fetch the new nonce below and reset
+separately only after staff have checked that the area and controller are ready:
 
 ```bash
 NONCE=$(curl -s "localhost:8000/api/state?token=$TROVA_TOKEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["stop_nonce"])')

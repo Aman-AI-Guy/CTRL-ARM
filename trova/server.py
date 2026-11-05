@@ -33,7 +33,7 @@ from .audit import AuditLog
 from .boxes import Box
 from .calibration import Calibration, calibrate_aruco, load_marker_positions, make_marker_sheet
 from .camera import DemoSource, ImageSource, open_source
-from .config import Settings, load_settings
+from .config import Settings, atomic_json_write, load_settings
 from .dog import DogSearch, load_route, make_dog, run_search
 from . import voice as voice_cfg
 from .finder import find as grok_find, find_all as grok_find_all
@@ -177,6 +177,7 @@ class State:
     def __init__(self, s: Settings):
         self.s = s
         self.audit = AuditLog(s.data_dir)
+        self.configuration_errors: list[str] = []
         self.grok = GrokClient(s.xai_api_key, s.model, s.effort, s.mock,
                                on_call=lambda e: self.audit.event("grok_call", **e),
                                timeout=float(os.getenv("TROVA_GROK_TIMEOUT_S", "60")),
@@ -239,7 +240,16 @@ class State:
         self.inventory: dict | None = None
         self.tour: dict | None = None
         self.zones_path = s.data_dir / "zones.json"
-        self.zones: list[Zone] = load_zones(self.zones_path)
+        try:
+            self.zones: list[Zone] = load_zones(self.zones_path)
+            if any(not isinstance(z.name, str) or not z.name.strip() or z.rule not in RULES
+                   or len(z.polygon) < 3 or any(len(p) != 2 or not all(math.isfinite(v) for v in p) for p in z.polygon)
+                   or not isinstance(z.allowed, list) or not all(isinstance(a, str) for a in z.allowed) for z in self.zones):
+                raise ValueError("invalid zone configuration")
+        except (ValueError, OSError, TypeError, KeyError, IndexError) as e:
+            self.zones = []
+            self.configuration_errors.append(f"zones.json: {e}")
+            self.audit.event("error", where="zones_load", error=str(e))
         self.zone_draft: list[list[float]] = []
         self.metrics = {"find_ok": 0, "find_wrong": 0, "find_times": [], "checks": 0,
                         "check_ok": 0, "false_alarms": 0, "missed": 0}
@@ -259,7 +269,16 @@ class State:
             self.light = NoLight()
             self.audit.event("error", where="light", error=str(e))
         self.batch_path = s.data_dir / "batch.json"          # feature 11: the batch being cleared for
-        self.batch = json.loads(self.batch_path.read_text()) if self.batch_path.exists() else {"lot": os.getenv("TROVA_BATCH", "")}
+        self.batch = {"lot": os.getenv("TROVA_BATCH", "")}
+        try:
+            if self.batch_path.exists():
+                batch = json.loads(self.batch_path.read_text())
+                if not isinstance(batch, dict) or not isinstance(batch.get("lot"), str) or not isinstance(batch.get("product", ""), str):
+                    raise ValueError("invalid batch configuration")
+                self.batch = batch
+        except (ValueError, OSError, TypeError) as e:
+            self.configuration_errors.append(f"batch.json: {e}")
+            self.audit.event("error", where="batch_load", error=str(e))
         self.labels: dict | None = None
         self.room: dict | None = None          # feature 14: last room scan (status, views, result)
         # first supervised run on hardware: find -> confirm -> hover -> confirm -> descend -> measure (off by default)
@@ -311,18 +330,31 @@ class State:
     def arm_blocked(self, pixels: bool = True, *, interlocks: bool = True) -> str | None:
         """Why the arm must not move right now (None = it may). pixels=False: the target is given in robot mm,
         so only the safety rules apply, not the camera calibration."""
-        if interlocks and self.stop_latched.is_set():
+        if interlocks:
+            blocked = self.arm_interlock(pixels=pixels)
+            if blocked:
+                return blocked
+        return self.calibration_blocked(pixels)
+
+    def arm_interlock(self, pixels: bool = False) -> str | None:
+        if self.stop_latched.is_set():
             return "Software STOP is latched: operator safety checks and /api/arm/reset required" + (
                 "; a tray lift was interrupted: recover the fork separately" if self.lift_interrupted else "")
-        if interlocks and self.manual_mode:
+        if self.manual_mode:
             return "The arm is in manual teaching mode: leave Freedrive / compliant mode before automatic motion"
-        if interlocks and self.arm_job == "lift" and self.arm_thread and self.arm_thread.is_alive():
+        if self.arm_job == "lift" and self.arm_thread and self.arm_thread.is_alive():
             return "The arm is lifting a tray: wait for it to finish, or press STOP"
-        if interlocks and self.lift_interrupted:
+        if self.lift_interrupted:
             return ("A tray lift was interrupted, the fork may still be in the slot: free the arm by hand "
                     "with staff, then confirm /api/arm/recover_lift while STOP remains latched")
-        if interlocks and self.persistence_error:
+        if self.persistence_error:
             return "Safety persistence failed: " + self.persistence_error
+        if (pixels and self.camera_on_arm and isinstance(self.arm, CartesianArm)
+                and (self.arm.home_joints or self.arm.home_mm) and not self.at_survey()):
+            return "The arm camera is away from the survey pose: Arm home"
+        return None
+
+    def calibration_blocked(self, pixels: bool = True) -> str | None:
         if isinstance(self.arm, (CartesianArm, TaughtGridArm)):
             if not self.arm.limits:
                 return "No safety box: set TROVA_ARM_LIMITS=xmin,xmax,ymin,ymax,zmin,zmax (robot mm) with staff, restart"
@@ -331,9 +363,7 @@ class State:
                         if self.camera_on_arm else "No home pose: set TROVA_ARM_HOME_MM=x,y,z outside the camera view, restart")
             if not pixels:
                 return None
-            if interlocks and self.camera_on_arm and not self.at_survey():
-                return "The arm camera is not at the survey pose, so the picture does not match the calibration: Arm home"
-            if not self.calib or self.calib.source not in ("arm", "aruco_robot"):
+            if not self.calib or not self.calib.ok or self.calib.source not in ("arm", "aruco_robot"):
                 return "Calibrate with the arm first (Setup: Calibrate with arm, or ArUco with markers recorded by the arm)"
             if self.camera_on_arm and isinstance(self.arm, CartesianArm):
                 survey = self.arm.home_joints or self.arm.home_mm
@@ -373,6 +403,10 @@ class State:
             p.append("Operator credentials: TROVA_OPERATOR_NAME / TROVA_OPERATOR_TOKEN not configured")
         if self.stop_latched.is_set():
             p.append("STOP is latched: operator reset required")
+        if self.lift_interrupted:
+            p.append("Lift recovery required: staff must free the fork and confirm /api/arm/recover_lift while STOP stays latched")
+        if self.persistence_error:
+            p.append("Safety persistence failed: " + self.persistence_error)
         if not 0 < self.first_run_speed <= FIRST_RUN_MAX_SPEED or self.first_run_hover <= 0:
             p.append("TROVA_FIRST_RUN_SPEED_MM_S must be in (0, 20] and TROVA_FIRST_RUN_HOVER_MM above 0")
         return p
@@ -652,6 +686,8 @@ class State:
     def clear_view(self, *, move: bool = True, ticket=None) -> None:
         """A real arm parks before every capture so it is not mistaken for an object. With the camera on the arm,
         home is the survey pose: the picture is only valid there, after the image settles."""
+        if self.configuration_errors:
+            raise ArmBusy("Saved configuration invalid: " + "; ".join(self.configuration_errors) + "; restore with staff and restart")
         if isinstance(self.arm, SimArm):
             return
         ticket = self.motion_ticket(ticket)
@@ -684,6 +720,18 @@ class State:
         self.tour["status"] = "done"
 
     def run_room(self, request: str) -> None:
+        try:
+            self._run_room(request)
+        except Exception as e:  # camera/driver failure must terminate the job and remain visible to the operator
+            error = f"{type(e).__name__}: {e}"
+            try:
+                self.stop_arm()
+            except Exception as stop_error:
+                error += f"; STOP failed: {stop_error}"
+            self.room = {**(self.room or {}), "request": request, "status": "error", "error": error}
+            self.audit.event("room_scan", **self.room)
+
+    def _run_room(self, request: str) -> None:
         """Feature 14: look around from the taught look pose, let Grok pick the photo and box, turn to face it."""
         cfg = room_mod.pan_settings()
         look = load_poses(self.s.data_dir).get("look_joints")
@@ -850,7 +898,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cv2.putText(img, "arm camera: moving view (not the survey pose)", (20, int(40 * s)), cv2.FONT_HERSHEY_SIMPLEX,
                         s, (0, 200, 255), 2, cv2.LINE_AA)
             if img.shape[1] > max_w:
-                img = cv2.resize(img, (max_w, int(img.shape[0] * max_w / img.shape[1])), interpolation=cv2.INTER_AREA)
+                img = cv2.resize(img, (max_w, max(1, int(img.shape[0] * max_w / img.shape[1]))), interpolation=cv2.INTER_AREA)
             return Response(jpeg(img, 80), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
         if boxes:
             props, _ = st.proposals(f)
@@ -873,7 +921,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cv2.drawMarker(img, (int(p[0]), int(p[1])), MARK, cv2.MARKER_TILTED_CROSS, 30, 3)
         if img.shape[1] > max_w:
             s = max_w / img.shape[1]
-            img = cv2.resize(img, (max_w, int(img.shape[0] * s)), interpolation=cv2.INTER_AREA)
+            img = cv2.resize(img, (max_w, max(1, int(img.shape[0] * s))), interpolation=cv2.INTER_AREA)
         return Response(jpeg(img, 80), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/state")
@@ -888,7 +936,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lf = {k: v for k, v in (st.last_find or {}).items() if k not in ("box",)}
         return {
             "mock": st.grok.mock, "grok": st.grok.stats(), "source": st.source.info(),
-            "override": st.override is not None, "frame_size": size, "camera_error": st.camera_error,
+            "override": st.override is not None, "frame_size": size, "camera_error": st.camera_error, "configuration_errors": st.configuration_errors,
             "background": st.background is not None, "calibration": st.calib.as_dict() if st.calib else None,
             "click_points": st.click_points, "arm_points": len(st.arm_points), "arm": st.arm.status(),
             "arm_blocked": st.arm_blocked(), "lift_interrupted": st.lift_interrupted,
@@ -1840,7 +1888,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     @app.post("/api/batch")
     def api_batch(lot: str = Form(""), product: str = Form("")):
         st.batch = {"lot": lot.strip().upper(), "product": product.strip()}
-        st.batch_path.write_text(json.dumps(st.batch))
+        atomic_json_write(st.batch_path, st.batch)
         st.audit.event("batch", **st.batch)
         return st.batch
 

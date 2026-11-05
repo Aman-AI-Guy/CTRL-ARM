@@ -104,7 +104,7 @@ class TaughtGridArm(ArmDriver):
                 err = self.limits.check(*self.backend.fk_mm(q))
                 if err:
                     raise ValueError(err)
-        except (ValueError, NotImplementedError) as e:
+        except Exception as e:  # FK or controller errors must refuse dispatch
             self.state, self.last_error = "refused", str(e)
             return False
         self.state = "moving"
@@ -132,7 +132,7 @@ class TaughtGridArm(ArmDriver):
 
     def status(self) -> dict:
         return {"name": self.name, "state": self.state, "tip_mm": self.tip, "taught_poses": len(self.samples),
-                "home_taught": self.home_q is not None, "simulated": False}
+                "home_taught": self.home_q is not None, "simulated": False, "error": self.last_error}
 
 
 class FakeJointBackend(JointBackend):
