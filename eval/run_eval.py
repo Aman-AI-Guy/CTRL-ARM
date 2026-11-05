@@ -71,7 +71,10 @@ def load_find_cases(data_dir: Path) -> list[dict]:
     if not p.exists():
         sys.exit(f"No recorded cases at {p}. Use jury mode (✓/✗ after each find) or --synthetic N.")
     cases = []
-    for line in p.read_text().splitlines():
+    from trova.audit import read_text_lines
+    for line in read_text_lines(p):
+        if not line.strip():
+            continue
         c = json.loads(line)
         c["frame_img"] = cv2.imread(str(data_dir / c["frame"]))
         c["query_img"] = cv2.imread(str(data_dir / c["query"])) if c.get("query") else None

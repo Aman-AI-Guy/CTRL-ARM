@@ -31,16 +31,26 @@ def configure(args):
             raise RuntimeError("Camera hostname did not resolve. Pass --camera-fallback with its current DHCP address.") from None
         host = args.camera_fallback
         print(f"Camera hostname unavailable; using operator-supplied address {host}")
-    if args.profile != "preview" and importlib.util.find_spec("xarm") is None:
+    if args.profile in ("qualify", "operate") and importlib.util.find_spec("xarm") is None:
         raise RuntimeError('Install the robot SDK first: .venv/bin/pip install -e ".[robots]"')
+    if args.profile == "simulate" and not workspace_env:
+        # Rehearsal only: the team's M6.1 candidate box (dry-run only for hardware; never used by operate).
+        candidate = json.loads((Path(__file__).resolve().parent.parent / "config/workspace_candidate.json").read_text())
+        workspace_env = {"TROVA_ARM_LIMITS": candidate["limits"]}
     os.environ.update(workspace_env)
     if workspace_env:
         print("Operator workspace: " + workspace_env["TROVA_ARM_LIMITS"] + " (robot-base mm)")
+    arm = {"operate": f"xarm:{args.robot_ip}", "simulate": "xarm5sim"}.get(args.profile, "sim")
     os.environ.update(TROVA_CAMERA=f"pi:{host}", TROVA_HOST="127.0.0.1", TROVA_PORT=str(args.port),
-                      TROVA_ARM="sim" if args.profile != "operate" else f"xarm:{args.robot_ip}",
+                      TROVA_ARM=arm,
                       TROVA_ARM_READ=f"xarm:{args.robot_ip}" if args.profile == "qualify" else "off",
                       TROVA_CAMERA_ON_ARM="1" if args.camera_on_arm else "0")
-    if args.profile != "operate":
+    if args.profile == "simulate":
+        # Simulated xArm 5 (real kinematics) starting at the operator's start pose; it never reaches a controller.
+        if not os.environ.get("TROVA_ARM_HOME_JOINTS", "").strip():      # .env may define it empty
+            os.environ["TROVA_ARM_HOME_JOINTS"] = "0,0,0,0,0"
+        os.environ.update(TROVA_MOTION_MODE="simulation", TROVA_HARDWARE_UNLOCK="")
+    elif args.profile != "operate":
         os.environ.update(TROVA_MOTION_MODE="dry_run", TROVA_HARDWARE_UNLOCK="")
     elif os.environ.get("TROVA_MOTION_MODE") != "hardware":
         os.environ["TROVA_MOTION_MODE"] = "dry_run"
@@ -48,8 +58,9 @@ def configure(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("preview", "qualify", "operate"), default="preview",
-                        help="preview: no robot connection; qualify: telemetry only; operate: real driver, dry-run unless operator unlocked")
+    parser.add_argument("--profile", choices=("preview", "simulate", "qualify", "operate"), default="preview",
+                        help="preview: no robot connection; simulate: simulated xArm 5 (real kinematics) + real camera; "
+                             "qualify: telemetry only; operate: real driver, dry-run unless operator unlocked")
     parser.add_argument("--camera-host", default="trova-cam.local")
     parser.add_argument("--camera-fallback", help="Current DHCP address, used only if hostname resolution fails")
     parser.add_argument("--robot-ip", default="192.168.1.111")

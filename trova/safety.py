@@ -6,6 +6,30 @@ import tempfile
 from pathlib import Path
 
 
+def _replace_durable(src: str, dst: Path) -> None:
+    """Atomically replace dst with src and make the rename durable. Any failure raises OSError (blocks motion).
+
+    POSIX: os.replace, then fsync the directory. Windows cannot open a directory with os.open (EACCES), so the
+    rename itself is made durable with MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH), which
+    returns only after the move has been flushed to disk.
+    """
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        move = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+        move.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD)
+        move.restype = wintypes.BOOL
+        if not move(str(src), str(dst), 0x1 | 0x8):     # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+            raise ctypes.WinError(ctypes.get_last_error())
+        return
+    os.replace(src, dst)
+    directory = os.open(dst.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 class LiftStore:
     """Only a complete, recognized record may establish that a previous lift finished/recovered.
 
@@ -42,12 +66,7 @@ class LiftStore:
                 json.dump({"version": 1, "lift": lift}, f)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(name, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            _replace_durable(name, self.path)
         finally:
             if os.path.exists(name):
                 os.unlink(name)

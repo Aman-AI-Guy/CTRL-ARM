@@ -21,7 +21,8 @@ from .sim import SimArm
 from .taught_grid import FakeJointBackend, JointBackend, TaughtGridArm
 
 CARTESIAN = {"ur": ("trova.arm.ur", "URBackend"), "xarm": ("trova.arm.xarm", "XArmBackend"),
-             "elite": ("trova.arm.elite", "EliteBackend")}
+             "elite": ("trova.arm.elite", "EliteBackend"),
+             "xarm5sim": ("trova.arm.xarm5_sim", "Xarm5Sim")}   # simulated xArm 5, real kinematics, joint moves
 
 
 def _xyz(s: str | None):

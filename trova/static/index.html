@@ -181,6 +181,10 @@ table.out td.tm{white-space:nowrap;color:var(--mute)}
 /* results */
 .result{display:none;padding:8px 0 4px;border-top:2px solid var(--ink)}
 .result.show{display:block}
+.tsobj{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:6px 4px;border-bottom:1px solid var(--rule)}
+.tsobj.cand{background:var(--paper-deep)}
+.tsobj.sel{outline:2px solid var(--green-deep);outline-offset:-2px}
+.tsobj .row{margin:0}
 .result+.result.show{margin-top:10px}
 .st-found{border-top-color:var(--green-deep)}.st-not_found{border-top-color:var(--red)}.st-clarify{border-top-color:var(--ochre)}
 .result>div+div{margin-top:6px}
@@ -352,7 +356,9 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
   <section id="sec-camera" aria-labelledby="h-camera">
     <div class="fighead"><h2 id="h-camera" tabindex="-1">Fig. 1 · Vista camera</h2>
       <div class="tail"><span class="muted mono" id="figmeta"></span><span class="muted ell" id="srcinfo"></span>
-        <label class="check" id="boxesopt"><input type="checkbox" id="showboxes" checked> riquadri candidati</label></div></div>
+        <label class="check" id="boxesopt"><input type="checkbox" id="showboxes" checked> riquadri candidati</label>
+        <button class="quiet" id="tsbtn" onclick="tableScan(true)" title="Sale a 60 cm, inclina la camera sul tavolo, gira e mappa ogni oggetto (calibrazione V2)">Scansiona tavolo</button>
+        <button class="quiet" onclick="tableScan(false)" title="Etichetta solo la vista attuale, senza muovere il braccio">Etichetta vista</button></div></div>
     <div class="figrow">
       <div class="figbox">
         <div class="frame" id="frame">
@@ -602,7 +608,7 @@ dialog::backdrop{background:rgba(26,26,26,.45)}
       <label class="check"><input type="checkbox" id="speak"> leggi le risposte</label><span class="muted wrap" id="pttinfo"></span></div>
     <label class="check"><input type="checkbox" id="confirm" checked> chiedi conferma prima che il braccio si muova</label>
     <div class="cmd"><input type="text" id="agentq" aria-label="Comando scritto" placeholder="Scrivi un comando a Grok" onkeydown="if(event.key==='Enter')runAgent()"><button onclick="runAgent()">Esegui</button></div>
-    <div id="results"><div id="agentres" class="result" aria-live="polite"></div><div id="findres" class="result" aria-live="polite"></div><div id="approach" class="result" aria-live="polite"></div></div>
+    <div id="results"><div id="agentres" class="result" aria-live="polite"></div><div id="findres" class="result" aria-live="polite"></div><div id="approach" class="result" aria-live="polite"></div><div id="tablescan" class="result" aria-live="polite"></div></div>
     <div id="vlog" aria-live="polite"></div>
   </section>
 
@@ -805,6 +811,49 @@ function showFind(d) {
 }
 
 // first supervised run (TROVA_FIRST_RUN=1): show everything before each confirmation; one confirmation per stage
+// ---- table scan with the V2 camera model: scan, find, choose, camera above (docs/TABLE_SCAN_V2.md)
+async function tableScan(move) { try { await json('/api/table_scan/start', {move}); } catch (e) {} }
+async function tableFind() {
+  const t = ($('tsq') || {}).value; if (!t || !t.trim()) return;
+  try { const d = await json('/api/table_scan/find', {text: t.trim()}); if (speakOn()) TrovaSpeech.say(d.spoken_message, 'it-IT'); } catch (e) {}
+}
+async function tableChoose(id) { try { await json('/api/table_scan/choose', {object_id: id}); } catch (e) {} }
+async function tableAbove(id) { try { await json('/api/table_scan/approach', {object_id: id}); } catch (e) {} }
+async function tableConfirm(pid) { try { await json('/api/table_scan/confirm', {proposal_id: pid}); } catch (e) {} }
+function showTableScan() {
+  const t = (S && S.table_scan) || {status: 'idle'}, el = $('tablescan');
+  if (t.status === 'idle') { el.className = 'result'; el.innerHTML = ''; return; }
+  const f = t.find || {}, p = t.proposal, ap = t.approach || {};
+  const key = JSON.stringify([t.status, t.step, (t.views || []).length, (t.views || []).filter(v => v.annotated).length,
+    t.summary, (t.objects || []).length, t.selected, f.status,
+    f.spoken_message, p && p.id, ap.spoken_message, t.reason, t.over && t.over.image]);
+  if (key === showTableScan.key) return;          // keep a half-typed request
+  showTableScan.key = key;
+  const STATUS = {planned: 'pianificata', moving: 'braccio in movimento', capturing: 'foto', labelling: 'Grok etichetta gli oggetti',
+    done: 'mappa pronta', stopped: 'fermata', error: 'errore', refused: 'rifiutata', approaching: 'camera in arrivo',
+    over_object: "camera sopra l'oggetto"};
+  const cands = new Set(f.status === 'clarify' ? (f.candidates || []) : []);
+  let h = `<div class="big">Scansione tavolo · ${esc(STATUS[t.status] || t.status)}${t.step ? ' · ' + esc(t.step) : ''}</div>`;
+  if (t.reason) h += `<div style="color:var(--bad)">${esc(t.reason)}</div>`;
+  if (t.summary) h += `<div>${esc(t.summary)}</div>`;
+  if (t.physical_positions === false) h += `<div class="muted">Posizioni simulate: il braccio reale non si è mosso.</div>`;
+  if ((t.objects || []).length) {
+    h += `<div class="row"><input type="text" id="tsq" placeholder="cosa cerco? es. il bicchiere" onkeydown="if(event.key==='Enter')tableFind()"><button onclick="tableFind()">Trova</button></div>`;
+    if (f.spoken_message) h += `<div>${esc(f.spoken_message)}</div>`;
+    h += t.objects.map(o => `<div class="tsobj${cands.has(o.id) ? ' cand' : ''}${t.selected === o.id ? ' sel' : ''}"><b>${o.id}</b>` +
+      `<div>${esc(o.name)}<div class="muted">${esc(o.place || '')} · x ${o.centre_mm[0].toFixed(0)}, y ${o.centre_mm[1].toFixed(0)} mm${o.partial ? ' · visto in parte' : ''}</div></div>` +
+      `<div class="row"><button onclick="tableChoose(${o.id})">Scegli</button><button onclick="tableAbove(${o.id})">Camera sopra</button></div></div>`).join('');
+  }
+  if (p) h += `<div class="row"><span>${esc(p.summary)}</span><button class="primary" onclick="tableConfirm('${esc(p.id)}')">Conferma movimento</button></div>`;
+  else if (ap.spoken_message) h += `<div class="muted">${esc(ap.spoken_message)}</div>`;
+  const boxed = (t.views || []).filter(v => v.annotated);
+  if (boxed.length) h += `<div class="muted">Foto con i box OpenCV: verde = etichettato e sul tavolo (numero, x/y mm) · arancio = fuori tavolo · grigio = non riconosciuto</div>` +
+    `<div class="thumbs">${boxed.map(v => `<a href="/files/${v.annotated}" target="_blank" title="${esc(v.label)}"><img src="/files/${v.annotated}" alt="${esc(v.label)}"></a>`).join('')}</div>`;
+  const img = (t.over && t.over.image) || t.sheet;
+  if (img) h += `<div class="thumbs"><a href="/files/${img}" target="_blank"><img src="/files/${img}" alt="${t.over ? "Vista dalla camera sopra l'oggetto" : 'Primi piani numerati degli oggetti'}"></a></div>`;
+  el.className = 'result show'; el.innerHTML = h;
+}
+
 function showApproach() {
   const a = S.approach, el = $('approach'), key = a ? a.stage + (a.confirm || '') + (a.problems || []).join() : '';
   if (key === showApproach.key && !(a && a.confirm)) return;          // keep a half-typed ruler error
@@ -1156,7 +1205,8 @@ async function toggleVoice() {
     onFind: d => { showFind(d); refresh(); }, onCheck: d => { showCheck(d); refresh(); }, onRefresh: refresh,
     onInventory: d => showInventory(d), onSelect: d => showSelection(d), onFindAll: d => { showFindAll(d); refresh(); },
     onAgent: d => showAgent(d),
-    onLabels: d => showLabels(d), onTool: () => refresh(), onClosed: () => voiceButton(false)}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'errore microfono: ' + e.message; return false; });
+    onLabels: d => showLabels(d), onTool: () => refresh(), onClosed: () => voiceButton(false),
+    armMoving: () => !!(S && S.arm && S.arm.state === 'moving')}, $('confirm').checked).catch(e => { $('vstatus').textContent = 'errore microfono: ' + e.message; return false; });
   if (!ok) voiceButton(false);
 }
 // STOP from the keyboard: Escape always (even while typing), space bar unless the cursor is in a text field.
@@ -1651,7 +1701,7 @@ async function refresh() {
   $('m-more').textContent = `controlli giusti ${M.check_ok}/${M.checks} · mancati ${M.missed} · chiamate Grok ${S.grok.calls}, media ${S.grok.avg_latency_s ?? '–'} s` + (S.grok.dropped_fields.length ? ' · campi rifiutati dalla API: ' + S.grok.dropped_fields.join(', ') : '');
   $('absentbtn').style.display = S.label_wait ? 'inline-flex' : 'none';
   $('labelwait').className = 'mode' + (S.label_wait ? ' on' : '');
-  showDog(); showWatch(); showRoom(); showApproach();
+  showDog(); showWatch(); showRoom(); showApproach(); showTableScan();
   $('poseinfo').textContent = S.camera_on_arm ? (S.at_survey ? 'in posa di rilievo' : 'fuori dalla posa di rilievo') +
     ` · rilievo ${S.poses.home_joints ? 'insegnata' : 'mancante'} · sguardo ${S.poses.look_joints ? 'insegnata' : 'mancante'}` : 'camera sul braccio spenta (TROVA_CAMERA_ON_ARM=1)';
   $('batchinfo').textContent = S.batch && S.batch.lot ? 'lotto corrente ' + S.batch.lot : 'nessun lotto';

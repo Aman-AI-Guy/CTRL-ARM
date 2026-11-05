@@ -53,6 +53,8 @@ from .record_pdf import build as build_record_pdf
 from . import history, preflight
 from .watch import Watch
 from . import room as room_mod
+from . import table_scan as table_scan_mod
+from .arm.xarm5_sim import Xarm5Sim
 from .light import make_light
 from .safety import LiftStore
 from . import labels as lbl
@@ -259,6 +261,33 @@ def _observe_clearance() -> float | None:
     return value if value > 0 else None
 
 
+class TableStartReq(BaseModel):
+    """move=false labels the current view only: no motion."""
+    model_config = ConfigDict(extra="forbid")
+    move: bool = True
+
+
+class TableFindReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+
+
+class TableChooseReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    object_id: int | None = None
+    answer: str | None = None
+
+
+class TableApproachReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    object_id: int | None = None
+
+
+class TableConfirmReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    proposal_id: str
+
+
 class Approach(BaseModel):
     """First supervised run: confirm exactly the shown stage and target."""
     stage: int
@@ -307,7 +336,9 @@ class State:
             or (s.arm == "cartesian:fake" and isinstance(self.arm, CartesianArm)
                 and type(self.arm.backend) is FakeCartesian)
             or (s.arm == "grid:fake" and isinstance(self.arm, TaughtGridArm)
-                and type(self.arm.backend) is FakeJointBackend))
+                and type(self.arm.backend) is FakeJointBackend)
+            or (s.arm == "xarm5sim" and isinstance(self.arm, CartesianArm)
+                and type(self.arm.backend) is Xarm5Sim))
         self.lift_store = LiftStore(s.data_dir) if self.physical else None
         self.persistence_error: str | None = None
         self.operator_name = os.getenv("TROVA_OPERATOR_NAME", "").strip()
@@ -393,6 +424,13 @@ class State:
         self.pending_motion: dict | None = None
         self.orbit_permit = None
         self.orbit_worker = None
+        # voice table scan with the V2 camera model (table_scan.py)
+        self.table_lock = threading.Lock()
+        self.table_scan: dict = {"status": "idle"}
+        self.table_objects: list[dict] = []
+        self.table_frames: dict[str, np.ndarray] = {}
+        self.table_sheet: np.ndarray | None = None
+        self.table_pending: dict | None = None
         # first supervised run on hardware: find -> confirm -> hover -> confirm -> descend -> measure (off by default)
         self.first_run = os.getenv("TROVA_FIRST_RUN", "0").lower() in ("1", "true", "yes")
         self.first_run_speed = min(FIRST_RUN_MAX_SPEED, float(os.getenv("TROVA_FIRST_RUN_SPEED_MM_S", "20")))
@@ -664,6 +702,7 @@ class State:
             self.task_cancel.set()
             self.pending_motion = None
             self.task_resume = None
+            self.table_pending = None           # a table-scan camera move must be confirmed again
             self.stops_pending += 1
         try:
             self.arm.stop()
@@ -897,6 +936,505 @@ class State:
         self.room = out
         self.audit.event("room_scan", **self.room)
 
+    # ---------- voice table scan with the V2 camera model (table_scan.py, docs/TABLE_SCAN_V2.md)
+    @staticmethod
+    def _table_plan_public(plan: dict) -> dict:
+        return {**plan, "steps": [{k: ([round(float(v), 2) for v in s["q"]] if k == "q" else v) for k, v in s.items()}
+                                  for s in plan["steps"]]}
+
+    def _table_set(self, **fields) -> None:
+        with self.table_lock:
+            self.table_scan.update(fields)
+
+    def table_public(self) -> dict:
+        with self.table_lock:
+            out = {k: v for k, v in self.table_scan.items() if not k.startswith("_")}
+            out["objects"] = [dict(o) for o in self.table_objects]
+            p = self.table_pending
+            out["proposal"] = None if not p else {k: p[k] for k in ("id", "object_id", "expires_at", "summary")} | {
+                "plan": self._table_plan_public(p["plan"])}
+        return out
+
+    def table_pose(self) -> tuple[list[float], bool]:
+        """Joints for the V2 model and whether they come from the real controller. A real controller must be still
+        and fault free: a pose read during motion or under a controller error is not used as evidence."""
+        r = self.robot_telemetry()
+        q = r.get("joints")
+        physical = r.get("source") == "telemetry" and not r.get("simulated")
+        if q is None and isinstance(self.arm, CartesianArm):
+            try:
+                q = self.arm.backend.joints()
+                physical = getattr(self.arm, "gateway", None) is not None and not self.arm.gateway.simulated
+            except Exception:  # noqa: BLE001
+                q = None
+        if q is None or len(q) < 5:
+            raise ArmBusy("The table scan needs the five xArm joint angles and none are readable "
+                          "(qualify/operate read the real arm, the simulate profile uses xarm5sim)")
+        if physical and (r.get("moving") or r.get("error_code")):
+            raise ArmBusy(f"The arm must stand still without a controller error (error code {r.get('error_code')}): "
+                          "clear it on the robot, then retry")
+        return [float(v) for v in q[:5]], bool(physical)
+
+    def table_motion_check(self) -> None:
+        if not isinstance(self.arm, CartesianArm) or not hasattr(self.arm.backend, "fk_mm"):
+            raise ArmBusy("Table-scan motion needs a joint-capable xArm driver: TROVA_ARM=xarm:<ip> (operate profile) "
+                          "or xarm5sim (simulate profile). This profile can only label the current view.")
+        mode = self.arm.gateway.mode
+        if mode == "dry_run":
+            raise ArmBusy("Motion mode is dry_run: the plan is shown and nothing moves. Label the current view "
+                          "without motion, or use the simulate / operate profile.")
+        if mode == "hardware" and not table_scan_mod.hardware_acknowledged():
+            raise ArmBusy("The table scan moves the real arm with the V2 calibration, which is not physically "
+                          "qualified. The operator must set TROVA_TABLE_SCAN_V2_HARDWARE=accept-unqualified-v2 and restart.")
+
+    def table_plan(self):
+        cal, meta = table_scan_mod.load_v2()
+        cfg = table_scan_mod.settings()
+        q, physical = self.table_pose()
+        look_q = load_poses(self.s.data_dir).get("table_look_joints")   # operator-taught look pose wins
+        plan = table_scan_mod.plan_scan(cal, cfg, q, getattr(self.arm, "limits", None) or None, look_q=look_q)
+        return plan, cal, meta, cfg, physical
+
+    def table_start(self, move: bool = True) -> dict:
+        plan, cal, meta, cfg, physical = self.table_plan()
+        with self.table_lock:
+            if self.table_scan.get("status") in ("moving", "capturing", "labelling", "approaching"):
+                raise ArmBusy("A table scan or camera move is already running")
+            self.table_pending = None
+            self.table_frames = {}
+            self.table_scan = {"status": "planned", "move": move, "plan": self._table_plan_public(plan), "v2": meta,
+                               "settings": vars(cfg), "started_at": time.time(), "views": [], "step": None,
+                               "find": None, "selected": None, "reason": None}
+        if not move:                       # label what the camera sees from where the arm stands: no motion
+            self._table_set(status="capturing")
+            threading.Thread(target=self._table_observe_here, args=(cal, cfg), daemon=True).start()
+            self.audit.event("table_scan", action="observe_here", physical_pose=physical)
+            return self.table_public()
+        try:
+            if plan["problems"]:
+                raise ArmBusy("Table scan plan refused: " + "; ".join(plan["problems"]))
+            self.table_motion_check()
+            self._table_set(status="moving")
+            self.start_arm(self.run_table_scan, plan, cal, cfg, job="table_scan", pixels=False)
+        except ArmBusy as e:
+            self._table_set(status="refused", reason=str(e))
+            raise
+        self.audit.event("table_scan", action="start", views=sum(1 for s in plan["steps"] if s.get("capture")),
+                         z_mm=plan["z_mm"], aim_mm=plan["aim_mm"], mode=self.arm.gateway.mode, physical_pose=physical)
+        return self.table_public()
+
+    def _table_go(self, q, cfg) -> bool:
+        """One joint move through CartesianArm.go_joints (gateway, safety box, STOP latch, reached check), slower."""
+        arm, speed = self.arm, self.arm.joint_speed
+        cap = cfg.joint_speed_deg_s
+        try:   # joint speed so the sampled TCP never exceeds the workspace TCP speed (TROVA_ARM_SPEED_MM_S)
+            fk, q0, q1 = arm.backend.fk_mm, np.asarray(arm.backend.joints()[:5], float), np.asarray(q, float)
+            span = float(np.max(np.abs(q1 - q0)))
+            if span > 0.1:
+                pts = [np.asarray(fk(q0 + (q1 - q0) * t)[:3], float) for t in np.linspace(0, 1, 25)]
+                mm_per_deg = max(float(np.linalg.norm(b - a)) for a, b in zip(pts, pts[1:])) / (span / 24)
+                tcp_cap = float(getattr(arm.gateway, "max_speed_mm_s", 100.0) or 100.0)
+                if mm_per_deg > 1e-6:
+                    cap = min(cap, max(1.0, tcp_cap / mm_per_deg))
+        except Exception:  # noqa: BLE001 - no FK/telemetry: keep the configured cap (the gateway still checks)
+            pass
+        arm.joint_speed = min(speed, cap)
+        try:
+            return bool(arm.go_joints([float(v) for v in q]))
+        finally:
+            arm.joint_speed = speed
+
+    def _table_capture(self, label: str, cal) -> dict:
+        frame, _meta = self.capture_frame()
+        q, physical = self.table_pose()
+        h, w = frame.shape[:2]
+        if abs(w / h - cal.width / cal.height) > 0.01:
+            if physical:
+                raise ValueError(f"the camera gives {w}x{h} but V2 was calibrated at {cal.width}x{cal.height} "
+                                 "(a hot Pi drops to 640x480): let it cool or restart its stream, then scan again")
+            frame = cv2.resize(frame, (cal.width, cal.height))   # simulation only: positions are not physical anyway
+        flipped = table_scan_mod.image_flipped(cal, q)
+        if flipped:                     # straight-wrist pose: the camera is rolled 180 deg, show/label it upright
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+        boxes = drop_occluders(find_blobs(frame, None, self.thresh, self.min_area), frame.shape)
+        boxes = sorted(boxes, key=lambda b: -b.area)[:15]
+        path = self.audit.save_image(f"table_{label.replace(' ', '_')}", frame)
+        with self.table_lock:
+            self.table_frames[label] = frame
+        return {"label": label, "q": q, "physical": physical, "image": path, "boxes": boxes, "flipped": flipped,
+                "size": [int(frame.shape[1]), int(frame.shape[0])]}
+
+    def _table_views_public(self, views: list[dict]) -> list[dict]:
+        with self.table_lock:
+            annotated = dict(self.table_scan.get("_annotated") or {})
+        return [{"label": v["label"], "image": v["image"], "physical": v["physical"],
+                 "annotated": annotated.get(v["label"]), "boxes": len(v["boxes"])} for v in views]
+
+    def run_table_scan(self, plan: dict, cal, cfg) -> None:
+        """Arm thread: rise and tilt, then turn J1 view by view and photograph each. Every photo is labelled as soon
+        as it is taken (in the background, while the arm turns on), so the map grows during the turn; the final
+        merge runs when the last move (back to the taught look pose, if any) is done."""
+        from concurrent.futures import ThreadPoolExecutor
+        cancel, views, results = self.cancel, [], []
+        lang, pool, pub = self._table_lang(), ThreadPoolExecutor(max_workers=3), threading.Lock()
+
+        def ordered():
+            order = {v["label"]: i for i, v in enumerate(views)}
+            return sorted(results, key=lambda r: order.get(r[0]["label"], 0))
+
+        def labelled(fut):
+            try:
+                res = fut.result()
+            except Exception as e:  # noqa: BLE001 - one view failed to label: the scan goes on
+                self.audit.event("error", where="table_label_view", error=str(e))
+                return
+            with pub:
+                results.append(res)
+                try:
+                    self._table_publish(ordered(), list(views), cal, cfg, final=False)
+                except Exception as e:  # noqa: BLE001
+                    self.audit.event("error", where="table_label_progress", error=str(e))
+
+        ended = None
+        try:
+            for step in plan["steps"]:
+                if cancel.is_set() or self.stop_latched.is_set():
+                    ended = ("stopped", "STOP")
+                    break
+                self._table_set(step=step["label"])
+                if not self._table_go(step["q"], cfg):
+                    ended = ("stopped" if self.stop_latched.is_set() else "error", self.arm.last_error or self.arm.state)
+                    break
+                if step.get("capture"):
+                    time.sleep(cfg.settle_s)
+                    if cancel.is_set() or self.stop_latched.is_set():
+                        ended = ("stopped", "STOP")
+                        break
+                    view = self._table_capture(step["label"], cal)
+                    views.append(view)
+                    self._table_set(views=self._table_views_public(views))
+                    pool.submit(self._table_describe, view, lang).add_done_callback(labelled)
+        except Exception as e:  # noqa: BLE001 - camera or controller failure ends the scan, the arm stays where it is
+            ended = ("error", f"{type(e).__name__}: {e}")
+            self.audit.event("error", where="table_scan", error=str(e))
+        if ended:                       # the arm holds where it is; labels already running still reach the map
+            self._table_set(status=ended[0], reason=ended[1])
+            pool.shutdown(wait=False)
+            return
+        self._table_set(status="labelling", step=None)
+
+        def finish():
+            pool.shutdown(wait=True)
+            with pub:
+                try:
+                    self._table_publish(ordered(), views, cal, cfg, final=True)
+                except Exception as e:  # noqa: BLE001
+                    self._table_set(status="error", reason=f"labelling failed: {type(e).__name__}: {e}")
+                    self.audit.event("error", where="table_label", error=str(e))
+        threading.Thread(target=finish, daemon=True).start()
+
+    def _table_observe_here(self, cal, cfg) -> None:
+        try:
+            view = self._table_capture("here", cal)
+        except Exception as e:  # noqa: BLE001
+            self._table_set(status="error", reason=f"{type(e).__name__}: {e}")
+            return
+        self._table_set(views=[{"label": "here", "image": view["image"], "physical": view["physical"]}],
+                        status="labelling")
+        self._table_label([view], cal, cfg)
+
+    def _table_describe(self, view: dict, lang: str):
+        """Background labelling of one photo. Fewer than MIN_OPENCV_BOXES OpenCV boxes: Grok draws and names the
+        boxes itself (one call), so a cluttered table still gets labelled boxes."""
+        with self.table_lock:
+            frame = self.table_frames[view["label"]]
+        if len(view["boxes"]) < table_scan_mod.MIN_OPENCV_BOXES:
+            from .inventory import Inventory, _grok_mode
+            boxes, r = table_scan_mod.grok_boxes(self.grok, frame, lang)
+            if boxes:
+                live = _grok_mode(self.grok, r) == "live"
+                view["boxes"], view["box_source"] = boxes, "grok"
+                inv = Inventory(time=time.strftime("%H:%M:%S"), grok_mode=_grok_mode(self.grok, r),
+                                latency_s=r.latency_s)
+                inv.items = {b.id: {"name": b.label, "category": "", "note": "grok box", "name_from_model": True,
+                                    "label_authoritative": live} for b in boxes}
+                return view, inv
+        return view, describe_table(self.grok, frame, view["boxes"], lang)
+
+    def _table_label(self, views: list[dict], cal, cfg) -> None:
+        """Grok names the boxes of every view (in parallel); V2 turns each box into robot mm; sightings merge."""
+        from concurrent.futures import ThreadPoolExecutor
+        lang = self._table_lang()
+        try:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                results = list(pool.map(lambda v: self._table_describe(v, lang), views))
+            self._table_publish(results, views, cal, cfg, final=True)
+        except Exception as e:  # noqa: BLE001
+            self._table_set(status="error", reason=f"labelling failed: {type(e).__name__}: {e}")
+            self.audit.event("error", where="table_label", error=str(e))
+
+    def _table_publish(self, results: list, views: list[dict], cal, cfg, final: bool) -> None:
+        """Merge the labelled views so far into the object map and draw the boxes. final=False: the scan is still
+        turning (status unchanged); final=True: status done."""
+        lang = self._table_lang()
+        sightings, modes, drawn = [], set(), {}
+        for view, inv in results:
+            modes.add(inv.grok_mode)
+            c = table_scan_mod.for_frame(cal, *view["size"])
+            entries = drawn.setdefault(view["label"], [])
+            for b in view["boxes"]:
+                item = inv.items.get(b.id) or {}
+                name = str(item.get("name") or "unknown")
+                box = [float(b.x0), float(b.y0), float(b.x1), float(b.y1)]
+                if name.lower() in table_scan_mod.UNKNOWN:
+                    entries.append({"box": box, "text": "?", "kind": "unknown"})
+                    continue
+                try:
+                    loc = table_scan_mod.locate_box(c, view["q"], box, view.get("flipped", False))
+                except ValueError:       # the box's foot does not meet the table plane (above the horizon)
+                    entries.append({"box": box, "text": name + " (fuori tavolo)", "kind": "off_table"})
+                    continue
+                s = {"view": view["label"], "name": name, "category": item.get("category", ""),
+                     "note": item.get("note", ""), "box": box, "image": view["image"],
+                     "authoritative": bool(item.get("label_authoritative")) and view["physical"], **loc}
+                sightings.append(s)
+                entries.append({"box": box, "text": name, "kind": "mapped", "sighting": s})
+        objects = table_scan_mod.merge(sightings, cfg.merge_mm)
+        annotated = {}
+        for label, entries in drawn.items():   # OpenCV boxes + Grok labels + map number and mm on every photo
+            for e in entries:
+                s = e.pop("sighting", None)
+                if s is not None and objects:
+                    xy = np.asarray(s["centre_mm"][:2])
+                    o = min(objects, key=lambda m: float(np.linalg.norm(np.asarray(m["centre_mm"][:2]) - xy)))
+                    e["text"] = f"#{o['id']} {e['text']}  x{o['centre_mm'][0]:.0f} y{o['centre_mm'][1]:.0f}"
+            with self.table_lock:
+                frame = self.table_frames.get(label)
+            if frame is not None:
+                annotated[label] = self.audit.save_image(f"table_{label.replace(' ', '_')}_boxes",
+                                                         table_scan_mod.annotate_view(frame, entries))
+        with self.table_lock:
+            self.table_scan["_annotated"] = {**(self.table_scan.get("_annotated") or {}), **annotated}
+        views_public = self._table_views_public(views)
+        physical = all(v["physical"] for v in views)
+        for o in objects:
+            o["physical"] = physical
+            o["place"] = table_scan_mod.place_words(o, self._table_center(), lang)
+        with self.table_lock:
+            frames = dict(self.table_frames)
+        sheet = table_scan_mod.contact_sheet(objects, frames) if objects else None
+        names = ", ".join(f"{o['id']} {o['name']}" for o in objects)
+        summary = ((f"Ho visto {len(objects)} oggetti: {names}." if objects else "Non ho visto oggetti sul tavolo.")
+                   if lang == "it" else
+                   (f"I saw {len(objects)} objects: {names}." if objects else "I saw no objects on the table."))
+        if not physical:
+            summary += (" Posizioni simulate: il braccio non si è mosso davvero." if lang == "it"
+                        else " Simulated positions: the real arm did not move.")
+        if not final:
+            summary = (f"Finora ({len(results)}/{len(views)} foto etichettate): " if lang == "it"
+                       else f"So far ({len(results)}/{len(views)} photos labelled): ") + summary
+        sheet_path = self.audit.save_image("table_sheet", sheet) if sheet is not None and final else None
+        with self.table_lock:
+            self.table_objects, self.table_sheet = objects, sheet
+            self.table_scan.update(summary=summary, grok_mode=sorted(modes), physical_positions=physical,
+                                   views=views_public)
+            if final:
+                self.table_scan.update(status="done", finished_at=time.time(), sheet=sheet_path)
+        if final:
+            self.audit.event("table_scan", action="mapped",
+                             objects=[{k: o[k] for k in ("id", "name", "centre_mm")} for o in objects],
+                             grok_mode=sorted(modes), physical_positions=physical)
+
+    def _table_center(self) -> float:
+        """The table-middle bearing the last scan used (from the start pose unless set), for left/right words."""
+        center = (self.table_scan.get("plan") or {}).get("center_deg")
+        if center is None:
+            center = table_scan_mod.settings().center_deg
+        return float(center) if center is not None else 0.0
+
+    def _table_lang(self) -> str:
+        return os.getenv("TROVA_TABLE_SCAN_LANG", "it").strip() or "it"
+
+    def table_find(self, text: str) -> dict:
+        lang, objects = self._table_lang(), list(self.table_objects)
+        if not objects:
+            return {"status": "not_found", "spoken_message": "Prima scansiona il tavolo: non ho ancora una mappa."
+                    if lang == "it" else "Scan the table first: there is no object map yet."}
+        res = table_scan_mod.find(self.grok, text, objects, self.table_sheet, self._table_center(), lang)
+        by_id = {o["id"]: o for o in objects}
+        if res["status"] == "found":
+            o = by_id[res["object_id"]]
+            spoken = (f"Trovato: numero {o['id']}, {o['name']}, {o['place']}. Vuoi che porti la camera sopra?"
+                      if lang == "it" else f"Found number {o['id']}, {o['name']}, {o['place']}. Shall I bring the camera above it?")
+        elif res["status"] == "clarify":
+            spoken = res["question"]
+        else:
+            spoken = (f"Non trovo \"{text}\" tra gli oggetti scansionati." if lang == "it"
+                      else f"I can't find \"{text}\" among the scanned objects.")
+        with self.table_lock:
+            self.table_pending = None
+            self.table_scan["find"] = {"request": text, **res, "spoken_message": spoken}
+            self.table_scan["selected"] = res.get("object_id")
+        self.audit.event("table_scan", action="find", request=text, status=res["status"], matches=res["matches"],
+                         grok_mode=res.get("grok_mode"))
+        out = {**res, "spoken_message": spoken, "objects": [by_id[i] for i in res["matches"]]}
+        if res["status"] == "found":
+            out.update(self._table_go_to(res["object_id"], f"Trovato: numero {by_id[res['object_id']]['id']}, "
+                                         f"{by_id[res['object_id']]['name']}. " if lang == "it" else
+                                         f"Found number {res['object_id']}. "))
+            with self.table_lock:
+                if self.table_scan.get("find"):
+                    self.table_scan["find"]["spoken_message"] = out["spoken_message"]
+        return out
+
+    def _table_go_to(self, object_id: int, prefix: str) -> dict:
+        """After a find/choice: plan 'over it at the same height' at once (no motion) and ask one confirmation.
+        TROVA_TABLE_SCAN_AUTO_GO=1 (operator setting, .env) executes it without asking; STOP still voids it."""
+        try:
+            prop = self.table_propose(object_id)
+        except ArmBusy as e:
+            return {"approach": "refused", "spoken_message": prefix + str(e)}
+        if prop["status"] != "awaiting_confirmation":
+            return {"approach": prop["status"], "spoken_message": prefix + prop["spoken_message"]}
+        if os.getenv("TROVA_TABLE_SCAN_AUTO_GO", "").strip() == "1":
+            try:
+                self.table_confirm(prop["proposal_id"])
+                return {"approach": "moving",
+                        "spoken_message": prefix + ("Mi muovo." if self._table_lang() == "it" else "Moving.")}
+            except ArmBusy as e:
+                return {"approach": "refused", "spoken_message": prefix + str(e)}
+        return {"approach": "awaiting_confirmation", "proposal_id": prop["proposal_id"],
+                "spoken_message": prefix + prop["spoken_message"]}
+
+    def table_choose(self, object_id: int | None = None, answer: str | None = None) -> dict:
+        lang, objects = self._table_lang(), list(self.table_objects)
+        by_id = {o["id"]: o for o in objects}
+        candidates = ((self.table_scan.get("find") or {}).get("candidates")) or list(by_id)
+        if object_id is None and answer:
+            object_id = table_scan_mod.resolve_choice(answer, candidates, objects, self._table_center())
+        if object_id not in by_id:
+            return {"status": "clarify", "spoken_message": "Non ho capito quale: dimmi il numero dell'oggetto."
+                    if lang == "it" else "I didn't get which one: tell me the object's number."}
+        o = by_id[object_id]
+        with self.table_lock:
+            self.table_pending = None
+            self.table_scan["selected"] = object_id
+            if self.table_scan.get("find"):
+                self.table_scan["find"] = {**self.table_scan["find"], "status": "chosen", "object_id": object_id}
+        self.audit.event("table_scan", action="choose", object_id=object_id, name=o["name"])
+        return {"status": "selected", "object_id": object_id, "object": o,
+                **self._table_go_to(object_id, f"Selezionato il numero {object_id}: {o['name']}. " if lang == "it"
+                                    else f"Selected number {object_id}: {o['name']}. ")}
+
+    def table_propose(self, object_id: int | None = None) -> dict:
+        """Plan 'camera above the object' and hold it for one explicit confirmation (60 s, single use)."""
+        lang = self._table_lang()
+        object_id = object_id if object_id is not None else self.table_scan.get("selected")
+        o = next((x for x in self.table_objects if x["id"] == object_id), None)
+        if o is None:
+            raise ArmBusy("Select an object from the table scan first")
+        cal, _meta = table_scan_mod.load_v2()
+        cfg = table_scan_mod.settings()
+        q, physical = self.table_pose()
+        if bool(o.get("physical")) != physical:
+            raise ArmBusy("The map was made with " + ("real" if o.get("physical") else "simulated")
+                          + " joints but the arm now reads " + ("real" if physical else "simulated")
+                          + " joints: scan the table again in this profile")
+        limits = getattr(self.arm, "limits", None) or None
+        level = os.getenv("TROVA_TABLE_SCAN_APPROACH", "level").strip().lower() != "hover"
+        try:      # level (default): same TCP height, over it or pointing at it; hover: the old 30 cm descent
+            plan = (table_scan_mod.plan_level_over(cal, cfg, q, o["centre_mm"], limits) if level else
+                    table_scan_mod.plan_camera_over(cal, cfg, q, o["centre_mm"], limits))
+        except ValueError as e:
+            plan = {"problems": [str(e)]}
+        if plan["problems"]:
+            msg = "Camera move refused: " + "; ".join(plan["problems"])
+            self._table_set(approach={"status": "refused", "object_id": object_id, "spoken_message": msg})
+            self.audit.event("table_scan", action="approach_refused", object_id=object_id, problems=plan["problems"])
+            raise ArmBusy(msg)
+        x, y, _z = o["centre_mm"]
+        if plan.get("kind") == "level_over":
+            how = ("mi metto sopra" if plan["above"] else "lo indico da qui (troppo lontano per andarci sopra)")
+            how_en = ("I go right above it" if plan["above"] else "I point at it from here (too far to go above)")
+            summary = (f"Numero {object_id}, {o['name']} (x {x:.0f}, y {y:.0f} mm): {how}, alla stessa altezza "
+                       f"Z {plan['z_mm']:.0f} mm, camera {plan['look_down_deg']:.0f}° in giù. Confermi?"
+                       if lang == "it" else
+                       f"Number {object_id}, {o['name']} (x {x:.0f}, y {y:.0f} mm): {how_en}, at the same height "
+                       f"Z {plan['z_mm']:.0f} mm, camera {plan['look_down_deg']:.0f} deg down. Confirm?")
+        else:
+            summary = (f"Porto la camera a {cfg.hover_mm / 10:.0f} cm sopra il numero {object_id}, {o['name']} "
+                       f"(x {x:.0f}, y {y:.0f} mm), in due movimenti lenti. Confermi?"
+                       if lang == "it" else
+                       f"I will bring the camera {cfg.hover_mm / 10:.0f} cm above number {object_id}, {o['name']} "
+                       f"(x {x:.0f}, y {y:.0f} mm), in two slow moves. Confirm?")
+        p = {"id": uuid.uuid4().hex, "object_id": object_id, "plan": plan, "start_q": q, "physical": physical,
+             "issued": time.time(), "expires_at": time.time() + 60, "seq": self.stop_sequence, "summary": summary}
+        try:
+            self.table_motion_check()
+            executable, reason = True, None
+        except ArmBusy as e:
+            executable, reason = False, str(e)
+        with self.table_lock:
+            self.table_pending = p if executable else None
+        self.audit.event("table_scan", action="approach_planned", object_id=object_id, executable=executable,
+                         target_mm=plan["target_mm"], camera_mm=plan["camera_mm"])
+        out = {"status": "awaiting_confirmation" if executable else "plan_only", "object_id": object_id,
+               "proposal_id": p["id"] if executable else None, "expires_at": p["expires_at"],
+               "plan": self._table_plan_public(plan), "spoken_message": summary if executable else
+               (f"Piano pronto ma non eseguibile qui: {reason}" if lang == "it" else f"Plan ready but not executable here: {reason}")}
+        self._table_set(approach={"status": out["status"], "object_id": object_id, "spoken_message": out["spoken_message"],
+                                  "camera_mm": plan["camera_mm"], "tcp_mm": plan["tcp_mm"]})
+        return out
+
+    def table_confirm(self, proposal_id: str) -> dict:
+        with self.table_lock:
+            p = self.table_pending
+            if not p or not hmac.compare_digest(str(proposal_id), p["id"]):
+                raise ArmBusy("No matching camera-move proposal: ask for the move again")
+            self.table_pending = None                 # single use, even if a check below refuses
+        if time.time() > p["expires_at"] or p["seq"] != self.stop_sequence:
+            raise ArmBusy("The proposal expired or a STOP happened since: ask for the move again")
+        q, physical = self.table_pose()
+        if physical != p["physical"] or max(abs(a - b) for a, b in zip(q, p["start_q"])) > 1.0:
+            raise ArmBusy("The arm moved since the plan: ask for the move again")
+        self.table_motion_check()
+        cfg = table_scan_mod.settings()
+        self._table_set(status="approaching", reason=None)
+        try:
+            self.start_arm(self._table_run_approach, p, cfg, job="table_approach", pixels=False)
+        except ArmBusy as e:
+            self._table_set(status="refused", reason=str(e))
+            raise
+        self.audit.event("table_scan", action="approach_confirmed", object_id=p["object_id"],
+                         target_mm=p["plan"]["target_mm"], mode=self.arm.gateway.mode)
+        return {"status": "moving", "object_id": p["object_id"],
+                "spoken_message": "Mi muovo." if self._table_lang() == "it" else "Moving."}
+
+    def _table_run_approach(self, p: dict, cfg) -> None:
+        for step in p["plan"]["steps"]:
+            if self.cancel.is_set() or self.stop_latched.is_set():
+                self._table_set(status="stopped", reason="STOP")
+                return
+            self._table_set(step=step["label"])
+            if not self._table_go(step["q"], cfg):
+                self._table_set(status="stopped" if self.stop_latched.is_set() else "error",
+                                reason=self.arm.last_error or self.arm.state)
+                return
+        view = None
+        try:
+            time.sleep(cfg.settle_s)
+            frame, _meta = self.capture_frame()
+            cal = table_scan_mod.for_frame(table_scan_mod.load_v2()[0], frame.shape[1], frame.shape[0])
+            if table_scan_mod.image_flipped(cal, self.table_pose()[0]):
+                frame = cv2.rotate(frame, cv2.ROTATE_180)          # same upright convention as the scan photos
+            view = self.audit.save_image(f"table_over_{p['object_id']}", frame)
+        except Exception as e:  # noqa: BLE001 - the move finished; only the confirmation picture failed
+            self.audit.event("error", where="table_over_picture", error=str(e))
+        self._table_set(status="over_object", step=None, over={"object_id": p["object_id"], "image": view,
+                                                               "target_mm": p["plan"]["target_mm"],
+                                                               "camera_mm": p["plan"]["camera_mm"]})
+        self.audit.event("table_scan", action="over_object", object_id=p["object_id"], image=view)
+
     def run_lift(self, wps: list) -> None:
         """Feature 7: if the lift does not finish, block automatic moves until the operator frees the arm."""
         self.lift_interrupted = True
@@ -1077,7 +1615,11 @@ class State:
                 and not pose_changed(pose_before.get('pose6'), pose.get('pose6'), mm=1, deg=.1)
                 and np.max(np.abs(np.subtract(pose_before['joints'], pose['joints']))) <= .1)
             if pose.get('source') == 'telemetry' and not capture_stationary:
-                pose = dict(pose, moving=True)
+                # Still treated as moving (fail closed); only the reason is kept so the operator is told what to fix.
+                code = pose.get('error_code') if pose.get('error_code') else pose_before.get('error_code')
+                why = (f"the controller reports error code {code}: clear it on the robot (staff), then take a new picture"
+                       if code else "the arm moved, or its pose could not be read, while the picture was taken")
+                pose = dict(pose, moving=True, capture_untrusted=why)
             size = [int(frame.shape[1]), int(frame.shape[0])]
             if self.override is None:
                 self.frame_size = size
@@ -1107,6 +1649,7 @@ class State:
                 "pose": {"state": pose.get("arm_state"), "tip_mm": pose.get("tip_mm"),
                          "tcp_mm": pose.get("status_tcp_mm"), "pose6": pose.get("pose6"),
                          "source": pose.get("source"), "moving": pose.get("moving"),
+                         "capture_untrusted": pose.get("capture_untrusted"),
                          "joints": pose.get("joints")},
                 "grok_mode": inv.grok_mode, "tracks_reset": reset,
                 "occluded": occl, "objects": objects,
@@ -1559,6 +2102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "tuning": {"thresh": st.thresh, "min_area_frac": st.min_area},
             "lang": st.s.lang, "voice_available": not st.grok.mock, "inventory": st.inventory, "tour": st.tour,
             "lift_allowed": lift_allowed(), "watch": st.watch.as_dict(), "batch": st.batch, "room": st.room,
+            "table_scan": st.table_public(),
             "light": st.light.status(), "first_run": st.first_run, "approach": st.approach_view() if st.first_run else None,
             "vision": st.vision.assess(size),
             "vision_progress": st.vision.progress(),
@@ -2034,8 +2578,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         """Record the arm's current joint angles as a named pose: home_joints (with the camera on the arm: the
         survey pose, where the camera sees the whole table) or look_joints (the room scan starts here)."""
         arm = _need_cartesian()
-        if name not in ("home_joints", "look_joints"):
-            raise HTTPException(400, "name must be home_joints or look_joints")
+        if name not in ("home_joints", "look_joints", "table_look_joints"):
+            raise HTTPException(400, "name must be home_joints, look_joints or table_look_joints (table scan)")
         try:
             q = arm.backend.joints()
         except NotImplementedError as e:
@@ -2289,7 +2833,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
         return fail_log.summary(st.cases_dir / "failures.jsonl")
 
     def _save_case(case: dict) -> None:
-        with (st.cases_dir / "finds.jsonl").open("a") as f:
+        with (st.cases_dir / "finds.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(case, ensure_ascii=False) + "\n")
 
     # ------------------------------------------------------------------ feature 1: inventory map + M1 snapshot
@@ -2755,6 +3299,58 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
 
     preflight.register(app, st)      # feature 9: GET /api/preflight
     history.register(app, st, STATIC)   # feature 13: /history, /api/history(.csv), /api/history/verify
+
+    # ------------------------------------------------------------------ voice table scan with the V2 camera model
+    @app.get("/api/table_scan")
+    def api_table_scan():
+        return st.table_public()
+
+    @app.post("/api/table_scan/plan")
+    def api_table_scan_plan():
+        """The scan path from the current joints, with its checks. Never moves the arm."""
+        try:
+            plan, _cal, meta, cfg, physical = st.table_plan()
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e)) from None
+        try:
+            st.table_motion_check()
+            executable, reason = not plan["problems"], None if not plan["problems"] else "; ".join(plan["problems"])
+        except ArmBusy as e:
+            executable, reason = False, str(e)
+        return {"plan": st._table_plan_public(plan), "v2": meta, "settings": vars(cfg), "physical_pose": physical,
+                "executable": executable, "reason": reason, "moved": False}
+
+    @app.post("/api/table_scan/start")
+    def api_table_scan_start(r: TableStartReq | None = None):
+        """Rise to TROVA_TABLE_SCAN_Z_MM, tilt down, turn J1 view by view, photograph, then Grok + V2 map every object.
+        move=false: label the current view only. Poll GET /api/table_scan."""
+        try:
+            return st.table_start(move=True if r is None else r.move)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.post("/api/table_scan/find")
+    def api_table_scan_find(r: TableFindReq):
+        try:
+            return st.table_find(r.text.strip())
+        except GrokError as e:
+            return fail(e, "table_find")
+
+    @app.post("/api/table_scan/choose")
+    def api_table_scan_choose(r: TableChooseReq):
+        return st.table_choose(r.object_id, r.answer)
+
+    @app.post("/api/table_scan/approach")
+    def api_table_scan_approach(r: TableApproachReq | None = None):
+        """Plan 'camera above the chosen object'; returns a proposal to confirm. Never moves the arm."""
+        try:
+            return st.table_propose(None if r is None else r.object_id)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.post("/api/table_scan/confirm")
+    def api_table_scan_confirm(r: TableConfirmReq):
+        return st.table_confirm(r.proposal_id)
 
     # ------------------------------------------------------------------ feature 14: look around the room
     @app.post("/api/room/find")

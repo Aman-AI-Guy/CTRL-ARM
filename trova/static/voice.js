@@ -11,6 +11,7 @@ const TrovaVoice = (() => {
   let playTime = 0, sources = [], toolRuns = [], cfg = null, h = {};
   let lastStop = 0, userLine = '', botLine = '', buf = [], bufLen = 0;
   let proposal = null, confirmationHeard = false, serialTools = Promise.resolve();
+  let tableProposal = null;                 // table scan: camera-above move awaiting an explicit spoken yes
   let selectionQuestion = false;
   let tourPending = false;
 
@@ -178,7 +179,53 @@ const TrovaVoice = (() => {
               requested_mm: d.requested && d.requested.distance_mm,
               software_stop_is_not_safety_rated: true, collision_avoidance: false};
     },
-    async stop_arm() { proposal = null; confirmationHeard = false; const d = await api('/api/arm/stop');
+    // ---- table scan with the V2 camera model (docs/TABLE_SCAN_V2.md)
+    async scan_table({move} = {}) {
+      tableProposal = null;
+      const s = await api('/api/table_scan/start', {move: move !== false}, true);
+      if (s.error) return {status: 'refused', spoken_message: s.error};
+      h.onRefresh && h.onRefresh();
+      for (let i = 0; i < 300; i++) {          // moving + Grok labelling: up to about five minutes
+        await new Promise(r => setTimeout(r, 1500));
+        let d = {}; try { d = await (await fetch('/api/table_scan')).json(); } catch (e) { continue; }
+        if (!['planned', 'moving', 'capturing', 'labelling'].includes(d.status)) {
+          h.onRefresh && h.onRefresh();
+          return {status: d.status, spoken_message: d.summary || d.reason || d.status,
+                  objects: (d.objects || []).map(o => ({id: o.id, name: o.name, place: o.place})),
+                  physical_positions: !!d.physical_positions};
+        }
+      }
+      return {status: 'error', spoken_message: 'The table scan took too long.'};
+    },
+    async find_on_table({description}) {
+      tableProposal = null;
+      const d = await api('/api/table_scan/find', {text: description}, true); h.onRefresh && h.onRefresh();
+      if (d.error) return {status: 'error', spoken_message: d.error};
+      return {status: d.status, spoken_message: d.spoken_message, question: d.question, candidates: d.candidates,
+              object_id: d.object_id};
+    },
+    async choose_table_object({object_id, answer}) {
+      tableProposal = null;
+      const body = {}; if (object_id != null && object_id !== '') body.object_id = Number(object_id); if (answer) body.answer = answer;
+      const d = await api('/api/table_scan/choose', body, true); h.onRefresh && h.onRefresh();
+      return d.error ? {status: 'error', spoken_message: d.error} : {status: d.status, object_id: d.object_id, spoken_message: d.spoken_message};
+    },
+    async move_camera_above({object_id} = {}) {
+      confirmationHeard = false;
+      const body = {}; if (object_id != null && object_id !== '') body.object_id = Number(object_id);
+      const d = await api('/api/table_scan/approach', body, true); h.onRefresh && h.onRefresh();
+      if (d.error) { tableProposal = null; return {status: 'refused', spoken_message: d.error}; }
+      tableProposal = d.proposal_id ? {id: d.proposal_id, expires_at: d.expires_at} : null;
+      return {status: d.status, proposal_id: d.proposal_id, spoken_message: d.spoken_message};
+    },
+    async confirm_camera_move({proposal_id}) {
+      if (!confirmationHeard || !tableProposal || tableProposal.id !== proposal_id || Date.now() / 1000 >= tableProposal.expires_at)
+        return {status: 'refused', spoken_message: 'Nessuna proposta valida confermata a voce: movimento non eseguito.'};
+      confirmationHeard = false; tableProposal = null;
+      const d = await api('/api/table_scan/confirm', {proposal_id}, true); h.onRefresh && h.onRefresh();
+      return d.error ? {status: 'refused', spoken_message: d.error} : {status: d.status, spoken_message: d.spoken_message};
+    },
+    async stop_arm() { proposal = null; tableProposal = null; confirmationHeard = false; const d = await api('/api/arm/stop');
       return {...d, spoken_message: d.error || 'STOP requested.', software_stop_is_not_safety_rated: true}; },
     async arm_home() { const d = await api('/api/arm/home'); return {...d, spoken_message: d.error || 'Home command submitted; completion is not verified.'}; },
     async search_other_rooms({description}) {
@@ -191,11 +238,24 @@ const TrovaVoice = (() => {
     const t = ' ' + text.toLowerCase().replace(/[^a-zà-ù ]/g, ' ') + ' ';
     if (cfg.stop_words.some(w => t.includes(' ' + w + ' ')) && Date.now() - lastStop > 1500) {
       lastStop = Date.now();
-      proposal = null; confirmationHeard = false;
+      proposal = null; tableProposal = null; confirmationHeard = false;
       fetch('/api/arm/stop', {method: 'POST'});          // no model in the loop
       status('STOP heard: arm halted');
       h.onRefresh && h.onRefresh();
     }
+  }
+
+  // Half duplex. Browser echo cancellation does not cover speechSynthesis output, so the microphone heard Trova's
+  // spoken result, Grok transcribed it as the operator and answered itself. While Trova speaks (and a short tail for
+  // room echo) the microphone sends silence. Exception: while the arm moves the microphone always stays open, so a
+  // spoken stop word is never muted. The on-screen STOP and the physical e-stop are unaffected.
+  const ECHO_TAIL_MS = 700;
+  let quietUntil = 0;
+  function echoGuard() {
+    const tts = typeof speechSynthesis !== 'undefined' && (speechSynthesis.speaking || speechSynthesis.pending);
+    if (tts) quietUntil = Date.now() + ECHO_TAIL_MS;
+    if (h && h.armMoving && h.armMoving()) return false;
+    return Date.now() < quietUntil;
   }
 
   function stopPlayback() { sources.forEach(s => { try { s.stop(); } catch (e) {} }); sources = []; playTime = ctx ? ctx.currentTime : 0; }
@@ -219,7 +279,7 @@ const TrovaVoice = (() => {
         userLine = e.transcript || e.text || userLine; heardStop(userLine); line('you', userLine, false); break;
       case 'conversation.item.input_audio_transcription.completed':
         userLine = e.transcript || e.text || userLine; heardStop(userLine); line('you', userLine, true); log('you', userLine);
-        confirmationHeard = !!proposal && /^(s[iì]|yes|ok|procedi|proceed|go ahead)([,! .]+(procedi|proceed))?[.! ]*$/i.test(userLine.trim());
+        confirmationHeard = !!(proposal || tableProposal) && /^(s[iì]|yes|ok|procedi|proceed|go ahead)([,! .]+(procedi|proceed))?[.! ]*$/i.test(userLine.trim());
         break;
       // Spoken status comes from backend tool results. Discard speculative model audio/text.
       case 'response.output_audio_transcript.delta':
@@ -280,6 +340,7 @@ const TrovaVoice = (() => {
       buf.push(resample(ev.data, ctx.sampleRate)); bufLen += buf[buf.length - 1].length;
       if (bufLen >= RATE / 10) {
         const f = new Float32Array(bufLen); let o = 0; buf.forEach(b => { f.set(b, o); o += b.length; }); buf = []; bufLen = 0;
+        if (echoGuard()) f.fill(0);          // Trova is talking: send silence so its own voice is not heard as "you"
         const i16 = new Int16Array(f.length);
         for (let i = 0; i < f.length; i++) i16[i] = Math.max(-1, Math.min(1, f[i])) * 0x7fff;
         send({type: 'input_audio_buffer.append', audio: b64(i16)});
@@ -292,7 +353,7 @@ const TrovaVoice = (() => {
     try { ws && ws.close(); } catch (e) {}
     try { mic && mic.getTracks().forEach(t => t.stop()); } catch (e) {}
     try { ctx && ctx.close(); } catch (e) {}
-    ws = ctx = mic = node = sink = null; sources = []; toolRuns = []; proposal = null; confirmationHeard = false; status('voice off');
+    ws = ctx = mic = node = sink = null; sources = []; toolRuns = []; proposal = null; tableProposal = null; confirmationHeard = false; status('voice off');
   }
 
   return {start, stop, running: () => !!ws,
