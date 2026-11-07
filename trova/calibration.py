@@ -12,6 +12,7 @@ simulated arm works out of the box.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from itertools import combinations
 from pathlib import Path
@@ -91,8 +92,11 @@ class Calibration:
                 "error_mm": None if not self.ok else round(self.error_mm(), 2)}
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps({"source": self.source, "points": self.points, "size": self.size, "pose": self.pose},
+        p = Path(path)
+        tmp = p.with_suffix(f"{p.suffix}.tmp.{os.getpid()}")
+        tmp.write_text(json.dumps({"source": self.source, "points": self.points, "size": self.size, "pose": self.pose},
                                    indent=2))
+        os.replace(tmp, p)
 
     @classmethod
     def load(cls, path: Path) -> "Calibration | None":
@@ -102,7 +106,7 @@ class Calibration:
             d = json.loads(path.read_text())
             c = cls(points=d["points"], source=d.get("source", "clicks"), size=d.get("size"), pose=d.get("pose"))
             c.fit()
-        except (ValueError, KeyError, TypeError):   # a bad saved file must not stop the app from starting
+        except (ValueError, KeyError, TypeError, IndexError, OSError, cv2.error):   # a bad saved file must not stop the app from starting
             return None
         return c
 
@@ -118,9 +122,13 @@ def detect_aruco(frame: np.ndarray) -> dict[int, tuple[float, float]]:
 
 def load_marker_positions(path: Path, table_w_mm: float, table_h_mm: float) -> dict[int, tuple[float, float]]:
     """Marker centre positions in mm. Default: ids 0-3 at the table corners, clockwise from top-left."""
+    defaults = {0: (0.0, 0.0), 1: (table_w_mm, 0.0), 2: (table_w_mm, table_h_mm), 3: (0.0, table_h_mm)}
     if path.exists():
-        return {int(k): tuple(v) for k, v in json.loads(path.read_text()).items() if not k.startswith("_")}
-    return {0: (0.0, 0.0), 1: (table_w_mm, 0.0), 2: (table_w_mm, table_h_mm), 3: (0.0, table_h_mm)}
+        try:
+            return {int(k): tuple(v) for k, v in json.loads(path.read_text()).items() if not k.startswith("_")}
+        except (ValueError, TypeError, KeyError, IndexError, OSError):
+            return defaults
+    return defaults
 
 
 def calibrate_aruco(frame: np.ndarray, positions_mm: dict[int, tuple[float, float]]) -> Calibration:
