@@ -411,7 +411,14 @@ class State:
             self.light = NoLight()
             self.audit.event("error", where="light", error=str(e))
         self.batch_path = s.data_dir / "batch.json"          # feature 11: the batch being cleared for
-        self.batch = json.loads(self.batch_path.read_text()) if self.batch_path.exists() else {"lot": os.getenv("TROVA_BATCH", "")}
+        self.batch = {"lot": os.getenv("TROVA_BATCH", "")}
+        if self.batch_path.exists():
+            try:
+                loaded_batch = json.loads(self.batch_path.read_text())
+                if isinstance(loaded_batch, dict):
+                    self.batch = loaded_batch
+            except (ValueError, TypeError, KeyError, OSError):
+                pass
         self.labels: dict | None = None
         self.room: dict | None = None          # feature 14: last room scan (status, views, result)
         self.vision = make_router(VisionStore.load(s.data_dir / "vision_calib.json"), s.data_dir,
@@ -3565,7 +3572,9 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding
     @app.post("/api/batch")
     def api_batch(lot: str = Form(""), product: str = Form("")):
         st.batch = {"lot": lot.strip().upper(), "product": product.strip()}
-        st.batch_path.write_text(json.dumps(st.batch))
+        tmp = st.batch_path.with_suffix(f"{st.batch_path.suffix}.tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(st.batch))
+        os.replace(tmp, st.batch_path)
         st.audit.event("batch", **st.batch)
         return st.batch
 

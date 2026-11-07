@@ -11,6 +11,7 @@ Zones are saved in data/zones.json (image coordinates, so redraw them if the cam
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -35,13 +36,23 @@ class Zone:
 
 
 def load_zones(path: Path) -> list[Zone]:
-    if not Path(path).exists():
+    p = Path(path)
+    if not p.exists():
         return []
-    return [Zone(**z) for z in json.loads(Path(path).read_text())]
+    try:
+        data = json.loads(p.read_text())
+        if not isinstance(data, list):
+            return []
+        return [Zone(**z) for z in data]
+    except (ValueError, TypeError, KeyError, OSError):
+        return []
 
 
 def save_zones(path: Path, zones: list[Zone]) -> None:
-    Path(path).write_text(json.dumps([asdict(z) for z in zones], indent=2))
+    p = Path(path)
+    tmp = p.with_suffix(f"{p.suffix}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps([asdict(z) for z in zones], indent=2))
+    os.replace(tmp, p)
 
 
 def _allowed(name: str, allowed: list[str]) -> bool:
